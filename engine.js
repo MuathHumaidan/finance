@@ -1107,12 +1107,37 @@ function listCycles(store, today) {
 }
 function currentCycle(store, today) { today = today || todayISO(); return listCycles(store, today).find(c => c.start <= today && c.end >= today) || null; }
 function previousPeriod(store, period) {
+  if (period.kind === 'week' || period.kind === 'year') return shiftPeriod(store, period, -1);
   if (period.kind === 'custom') { const len = daysBetween(period.start, period.end); return { start: addDays(period.start, -(len + 1)), end: addDays(period.start, -1), kind: 'custom' }; }
   const cs = listCycles(store, period.end > todayISO() ? period.end : undefined).slice().reverse();
   const i = cs.findIndex(c => c.start === period.start);
   if (i > 0) return cs[i - 1];
   const len = daysBetween(period.start, period.end);
   return { start: addDays(period.start, -(len + 1)), end: addDays(period.start, -1), kind: 'custom' };
+}
+
+// الأسبوع يبدأ الأحد وينتهي السبت. السنة ميلادية.
+function weekOf(date) { const wd = new Date(dateToUTC(date)).getUTCDay(); const start = addDays(date, -wd); return { start, end: addDays(start, 6), kind: 'week' }; }
+function yearOf(date) { const y = date.slice(0, 4); return { start: `${y}-01-01`, end: `${y}-12-31`, kind: 'year' }; }
+function cycleOf(store, date) {
+  const today = todayISO();
+  return listCycles(store, date > today ? date : today).find(c => c.start <= date && c.end >= date) || null;
+}
+function periodOf(store, kind, date) {
+  date = date || todayISO();
+  if (kind === 'week') return weekOf(date);
+  if (kind === 'year') return yearOf(date);
+  return cycleOf(store, date);
+}
+function shiftPeriod(store, period, dir) {
+  if (period.kind === 'week') return weekOf(addDays(period.start, 7 * dir));
+  if (period.kind === 'year') return yearOf(`${Number(period.start.slice(0, 4)) + dir}-01-01`);
+  if (period.kind === 'cycle' || period.kind === 'month') {
+    if (dir < 0) return previousPeriod(store, period);
+    return cycleOf(store, addDays(period.end, 1));
+  }
+  const len = daysBetween(period.start, period.end) + 1;
+  return { start: addDays(period.start, len * dir), end: addDays(period.end, len * dir), kind: 'custom' };
 }
 
 /* ---------- 14. الأرقام والتحليل ---------- */
@@ -1211,6 +1236,64 @@ function computePeriod(store, period) {
   r.coverage = coverageFor(store, period);
   r.bridge = auditBridge(store, period, txs, r);
   return r;
+}
+
+// أجزاء أثر العملية على الإنفاق الحقيقي، بنفس توزيع computePeriod على التصنيفات
+function spendParts(store, tx) {
+  if (isExcluded(store, tx)) return [];
+  const eff = spendEffect(tx), fee = feeOf(tx), out = [];
+  if (eff !== 0) out.push({ cat: tx.transactionType === 'PersonTransfer' && !tx.categoryId ? '__person' : (tx.categoryId || '__none'), sub: tx.subcategoryId || null, amt: eff });
+  if (fee) out.push({ cat: 'fees', sub: tx.feeSubcategoryId || 'fees.bank', amt: fee });
+  return out;
+}
+function spendIn(store, range) {
+  let s = 0, n = 0;
+  store.all('transactions').forEach(t => { if (!inPeriod(t, range)) return; n++; spendParts(store, t).forEach(p => { s += p.amt; }); });
+  return { spend: round2(s), txCount: n };
+}
+// سلسلة الإنفاق للرسم: لكل يوم (أو لكل شهر) المجموع وتوزيعه على التصنيفات
+function spendSeries(store, period, bucket) {
+  const buckets = [], idx = new Map();
+  if (bucket === 'month') {
+    let [y, m] = period.start.split('-').map(Number); const [ey, em] = period.end.split('-').map(Number);
+    while (y < ey || (y === ey && m <= em)) {
+      const b = { key: `${y}-${pad2(m)}`, start: isoDate(y, m, 1), end: isoDate(y, m, daysInMonth(y, m)), total: 0, cats: {} };
+      idx.set(b.key, b); buckets.push(b); m++; if (m > 12) { m = 1; y++; }
+    }
+  } else {
+    for (let d = period.start; d <= period.end; d = addDays(d, 1)) { const b = { key: d, start: d, end: d, total: 0, cats: {} }; idx.set(d, b); buckets.push(b); }
+  }
+  store.all('transactions').forEach(t => {
+    if (!inPeriod(t, period)) return;
+    const d = txDate(t), b = idx.get(bucket === 'month' ? d.slice(0, 7) : d); if (!b) return;
+    spendParts(store, t).forEach(p => { b.total += p.amt; b.cats[p.cat] = (b.cats[p.cat] || 0) + p.amt; });
+  });
+  buckets.forEach(b => { b.total = round2(b.total); Object.keys(b.cats).forEach(k => { b.cats[k] = round2(b.cats[k]); }); });
+  return { buckets, total: round2(buckets.reduce((s, b) => s + b.total, 0)) };
+}
+// المقارنة بنفس عدد الأيام: الفترة المفتوحة تُقارن أيامها اللي مضت (حتى اليوم) بنفس العدد من بداية الفترة السابقة؛ المكتملة تُقارن كاملة
+function comparePeriods(store, period, today) {
+  today = today || todayISO();
+  const prev = previousPeriod(store, period);
+  if (!prev || period.start > today) return null;
+  const open = period.end > today;
+  let cur = { start: period.start, end: period.end }, prv = { start: prev.start, end: prev.end };
+  if (open) {
+    const days = daysBetween(period.start, today) + 1;
+    cur = { start: period.start, end: today };
+    const pe = addDays(prev.start, days - 1);
+    prv = { start: prev.start, end: pe < prev.end ? pe : prev.end };
+  }
+  const a = spendIn(store, cur), b = spendIn(store, prv);
+  const covA = coverageFor(store, cur), covB = coverageFor(store, prv);
+  return { current: a.spend, previous: b.spend, diff: round2(a.spend - b.spend), partial: open, days: daysBetween(cur.start, cur.end) + 1,
+    curRange: cur, prevRange: prv, prevPeriod: prev, reliable: covA.complete && covB.complete && b.txCount > 0, curCoverage: covA, prevCoverage: covB };
+}
+// مقارنة يوم باليوم اللي قبله
+function compareDay(store, date) {
+  const d0 = { start: date, end: date }, d1 = { start: addDays(date, -1), end: addDays(date, -1) };
+  const a = spendIn(store, d0), b = spendIn(store, d1);
+  return { current: a.spend, previous: b.spend, diff: round2(a.spend - b.spend), prevDate: d1.start, reliable: coverageFor(store, d0).complete && coverageFor(store, d1).complete };
 }
 
 // هل ملفات كل حساب تغطي الفترة؟
@@ -1433,12 +1516,13 @@ function validateBackup(obj) {
 }
 
 const Engine = {
-  version: '1.0.0', round2, parseNum, cellToISO, cleanText, sha256Hex, uid, todayISO, addDays, daysBetween, isoDate,
+  version: '1.1.0', round2, parseNum, cellToISO, cleanText, sha256Hex, uid, todayISO, addDays, daysBetween, isoDate,
   CATEGORY_SEED, buildCategoryRecords, Store, STORE_NAMES, DEFAULT_SETTINGS,
   sanitizeText, sanitizeFilename, fingerprintIban, matchesOwner, normMerchant,
   detectTemplate, signatureOf, parseAlinmaAccount, interpretAlinmaLine, parseAlinmaCard, cardBalanceCheck,
   prepareImport, commitImport, deleteImport, findDuplicates, scorePair, pairTransfers,
-  listCycles, currentCycle, previousPeriod, computePeriod, accountBalances, catName, effective, isCommitmentCat, spendEffect, feeOf,
+  listCycles, currentCycle, previousPeriod, weekOf, yearOf, cycleOf, periodOf, shiftPeriod, spendParts, spendIn, spendSeries, comparePeriods, compareDay, coverageFor,
+  computePeriod, accountBalances, catName, effective, isCommitmentCat, spendEffect, feeOf,
   parseQuickEntry, addManual, ensureCashAccount, cashBalance, reconcileCash, mergeInto,
   setCategory, setMerchantCategory, setBeneficiaryMine, applyOwnerAliases, setRoundUpDestination, setType, applyBeneficiaryClassification,
   makeBackup, validateBackup, FX_FEE_RATE,

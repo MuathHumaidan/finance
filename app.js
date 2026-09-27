@@ -26,6 +26,100 @@ const OWNER_L = { me: 'أنا', other: 'شخص آخر', unknown: 'غير محد�
 const SRC_L = { account_statement: 'كشف حساب', card_statement: 'كشف بطاقة', manual: 'إدخال يدوي', cash_reconciliation: 'تسوية نقد', sms: 'رسالة' };
 const INCOME_L = { salary: 'راتب', reward: 'مكافأة', extra: 'دخل إضافي', return: 'عائد', other: 'دخل آخر' };
 
+/* ---------- الأيقونات والألوان ---------- */
+const IC = {
+  cart: '<path d="M3 4h2l2.2 10.3a1 1 0 0 0 1 .7h9a1 1 0 0 0 1-.8L20 8H6.2"/><circle cx="9.5" cy="19" r="1.4"/><circle cx="16.5" cy="19" r="1.4"/>',
+  food: '<path d="M7 3v18M4.5 3v5a2.5 2.5 0 0 0 5 0V3"/><path d="M18 21V3c-2.2 1.2-3.5 4-3.5 7.5V13H18"/>',
+  cup: '<path d="M4 9h12v4a5 5 0 0 1-5 5H9a5 5 0 0 1-5-5z"/><path d="M16 10.5h1.5a2.5 2.5 0 0 1 0 5H16"/><path d="M8 3.5v2.5M12 3.5v2.5"/><path d="M4 21h12"/>',
+  car: '<path d="M5 11l1.7-4.3A2 2 0 0 1 8.6 5.5h6.8a2 2 0 0 1 1.9 1.2L19 11"/><rect x="3" y="11" width="18" height="6" rx="2"/><path d="M6 17v2.5M18 17v2.5"/><path d="M7 14h1.5M15.5 14H17"/>',
+  fuel: '<path d="M4 21V5.5A2.5 2.5 0 0 1 6.5 3h5A2.5 2.5 0 0 1 14 5.5V21"/><path d="M3 21h12"/><path d="M6.5 8.5h5"/><path d="M14 10h2a2 2 0 0 1 2 2v4.5a1.5 1.5 0 0 0 3 0V9l-3-3"/>',
+  parking: '<rect x="4" y="3" width="16" height="18" rx="4"/><path d="M10 17V7h3a3 3 0 0 1 0 6h-3"/>',
+  house: '<path d="M4 10.5L12 4l8 6.5V20a1 1 0 0 1-1 1h-4v-6h-6v6H5a1 1 0 0 1-1-1z"/>',
+  bolt: '<path d="M13 2.5L4.5 14H11l-1 7.5L18.5 10H12z"/>',
+  drop: '<path d="M12 3s6 6.5 6 11a6 6 0 0 1-12 0c0-4.5 6-11 6-11z"/>',
+  wifi: '<path d="M2.5 9a14 14 0 0 1 19 0"/><path d="M5.5 12.5a9.5 9.5 0 0 1 13 0"/><path d="M8.8 16a5 5 0 0 1 6.4 0"/><circle cx="12" cy="19.5" r="1"/>',
+  phone: '<rect x="7" y="2.5" width="10" height="19" rx="2.5"/><path d="M11 18.5h2"/>',
+  health: '<path d="M12 20s-7.5-4.6-7.5-10.2A4.3 4.3 0 0 1 12 7.2a4.3 4.3 0 0 1 7.5 2.6C19.5 15.4 12 20 12 20z"/><path d="M12 10v5M9.5 12.5h5"/>',
+  edu: '<path d="M2 9l10-5 10 5-10 5z"/><path d="M6 11v5c0 1.6 2.7 3 6 3s6-1.4 6-3v-5"/><path d="M22 9v5"/>',
+  people: '<circle cx="9" cy="8" r="3.2"/><path d="M3 20a6 6 0 0 1 12 0"/><path d="M15.5 5a3 3 0 0 1 0 6"/><path d="M17.5 14a5.5 5.5 0 0 1 3.5 6"/>',
+  person: '<circle cx="12" cy="8" r="3.6"/><path d="M5 20.5a7 7 0 0 1 14 0"/>',
+  gift: '<rect x="3.5" y="8" width="17" height="4.5" rx="1"/><path d="M5 12.5V20h14v-7.5M12 8v12"/><path d="M12 8C10.5 5 7 4.5 7 6.5 7 8 10 8 12 8c2 0 5 0 5-1.5C17 4.5 13.5 5 12 8z"/>',
+  bag: '<path d="M5 8h14l-1.2 12H6.2z"/><path d="M9 10V6.5a3 3 0 0 1 6 0V10"/>',
+  plane: '<path d="M10 13.5L3 11l1.3-1.6 7.2.9 4.2-4.6a2.1 2.1 0 0 1 3 3L14 13.2l1 7.3-1.6 1.2-3-6.3-3.3 3.2.2 2-1.2 1-1.5-3.5L1.9 16l1-1.2 2 .2z"/>',
+  bed: '<path d="M3 18.5V6.5M3 14h18v4.5M21 14v-2a3 3 0 0 0-3-3h-7v5"/><circle cx="7" cy="11" r="1.7"/>',
+  fun: '<path d="M4 7.5A2.5 2.5 0 0 0 6.5 5h11A2.5 2.5 0 0 0 20 7.5v2a2.5 2.5 0 0 0 0 5v2a2.5 2.5 0 0 0-2.5 2.5h-11A2.5 2.5 0 0 0 4 16.5v-2a2.5 2.5 0 0 0 0-5z"/><path d="M13 7.5v1.5M13 11.2v1.6M13 15v1.5"/>',
+  repeat: '<path d="M17 2.5l3 3-3 3"/><path d="M4 11V9.5a4 4 0 0 1 4-4h12"/><path d="M7 21.5l-3-3 3-3"/><path d="M20 13v1.5a4 4 0 0 1-4 4H4"/>',
+  bank: '<path d="M3 9.5L12 4l9 5.5"/><path d="M5.5 10v7.5M10 10v7.5M14 10v7.5M18.5 10v7.5"/><path d="M3 20.5h18"/>',
+  heart: '<path d="M12 20s-7.5-4.6-7.5-10.2A4.3 4.3 0 0 1 12 7.2a4.3 4.3 0 0 1 7.5 2.6C19.5 15.4 12 20 12 20z"/>',
+  receipt: '<path d="M6 3h12v18l-3-2-3 2-3-2-3 2z"/><path d="M9 8h6M9 12h6M9 16h3"/>',
+  alert: '<path d="M12 3.5l9 16H3z"/><path d="M12 10v4.2"/><circle cx="12" cy="17" r=".6"/>',
+  dots: '<circle cx="6" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="18" cy="12" r="1.2"/>',
+  question: '<circle cx="12" cy="12" r="9"/><path d="M9.6 9.4a2.5 2.5 0 1 1 3.4 2.4c-.6.3-1 .8-1 1.5v.6"/><circle cx="12" cy="17" r=".6"/>',
+  income: '<path d="M12 3.5v11M7.5 10L12 14.5 16.5 10"/><path d="M4 15v4.5h16V15"/>',
+  swap: '<path d="M4 8h15l-3.5-3.5"/><path d="M20 16H5l3.5 3.5"/>',
+  card: '<rect x="3" y="5" width="18" height="14" rx="2.5"/><path d="M3 10h18M7 15h3"/>',
+  cash: '<rect x="2.5" y="6" width="19" height="12" rx="2"/><circle cx="12" cy="12" r="2.6"/><path d="M6 9v.01M18 15v.01"/>',
+  refund: '<path d="M9 14L4.5 9.5 9 5"/><path d="M4.5 9.5H14a5.5 5.5 0 0 1 0 11h-3"/>',
+  coins: '<ellipse cx="12" cy="6.5" rx="7" ry="2.8"/><path d="M5 6.5v5c0 1.6 3.1 2.8 7 2.8s7-1.2 7-2.8v-5"/><path d="M5 11.5v5c0 1.6 3.1 2.8 7 2.8s7-1.2 7-2.8v-5"/>',
+  out: '<path d="M17 17L7 7M7 15V7h8"/>', inn: '<path d="M7 7l10 10M17 9v8H9"/>',
+  chevL: '<path d="M15 6l-6 6 6 6"/>', chevR: '<path d="M9 6l6 6-6 6"/>',
+  chart: '<rect x="3" y="3" width="18" height="18" rx="4"/><path d="M8 16v-5M12 16V8M16 16v-3"/>',
+  list: '<path d="M6 3h12v18l-3-2-3 2-3-2-3 2z"/><path d="M9 8h6M9 12h6M9 16h3"/>',
+  spark: '<path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5L18 18M18 6l-2.5 2.5M8.5 15.5L6 18"/>',
+  flame: '<path d="M12 21a6 6 0 0 0 6-6c0-4-3-6-4-9-1.5 2-2 3.5-2 5-1-1-1.5-2-1.5-3.5C8 9 6 11.5 6 15a6 6 0 0 0 6 6z"/>',
+  gear: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>',
+  upload: '<path d="M12 15V4M7.5 8.5L12 4l4.5 4.5"/><path d="M4 15v4.5h16V15"/>',
+  note: '<path d="M4 20l1-4L16.5 4.5a2.1 2.1 0 0 1 3 3L8 19z"/>', cal: '<rect x="3.5" y="5" width="17" height="15.5" rx="2.5"/><path d="M3.5 10h17M8 3v4M16 3v4"/>',
+  msg: '<path d="M4 5h16v11H9l-5 4z"/><path d="M8 9.5h8M8 12.5h5"/>', link: '<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>',
+  shield: '<path d="M12 3l7.5 3v5.5c0 4.6-3.2 8.1-7.5 9.5-4.3-1.4-7.5-4.9-7.5-9.5V6z"/>', doc: '<path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4M9 12h6M9 16h6"/>',
+  store: '<path d="M4 9.5L5.5 4h13L20 9.5"/><path d="M4 9.5a2.7 2.7 0 0 0 5.3 0 2.7 2.7 0 0 0 5.4 0 2.7 2.7 0 0 0 5.3 0"/><path d="M5.5 11.5V20h13v-8.5M10 20v-5h4v5"/>',
+  wallet: '<path d="M4 7.5A2.5 2.5 0 0 1 6.5 5H18v3"/><rect x="4" y="8" width="16" height="12" rx="2.5"/><path d="M16 14h1.5"/>',
+};
+const ico = (n, cls) => `<svg class="i ${cls || ''}" viewBox="0 0 24 24" aria-hidden="true">${IC[n] || IC.dots}</svg>`;
+// ألوان التصنيفات: ثمانية ألوان مجرّبة لعمى الألوان، كل تصنيف له لونه الثابت
+const REST_C = '#CDD1DA';
+const PAL = { blue: '#2a78d6', orange: '#eb6834', aqua: '#1baf7a', yellow: '#eda100', magenta: '#e87ba4', green: '#008300', violet: '#4a3aa7', red: '#e34948', gray: '#8E95A5' };
+const CAT_UI = {
+  groceries: ['blue', 'cart'], restaurants: ['magenta', 'food'], cafes: ['orange', 'cup'], transport: ['violet', 'car'], fuel: ['violet', 'fuel'],
+  home: ['aqua', 'house'], housing: ['aqua', 'house'], bills: ['aqua', 'bolt'], telecom: ['aqua', 'wifi'], health: ['green', 'health'], education: ['blue', 'edu'],
+  family: ['yellow', 'people'], social: ['yellow', 'people'], gifts: ['yellow', 'gift'], shopping: ['red', 'bag'], travel: ['orange', 'plane'], hotels: ['orange', 'bed'],
+  entertainment: ['magenta', 'fun'], subscriptions: ['violet', 'repeat'], installments: ['red', 'bank'], donations: ['green', 'heart'], fines: ['red', 'alert'],
+  fees: ['gray', 'receipt'], other: ['gray', 'dots'], __none: ['gray', 'question'], __person: ['yellow', 'person'],
+};
+const SUB_ICON = { 'transport.parking': 'parking', 'transport.ride': 'car', 'transport.fuel': 'fuel', 'bills.electricity': 'bolt', 'bills.water': 'drop', 'home.electricity': 'bolt', 'home.water': 'drop', 'telecom.devices': 'phone', 'telecom.prepaid': 'phone', 'travel.hotels': 'bed', 'hotels': 'bed', 'fees.fx': 'swap', 'social.occasions': 'gift', 'family.gifts': 'gift' };
+function catUi(id) {
+  if (!id) return { color: PAL.gray, icon: 'question' };
+  let u = CAT_UI[id];
+  if (!u && id.includes('.')) { const p = CAT_UI[id.split('.')[0]]; if (p) u = [p[0], SUB_ICON[id] || p[1]]; }
+  if (!u && S.store) { const c = store().get('categories', id); if (c && c.parentId) return catUi(c.parentId); }
+  u = u || ['gray', 'dots'];
+  return { color: PAL[u[0]] || PAL.gray, icon: u[1], hue: u[0] };
+}
+const tint = (hex, a) => hex + (a || '1F');
+function icCircle(u, cls, mini) { return `<span class="ic ${cls || ''}" style="background:${tint(u.color)};color:${u.color}">${ico(u.icon)}${mini ? `<span class="mini" style="color:${mini.color}">${ico(mini.icon)}</span>` : ''}</span>`; }
+function txUi(tx) {
+  const t = tx.transactionType;
+  if (tx.transferSubtype === 'round_up') return { color: tx.classificationStatus === 'unclassified' ? PAL.yellow : PAL.gray, icon: 'coins' };
+  if (t === 'Income') return { color: PAL.green, icon: 'income' };
+  if (t === 'Refund') return { color: PAL.green, icon: 'refund' };
+  if (t === 'InternalTransfer') return { color: PAL.gray, icon: 'swap' };
+  if (t === 'CreditCardPayment') return { color: PAL.blue, icon: 'card' };
+  if (t === 'CashWithdrawal' || t === 'CashDeposit') return { color: PAL.gray, icon: 'cash' };
+  if (t === 'Unknown') return { color: PAL.yellow, icon: 'question' };
+  if (tx.categoryId) return catUi(tx.subcategoryId && SUB_ICON[tx.subcategoryId] ? tx.subcategoryId : tx.categoryId);
+  if (t === 'PersonTransfer') return catUi('__person');
+  return catUi('__none');
+}
+function dirBadge(tx) {
+  const t = tx.transactionType;
+  if (t === 'Unknown' || (tx.transferSubtype === 'round_up' && tx.classificationStatus === 'unclassified')) return `<span class="dir w">${ico(tx.direction === 'out' ? 'out' : 'inn')}</span>`;
+  if (['InternalTransfer', 'CreditCardPayment', 'CashWithdrawal', 'CashDeposit', 'LoanToPerson', 'LoanRepayment'].includes(t)) return `<span class="dir x">${ico('swap')}</span>`;
+  if (t === 'Income' || t === 'Refund') return `<span class="dir n">${ico('inn')}</span>`;
+  return `<span class="dir o">${ico('out')}</span>`;
+}
+const ftime = (hm) => { if (!hm) return ''; const [h, m] = hm.split(':').map(Number); return `${((h + 11) % 12) + 1}:${String(m).padStart(2, '0')} ${h < 12 ? 'ص' : 'م'}`; };
+const money = (n, cls) => `<span class="num ${cls || ''}">${fmt(n)}</span><span class="cur">ر.س</span>`;
+
 /* ---------- الحالة ---------- */
 const S = {
   store: null, view: 'home', period: null, filters: { kind: 'all', allTime: false }, q: '',
@@ -93,15 +187,18 @@ function badges(tx) {
   if ((tx.sourceLinks || []).some(s => s.sourceType === 'manual')) b.push(`<span class="b n">يدوي</span>`);
   return b.length ? `<div class="badges">${b.join('')}</div>` : '';
 }
-function subLine(tx) {
-  const parts = [catLabel(tx)];
-  const ins = insOf(tx), acc = accOf(tx.accountId);
-  parts.push(ins ? ins.label : acc ? acc.name : '');
-  if (tx.time) parts.push(`<span class="num">${tx.time}</span>`);
+function subLine(tx, withDate) {
+  const parts = [esc(catLabel(tx))];
+  if (withDate) parts.push(`${fdate(tx.transactionDate || tx.postingDate, true)}${tx.time ? '، ' + ftime(tx.time) : ''}`);
+  else {
+    const ins = insOf(tx), acc = accOf(tx.accountId);
+    parts.push(esc(ins ? ins.label : acc ? acc.name : ''));
+    if (tx.time) parts.push(ftime(tx.time));
+  }
   return parts.filter(Boolean).join(' · ');
 }
-function txRow(tx) {
-  return `<div class="tx" data-action="openTx" data-id="${tx.id}"><div class="m"><div class="t">${esc(txTitle(tx))}</div><div class="s">${subLine(tx)}</div>${badges(tx)}</div><div class="a">${amountCell(tx)}</div></div>`;
+function txRow(tx, withDate) {
+  return `<div class="tx" data-action="openTx" data-id="${tx.id}">${icCircle(txUi(tx))}<div class="m"><div class="t">${esc(txTitle(tx))}</div><div class="s">${subLine(tx, withDate)}</div>${badges(tx)}</div><div class="a"><span class="num">${fmt(tx.grossAmount)}</span>${dirBadge(tx)}</div></div>`;
 }
 const sortTx = (a, b) => ((b.transactionDate || '') + (b.time || '')).localeCompare((a.transactionDate || '') + (a.time || ''));
 const isRoundUpUnknown = (t) => t.transferSubtype === 'round_up' && t.classificationStatus === 'unclassified';
@@ -122,6 +219,7 @@ function ownAccountOptions(selected, withNew) {
 function ensurePeriod() {
   if (S.period) return;
   S.period = E.currentCycle(store()) || (E.listCycles(store())[0]) || { start: E.addDays(E.todayISO(), -29), end: E.todayISO(), kind: 'custom' };
+  S.selDay = null;
 }
 function periodTxs() {
   const p = S.period;
@@ -170,7 +268,7 @@ async function boot() {
   registerSW();
   markReady();
   const initial = (location.hash || '').replace('#', '');
-  if (['home', 'txs', 'add', 'accounts', 'more'].includes(initial)) S.view = initial;
+  if (['home', 'spend', 'txs', 'add', 'accounts', 'more'].includes(initial)) S.view = initial;
   render();
 }
 
@@ -189,17 +287,20 @@ function registerSW() {
 }
 
 /* ---------- العرض ---------- */
-const TITLES = { home: 'الرئيسية', txs: 'العمليات', add: 'إضافة واستيراد', accounts: 'الحسابات', more: 'المزيد', review: 'مراجعة الاستيراد', teach: 'تعليم كشف جديد', merchants: 'التجار', beneficiaries: 'المستفيدون', settings: 'الإعدادات', backup: 'النسخ الاحتياطي', report: 'التقرير', methods: 'طريقة الحساب', imports: 'سجل الاستيراد' };
-const NAV_OF = { review: 'add', teach: 'add', imports: 'add', merchants: 'more', beneficiaries: 'accounts', settings: 'more', backup: 'more', report: 'more', methods: 'more' };
+const TITLES = { home: 'الرئيسية', spend: 'صرفياتك', txs: 'العمليات', add: 'إضافة واستيراد', accounts: 'الحسابات', more: 'المزيد', review: 'مراجعة الاستيراد', teach: 'تعليم كشف جديد', merchants: 'التجار', beneficiaries: 'المستفيدون', settings: 'الإعدادات', backup: 'النسخ الاحتياطي', report: 'التقرير', methods: 'طريقة الحساب', imports: 'سجل الاستيراد' };
+const NAV_OF = { add: 'home', review: 'add', teach: 'add', imports: 'add', merchants: 'more', beneficiaries: 'accounts', settings: 'more', backup: 'more', report: 'more', methods: 'more' };
 function render() {
   ensurePeriod();
   const v = S.view;
+  document.body.className = 'v-' + v;
   $('title').textContent = TITLES[v] || 'المدير المالي';
-  const showPeriod = ['home', 'txs', 'report'].includes(v);
+  $('backBtn').classList.toggle('hide', !NAV_OF[v]);
+  $('fab').classList.toggle('hide', ['add', 'review', 'teach', 'imports'].includes(v));
+  const showPeriod = ['txs', 'report'].includes(v);
   const pb = $('periodBtn'); pb.classList.toggle('hide', !showPeriod);
   if (showPeriod) pb.textContent = (v === 'txs' && S.filters.allTime) ? 'كل الفترات' : fperiod(S.period);
   document.querySelectorAll('.nav button').forEach(b => b.classList.toggle('on', b.dataset.view === (NAV_OF[v] || v)));
-  const views = { home: vHome, txs: vTxs, add: vAdd, accounts: vAccounts, more: vMore, review: vReview, teach: vTeach, merchants: vMerchants, beneficiaries: vBeneficiaries, settings: vSettings, backup: vBackup, report: vReport, methods: vMethods, imports: vImports };
+  const views = { home: vHome, spend: vSpend, txs: vTxs, add: vAdd, accounts: vAccounts, more: vMore, review: vReview, teach: vTeach, merchants: vMerchants, beneficiaries: vBeneficiaries, settings: vSettings, backup: vBackup, report: vReport, methods: vMethods, imports: vImports };
   $('main').innerHTML = (views[v] || vHome)();
 }
 function go(view, opts) {
@@ -212,77 +313,209 @@ function go(view, opts) {
 function kpi(label, value, sub, action, cls) {
   return `<div class="kpi ${cls || ''}" ${action ? `data-action="kpi" data-kind="${action}"` : ''}><div class="l">${label}</div><div class="v">${value}</div>${sub ? `<div class="s">${sub}</div>` : ''}</div>`;
 }
+function accCard(a) {
+  const u = a.type === 'credit_card' ? { color: PAL.blue, icon: 'card' } : a.type === 'cash' ? { color: PAL.green, icon: 'cash' } : a.type === 'wallet' ? { color: PAL.violet, icon: 'wallet' } : { color: '#3A49D6', icon: 'bank' };
+  const bal = a.balance == null ? '<span class="muted" style="font-size:15px">غير معروف</span>' : money(a.type === 'credit_card' ? Math.abs(a.balance) : a.balance);
+  const bl = a.type === 'credit_card' ? (a.balance > 0 ? 'المستحق' : a.balance < 0 ? 'رصيد لصالحك' : 'الرصيد') : 'الرصيد';
+  return `<div class="acc" data-action="accDrill" data-id="${a.id}"><div class="h">${icCircle(u, 's')}<div class="m"><div class="n">${esc(a.name)}</div><div class="d">${esc(a.bank || ACC_L[a.type] || '')}${a.last4 ? ` · <span class="num">…${esc(a.last4)}</span>` : ''}</div></div></div><div class="bl">${bl}${a.balanceDate && a.type !== 'cash' ? ` · ${fdate(a.balanceDate)}` : ''}</div><div class="bv">${bal}</div></div>`;
+}
 function vHome() {
   const st = store();
+  const tools = `<div class="tools"><button data-action="go" data-view="settings" aria-label="الإعدادات">${ico('gear')}</button></div>`;
   if (!st.all('transactions').length) {
-    return banners() + `<div class="card empty"><h2 style="justify-content:center">ابدأ برفع أول كشف</h2><p>ارفع كشف حساب الإنماء أو كشف البطاقة الائتمانية بصيغة Excel. كل شي يُقرأ ويُحفظ على جهازك فقط.</p><button class="btn p" data-action="pickFile">رفع كشف</button></div>`;
+    return `<div class="hero" style="padding-bottom:34px">${tools}<div class="hi">المدير المالي</div><div class="big" style="font-size:28px">ابدأ برفع أول كشف</div><div class="sub">كل شي يُقرأ ويُحفظ على جهازك فقط</div></div>${banners()}
+      <div class="card empty">${icCircle({ color: PAL.blue, icon: 'upload' })}<p>ارفع كشف حساب الإنماء أو كشف البطاقة الائتمانية بصيغة Excel.</p><button class="btn p" data-action="pickFile">رفع كشف</button></div>`;
   }
-  const R = E.computePeriod(st, S.period);
-  const prevP = E.previousPeriod(st, S.period);
-  const P = E.computePeriod(st, prevP);
-  const cur = E.currentCycle(st);
-  let h = banners();
-  h += `<div class="chips noprint" style="margin-bottom:10px">
-    <button class="chip ${cur && S.period.start === cur.start ? 'on' : ''}" data-action="setPeriodCurrent">الدورة الحالية</button>
-    <button class="chip ${cur && prevP && S.period.start === E.previousPeriod(st, cur).start ? 'on' : ''}" data-action="setPeriodPrev">الدورة السابقة</button>
-    <button class="chip" data-action="pickPeriod">اختيار فترة…</button></div>`;
-  if (R.coverage.periodOpen) h += `<div class="banner i">الفترة ما انتهت: الأرقام حتى اليوم فقط.</div>`;
-  R.coverage.notes.forEach(n => { h += `<div class="banner w">بيانات «${esc(n.name)}» لا تغطي كامل الفترة (ناقص من ${fdate(n.from)} إلى ${fdate(n.to)}). الأرقام المرتبطة بها ناقصة.</div>`; });
-  const spendSub = [R.temporaryCount ? `منه ${fmt(R.temporarySpend)} تحويلات بتصنيف مؤقت` : '', R.unownedCount ? `و${fmt(R.unownedSpend)} بأدوات مالكها غير محدد` : ''].filter(Boolean).join(' ');
-  h += `<div class="kpis">
-    ${kpi('الدخل المؤكد', num(R.income, 'pos'), cnt(R.incomeItems.length, 'op'), 'income', 'main')}
-    ${kpi('الإنفاق الحقيقي', num(R.spend), spendSub || 'كل المصروف المصنّف', 'spend', 'main')}
-    ${kpi('الفائض', num(R.surplus, R.surplus >= 0 ? 'pos' : 'neg'), 'الدخل المؤكد − الإنفاق الحقيقي', null, 'main wide')}
-  </div>`;
-  h += `<div class="kpis k5">
-    ${kpi('خارج غير مصنف', num(R.unclassifiedOut, R.unclassifiedOut ? 'warn-t' : ''), R.unclassifiedOutCount ? `${cnt(R.unclassifiedOutCount, 'op')}${R.roundUpUnknownCount ? `، منها تقريب ${fmt(R.roundUpUnknown)}` : ''}` : 'لا يوجد', 'unclassified_out')}
-    ${kpi('داخل غير مصنف', num(R.unclassifiedIn, R.unclassifiedIn ? 'warn-t' : ''), R.unclassifiedInCount ? cnt(R.unclassifiedInCount, 'op') : 'لا يوجد', 'unclassified_in')}
-    ${kpi('التحويلات الداخلية', num(R.internal, 'neu'), `${cnt(R.internalCount, 'tr')}${R.internalOneSided ? `، ${R.internalOneSided === R.internalCount ? 'كلها' : R.internalOneSided} غير مكتمل الربط` : ''}`, 'internal')}
-    ${kpi('سداد البطاقات', num(R.cardPayments, 'neu'), `${cnt(R.cardPaymentsCount, 'op')}${R.cardPaymentsUnmatched ? `، ${R.cardPaymentsUnmatched === R.cardPaymentsCount ? 'كلها' : R.cardPaymentsUnmatched} غير مطابقة` : ''}`, 'card')}
-    ${kpi('الالتزامات المعروفة', num(R.commitments), `${cnt(R.commitmentItems.length, 'op')}، متكررة ومعلّمة التزام`, 'commitments', 'wide')}
-  </div>`;
-  // وين راح الإنفاق
-  const max = R.categories.length ? Math.max.apply(null, R.categories.map(c => c.amount)) : 0;
-  h += `<div class="grid2"><div class="card"><h2>وين راح الإنفاق <span class="sp"></span><span class="muted num">${fmt(R.spend)}</span></h2>`;
-  if (!R.categories.length) h += `<div class="muted">لا يوجد إنفاق في هذه الفترة.</div>`;
-  else h += `<div class="bars">${R.categories.filter(c => c.amount > 0).map(c => { const key = c.categoryId || '__none'; const pct = R.spend ? Math.round(c.amount / R.spend * 100) : 0; return `<div class="row" data-action="catDrill" data-cat="${key}"><div class="name">${esc(bucketName(c.categoryId))}</div><div class="track"><div class="fill ${key.startsWith('__') ? 'nc' : ''}" style="width:${max ? Math.max(2, c.amount / max * 100) : 0}%"></div></div><div class="amt">${num(c.amount)} <span class="muted small">${pct}%</span></div></div>`; }).join('')}</div>`;
-  h += `</div>`;
-  // المقارنة
-  h += `<div class="card"><h2>مقارنة بالفترة السابقة</h2><div class="muted small" style="margin-bottom:6px">${fperiod(prevP)}</div>`;
-  if (!P.coverage.complete || P.txCount === 0) h += `<div class="banner w" style="margin-bottom:8px">${P.txCount === 0 ? 'ما فيه بيانات للفترة السابقة، فالمقارنة غير متاحة.' : 'بيانات الفترة السابقة ناقصة، فالفروق هنا ما تعني تغيّر حقيقي في صرفك.'}</div>`;
-  if (P.txCount) {
-    const keys = new Map(); R.categories.forEach(c => keys.set(c.categoryId || '__none', { cur: c.amount, prev: 0 })); P.categories.forEach(c => { const k = c.categoryId || '__none'; const o = keys.get(k) || { cur: 0, prev: 0 }; o.prev = c.amount; keys.set(k, o); });
-    const rows = Array.from(keys.entries()).sort((a, b) => Math.max(b[1].cur, b[1].prev) - Math.max(a[1].cur, a[1].prev));
-    h += `<div class="tbl-wrap"><table><thead><tr><th>التصنيف</th><th class="n">السابقة</th><th class="n">الحالية</th><th class="n">الفرق</th><th class="n">النسبة</th></tr></thead><tbody>`;
-    h += `<tr><td><b>الإنفاق الحقيقي</b></td><td class="n">${num(P.spend)}</td><td class="n">${num(R.spend)}</td><td class="n">${num(E.round2(R.spend - P.spend), R.spend > P.spend ? 'neg' : 'pos')}</td><td class="n">${P.spend ? `<span class="num">${Math.round((R.spend - P.spend) / P.spend * 100)}%</span>` : '—'}</td></tr>`;
-    rows.forEach(([k, o]) => { const d = E.round2(o.cur - o.prev); h += `<tr><td>${esc(bucketName(k === '__none' ? null : k))}</td><td class="n">${num(o.prev)}</td><td class="n">${num(o.cur)}</td><td class="n">${num(d, d > 0 ? 'neg' : d < 0 ? 'pos' : '')}</td><td class="n">${o.prev ? `<span class="num">${Math.round(d / o.prev * 100)}%</span>` : '—'}</td></tr>`; });
-    h += `</tbody></table></div>`;
-  }
-  h += `</div></div>`;
-  // أكثر التجار وأعلى العمليات
-  h += `<div class="grid2" style="margin-top:var(--gap)"><div class="card"><h2>أكثر التجار</h2>`;
-  if (!R.topMerchants.length) h += `<div class="muted">لا يوجد.</div>`;
-  else h += `<div class="list">${R.topMerchants.slice(0, 8).map(m => { const mm = store().get('merchants', m.merchantId); return `<div class="it" data-action="merchantDrill" data-id="${m.merchantId}"><div class="m"><div class="t">${esc(mm ? mm.name : '—')}</div><div class="s">${cnt(m.count, 'op')}</div></div>${num(m.amount)}</div>`; }).join('')}</div>`;
-  h += `</div><div class="card"><h2>أعلى العمليات</h2>`;
-  if (!R.topTx.length) h += `<div class="muted">لا يوجد.</div>`;
-  else h += `<div class="list">${R.topTx.slice(0, 8).map(x => { const t = store().get('transactions', x.id); return `<div class="it" data-action="openTx" data-id="${t.id}"><div class="m"><div class="t">${esc(txTitle(t))}</div><div class="s">${fdate(t.transactionDate)} · ${esc(catLabel(t))}</div></div>${num(x.amount)}</div>`; }).join('')}</div>`;
-  h += `</div></div>`;
-  // الحسابات
-  h += `<div class="card" style="margin-top:var(--gap)"><h2>الحسابات <span class="sp"></span><button class="btn" data-action="go" data-view="accounts">إدارة</button></h2><div class="list">${E.accountBalances(st).map(a => `<div class="it"><div class="m"><div class="t">${esc(a.name)}</div><div class="s">${ACC_L[a.type] || ''}${a.balanceDate ? ' · آخر رصيد معروف ' + fdate(a.balanceDate, true) : ' · الرصيد غير معروف'}</div></div>${a.balance == null ? '<span class="muted">—</span>' : a.type === 'credit_card' ? `<span class="small">${a.balance > 0 ? 'مستحق ' : a.balance < 0 ? 'لصالحك ' : ''}</span>${num(Math.abs(a.balance))}` : num(a.balance)}</div>`).join('')}</div></div>`;
-  h += dataAlerts(R);
+  const cur = E.currentCycle(st) || S.period;
+  const R = E.computePeriod(st, cur);
+  let h = `<div class="hero">${tools}<div class="hi">صرفك هذي الدورة</div><div class="big">${money(R.spend)}</div><div class="sub">${fperiod(cur)}${R.coverage.periodOpen ? ' · حتى اليوم' : ''}</div>
+    <div class="gl">
+      <div class="g" data-action="kpi" data-kind="income" data-p="cur">${ico('income')}<div><div class="l">الدخل المؤكد</div><div class="v">${money(R.income)}</div></div></div>
+      <div class="g" data-action="go" data-view="spend">${ico('wallet')}<div><div class="l">الفائض</div><div class="v">${money(R.surplus)}</div></div></div>
+      <div class="g" data-action="kpi" data-kind="commitments" data-p="cur">${ico('repeat')}<div><div class="l">الالتزامات المعروفة</div><div class="v">${money(R.commitments)}</div></div></div>
+    </div></div>`;
+  const ORD = { checking: 0, savings: 1, credit_card: 2, wallet: 3, unknown: 4, other: 5, cash: 6 };
+  const accs = E.accountBalances(st).filter(a => a.isMine !== false).sort((x, y) => (ORD[x.type] ?? 9) - (ORD[y.type] ?? 9));
+  h += `<div class="accs">${accs.map(accCard).join('')}</div>`;
+  h += banners();
+  // صرفك الأسبوعي
+  const wk = E.weekOf(E.todayISO()), ser = E.spendSeries(st, wk, 'day');
+  h += `<div class="card"><h2 class="soft">صرفك الأسبوعي</h2>${periodBox(wk, ser.total, { nav: false, action: 'weekToSpend' })}${chartSvg(ser, wk, { compact: true, action: 'weekToSpend' })}${cmpPill(E.comparePeriods(st, wk), wk)}
+    <div class="linkrow" data-action="go" data-view="spend">${ico('chart')}<span>جميع صرفياتك</span><span class="sp"></span>${ico('chevL', 'chev')}</div></div>`;
+  h += alertCard(R, cur);
+  // آخر العمليات
+  const recent = st.all('transactions').slice().sort(sortTx).slice(0, 5);
+  h += `<div class="card"><h2 class="soft">آخر العمليات</h2>${recent.map(t => txRow(t, true)).join('')}
+    <div class="linkrow" data-action="allTxs">${ico('list')}<span>جميع العمليات</span><span class="sp"></span>${ico('chevL', 'chev')}</div></div>`;
   return h;
 }
-function dataAlerts(R) {
+// «تقريرك المالي غير مكتمل»: كل اللي يحتاج قرارك عشان تكتمل الأرقام
+function alertCard(R, cur) {
   const st = store(), items = [];
-  st.all('imports').filter(i => i.balanceValidated === false).forEach(i => items.push(`كشف «${esc(i.filename)}» يحتاج مراجعة: الرصيد ما تطابق.`));
-  st.all('accounts').filter(a => a.type === 'unknown').forEach(a => items.push(`نوع «${esc(a.name)}» غير محدد. <a href="#" data-action="editAccount" data-id="${a.id}">حدده</a>`));
-  st.all('instruments').filter(i => i.instrumentOwner === 'unknown').forEach(i => items.push(`مالك «${esc(i.label)}» غير محدد، وعملياتها داخلة في إنفاقك مؤقتًا. <a href="#" data-action="editInstrument" data-id="${i.id}">حدده</a>`));
+  const unk = st.all('transactions').filter(t => t.transactionType === 'Unknown');
+  if (unk.length) items.push(`${cnt(unk.length, 'op')} نوعها غير معروف (${fmt(E.round2(unk.reduce((s, t) => s + t.grossAmount, 0)))}). <a data-action="kpi" data-kind="unclassified_all">صنّفها</a>`);
+  if (R.temporaryCount) items.push(`${cnt(R.temporaryCount, 'tr')} لأشخاص بتصنيف مؤقت هذي الدورة (${fmt(R.temporarySpend)}). <a data-action="kpi" data-kind="temporary" data-p="cur">حدد تصنيفها</a>`);
+  const unc = R.categories.find(c => !c.categoryId);
+  if (unc && unc.amount) items.push(`مشتريات بدون تصنيف هذي الدورة (${fmt(unc.amount)}). <a data-action="kpi" data-kind="uncategorized" data-p="cur">صنّفها</a>`);
   const ru = st.all('transactions').filter(isRoundUpUnknown).length;
-  if (ru) items.push(`وجهة التقريب غير محددة (${cnt(ru, 'op')} تحت «خارج غير مصنف»). <a href="#" data-action="setRoundUp">حددها</a>`);
-  const unk = st.all('transactions').filter(t => t.transactionType === 'Unknown').length;
-  if (unk) items.push(`${cnt(unk, 'op')} نوعها غير معروف. <a href="#" data-action="kpi" data-kind="unclassified_all">راجعها</a>`);
+  if (ru) items.push(`وجهة التقريب غير محددة (${cnt(ru, 'op')}). <a data-action="setRoundUp">حددها</a>`);
+  st.all('instruments').filter(i => i.instrumentOwner === 'unknown').forEach(i => items.push(`مالك «${esc(i.label)}» غير محدد، وعملياتها داخلة في إنفاقك مؤقتًا. <a data-action="editInstrument" data-id="${i.id}">حدده</a>`));
+  st.all('accounts').filter(a => a.type === 'unknown').forEach(a => items.push(`نوع «${esc(a.name)}» غير محدد. <a data-action="editAccount" data-id="${a.id}">حدده</a>`));
+  st.all('imports').filter(i => i.balanceValidated === false).forEach(i => items.push(`كشف «${esc(i.filename)}» يحتاج مراجعة: الرصيد ما تطابق.`));
+  R.coverage.notes.forEach(n => items.push(`بيانات «${esc(n.name)}» ناقصة من ${fdate(n.from)} إلى ${fdate(n.to)}. <a data-action="pickFile">ارفع كشفها</a>`));
   if (!items.length) return '';
-  return `<div class="card"><h2>تنبيهات البيانات</h2><ul style="margin:0;padding-inline-start:18px">${items.map(i => `<li class="small" style="margin-bottom:6px">${i}</li>`).join('')}</ul></div>`;
+  const first = items.slice(0, 3), rest = items.slice(3);
+  return `<div class="card alertcard"><div class="row"><span class="ic">${ico('question')}</span><div style="flex:1;min-width:0"><div class="t">تقريرك المالي غير مكتمل</div><ul>${first.map(i => `<li>${i}</li>`).join('')}</ul>${rest.length ? `<details class="more" style="margin-top:0"><summary class="go">و${rest.length === 1 ? 'تنبيه واحد آخر' : rest.length === 2 ? 'تنبيهان آخران' : rest.length + ' تنبيهات أخرى'}</summary><ul>${rest.map(i => `<li>${i}</li>`).join('')}</ul></details>` : ''}</div></div></div>`;
+}
+
+/* ---------- صرفياتك ---------- */
+const DAY_S = ['أحد', 'اثنين', 'ثلاثاء', 'أربعاء', 'خميس', 'جمعة', 'سبت'];
+const MON_S = ['ينا', 'فبر', 'مار', 'أبر', 'ماي', 'يون', 'يول', 'أغس', 'سبت', 'أكت', 'نوف', 'ديس'];
+const PK_L = { week: 'أسبوعي', cycle: 'الدورة', year: 'سنوي' };
+const PREV_L = { week: 'الأسبوع الماضي', cycle: 'الدورة الماضية', month: 'الشهر الماضي', year: 'السنة الماضية', custom: 'الفترة السابقة' };
+const pkindOf = (p) => (p.kind === 'month' || p.kind === 'cycle') ? 'cycle' : p.kind;
+function periodLabel(p) {
+  if (p.kind === 'year') return `سنة ${p.start.slice(0, 4)}`;
+  if (p.kind === 'week') { const a = dparts(p.start), b = dparts(p.end); return `${DAYS[a.wd]}، ${a.d} ${MONTHS[a.m - 1]} — ${DAYS[b.wd]}، ${b.d} ${MONTHS[b.m - 1]}`; }
+  return `${fdate(p.start, dparts(p.start).y !== dparts(p.end).y)} — ${fdate(p.end, true)}`;
+}
+function periodBox(p, total, opts) {
+  opts = opts || {};
+  const today = E.todayISO();
+  const mid = `<div class="mid ${opts.nav ? '' : 'solo'}" data-action="${opts.action || 'pickPeriod'}"><div class="rg">${opts.label || periodLabel(p)}</div><div class="tot">${money(total)}${opts.clear ? `<button class="x" data-action="clearSel" aria-label="إلغاء اختيار اليوم">×</button>` : ''}</div></div>`;
+  if (!opts.nav) return `<div class="pbox"><div class="in">${mid}</div></div>`;
+  return `<div class="pbox"><div class="in"><button class="arr" data-action="pShift" data-dir="-1" aria-label="الفترة السابقة">${ico('chevR')}</button>${mid}<button class="arr" data-action="pShift" data-dir="1" aria-label="الفترة التالية" ${p.end >= today ? 'disabled' : ''}>${ico('chevL')}</button></div></div>`;
+}
+function cmpPill(c, p, isDay) {
+  if (!c) return '';
+  if (!c.reliable) return `<div class="cmp"><span class="p na">${ico('alert')}المقارنة غير متاحة: بيانات ${isDay ? 'اليوم السابق' : 'الفترة السابقة'} ناقصة</span></div>`;
+  const what = isDay ? 'من اليوم اللي قبله' : c.partial ? `من نفس الأيام في ${PREV_L[p.kind] || 'الفترة السابقة'}` : `من ${PREV_L[p.kind] || 'الفترة السابقة'}`;
+  if (Math.abs(c.diff) < 0.005) return `<div class="cmp"><span class="p na">نفس الصرف ${what}</span></div>`;
+  return c.diff < 0 ? `<div class="cmp"><span class="p dn">${ico('spark')}أقل بـ <span class="num">${fmt(-c.diff)}</span> ${what}</span></div>`
+    : `<div class="cmp"><span class="p up">${ico('flame')}أكثر بـ <span class="num">${fmt(c.diff)}</span> ${what}</span></div>`;
+}
+// الرسم: أعمدة مكدسة حسب التصنيف. أكبر 5 تصنيفات بألوان مختلفة، والباقي رمادي
+function chartSegments(ser) {
+  const tot = {};
+  ser.buckets.forEach(b => Object.entries(b.cats).forEach(([k, v]) => { tot[k] = (tot[k] || 0) + v; }));
+  const ranked = Object.entries(tot).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]);
+  const shown = [], hues = new Set();
+  ranked.forEach(([k]) => { const u = catUi(k); if (shown.length < 5 && u.hue && u.hue !== 'gray' && !hues.has(u.hue)) { shown.push(k); hues.add(u.hue); } });
+  if (tot.__none > 0) shown.push('__none'); // بدون تصنيف: رمادي بعلامته الخاصة
+  return shown;
+}
+function chartSvg(ser, p, opts) {
+  opts = opts || {};
+  const W = 340, H = opts.compact ? 130 : 160, top = 8, labH = 24, gut = 44;
+  const plotW = W - gut, plotH = H - top - labH;
+  const n = ser.buckets.length, slot = plotW / n;
+  const bw = Math.max(3, Math.min(34, slot * (n > 14 ? 0.62 : 0.56)));
+  const max = Math.max.apply(null, ser.buckets.map(b => b.total).concat([0]));
+  const nice = max > 0 ? max : 1;
+  const shown = chartSegments(ser);
+  const today = E.todayISO();
+  const y = (v) => top + plotH - (v / nice) * plotH;
+  let g = '';
+  const axf = (v) => nice >= 1000 ? Math.round(v).toLocaleString('en-US') : fmt(v);
+  [0, 0.5, 1].forEach(f => { const yy = y(nice * f); g += `<line x1="0" x2="${plotW}" y1="${yy}" y2="${yy}" stroke="#ECEEF3" stroke-width="1"/><text x="${W - 2}" y="${yy + 4}" text-anchor="end">${max ? axf(nice * f) : f === 0 ? '0' : ''}</text>`; });
+  const sel = S.selDay;
+  ser.buckets.forEach((b, i) => {
+    const cx = plotW - (i + 0.5) * slot, x = cx - bw / 2;
+    const dim = sel && sel !== b.key ? ' opacity="0.3"' : '';
+    const future = b.start > today;
+    if (b.total > 0) {
+      let acc = 0; const segs = [];
+      shown.forEach(k => { if (b.cats[k] > 0) segs.push([catUi(k).color, b.cats[k]]); });
+      const rest = E.round2(b.total - segs.reduce((s, x2) => s + x2[1], 0));
+      if (rest > 0) segs.push([REST_C, rest]);
+      g += `<g${dim}>`;
+      segs.forEach((sg, j) => {
+        const y0 = y(acc), y1 = y(acc + sg[1]); acc += sg[1];
+        const hgt = Math.max(0, y0 - y1 - (j < segs.length - 1 ? 1.5 : 0));
+        const r = j === segs.length - 1 ? Math.min(4, bw / 2, hgt) : 0;
+        g += r ? `<path d="M${x},${y1 + hgt} V${y1 + r} Q${x},${y1} ${x + r},${y1} H${x + bw - r} Q${x + bw},${y1} ${x + bw},${y1 + r} V${y1 + hgt} Z" fill="${sg[0]}"/>` : `<rect x="${x}" y="${y1}" width="${bw}" height="${hgt}" fill="${sg[0]}"/>`;
+      });
+      g += `</g>`;
+    } else if (!future) g += `<rect x="${x}" y="${top + plotH - 3}" width="${bw}" height="3" rx="1.5" fill="#E3E6ED"${dim}/>`;
+    // عنوان العمود
+    let lab = '';
+    if (p.kind === 'week') lab = DAY_S[dparts(b.key).wd];
+    else if (p.kind === 'year') lab = MON_S[Number(b.key.slice(5, 7)) - 1];
+    else { const d = dparts(b.key).d; if (i === 0 || i === n - 1 || (n > 10 ? i % 5 === 0 : true)) lab = String(d); }
+    if (lab) g += `<text class="dl ${sel === b.key ? 'on' : ''}" x="${cx}" y="${H - 6}" text-anchor="middle"${future ? ' opacity="0.5"' : ''}${p.kind === 'year' ? ' style="font-size:10px"' : ''}>${lab}</text>`;
+    if (!future || b.total) g += `<rect class="bar" x="${cx - slot / 2}" y="0" width="${slot}" height="${H}" fill="transparent" data-action="${opts.action || 'selDay'}" data-d="${b.key}"><title>${b.key}: ${fmt(b.total)}</title></rect>`;
+  });
+  let legend = '';
+  if (!opts.compact && ser.total > 0) {
+    const anyRest = ser.buckets.some(b => E.round2(b.total - shown.reduce((s, k) => s + (b.cats[k] || 0), 0)) > 0);
+    legend = `<div class="legend">${shown.map(k => `<span><i style="background:${catUi(k).color}"></i>${esc(bucketName(k))}</span>`).join('')}${anyRest ? `<span><i style="background:${REST_C}"></i>باقي التصنيفات</span>` : ''}</div>`;
+  }
+  return `<div class="chart"><svg viewBox="0 0 ${W} ${H}" direction="ltr" style="direction:ltr" role="img" aria-label="الإنفاق حسب ${p.kind === 'year' ? 'الشهر' : 'اليوم'}">${g}</svg>${legend}</div>`;
+}
+function whereList(R) {
+  const cats = R.categories.filter(c => c.amount > 0);
+  if (!cats.length) return `<div class="muted">لا يوجد إنفاق في هذي الفترة.</div>`;
+  const max = cats[0].amount;
+  return `<div class="where">${cats.map(c => {
+    const key = c.categoryId || '__none', u = catUi(key === '__none' ? null : key);
+    const pct = R.spend ? c.amount / R.spend * 100 : 0;
+    const w = Math.max(40, Math.min(100, c.amount / max * 100));
+    const s0 = c.subs.find(s => s.subcategoryId && s.amount < c.amount - 0.005);
+    const sc = s0 ? `<span class="sc" style="color:${u.color}">${ico(SUB_ICON[s0.subcategoryId] || u.icon)}<span class="num" style="color:var(--ink-2)">${(s0.amount / R.spend * 100).toFixed(2)}%</span></span>` : '';
+    return `<div class="w" data-action="catDrill" data-cat="${key}"><div class="bar" style="background:${tint(u.color, '24')};width:${w}%"><span style="color:${u.color}">${ico(u.icon)}</span><div class="m"><div class="t">${esc(bucketName(c.categoryId))}</div><div class="p"><span class="num">${pct.toFixed(2)}%</span>${sc}</div></div></div><div class="a">${money(c.amount)}</div></div>`;
+  }).join('')}</div>`;
+}
+function vSpend() {
+  const st = store();
+  if (!st.all('transactions').length) return `<div class="card empty">ما فيه عمليات للحين. <br><button class="btn p" data-action="pickFile">رفع كشف</button></div>`;
+  const p = S.period, pk = pkindOf(p);
+  const bucket = p.kind === 'year' ? 'month' : 'day';
+  const ser = E.spendSeries(st, p, bucket);
+  if (S.selDay && !ser.buckets.some(b => b.key === S.selDay)) S.selDay = null;
+  const sel = S.selDay;
+  let h = `<div class="tabs">${['week', 'cycle', 'year'].map(k => `<button class="${pk === k ? 'on' : ''}" data-action="setPKind" data-v="${k}">${k === 'cycle' && settings().cycleMode === 'calendar' ? 'شهري' : PK_L[k]}</button>`).join('')}</div>`;
+  if (sel) {
+    const b = ser.buckets.find(x => x.key === sel);
+    const lab = bucket === 'month' ? `${MONTHS[Number(sel.slice(5, 7)) - 1]} ${sel.slice(0, 4)}` : fday(sel);
+    h += periodBox(p, b.total, { nav: false, label: lab, clear: true, action: 'clearSel' });
+  } else h += periodBox(p, ser.total, { nav: true });
+  h += chartSvg(ser, p, {});
+  if (sel && bucket === 'day') h += cmpPill(E.compareDay(st, sel), p, true);
+  else if (!sel) h += cmpPill(E.comparePeriods(st, p), p);
+  const selB = sel ? ser.buckets.find(x => x.key === sel) : null;
+  const R = E.computePeriod(st, selB ? { start: selB.start, end: selB.end, kind: 'custom' } : p);
+  if (!sel) {
+    if (R.coverage.periodOpen) h += `<div class="banner i">الفترة ما انتهت: الأرقام حتى اليوم.</div>`;
+    R.coverage.notes.forEach(n => { h += `<div class="banner w">بيانات «${esc(n.name)}» ناقصة من ${fdate(n.from)} إلى ${fdate(n.to)}، فالأرقام المرتبطة بها ناقصة.</div>`; });
+    const spendSub = [R.temporaryCount ? `منه ${fmt(R.temporarySpend)} تحويلات بتصنيف مؤقت` : '', R.unownedCount ? `و${fmt(R.unownedSpend)} بأدوات مالكها غير محدد` : ''].filter(Boolean).join(' ');
+    const row = (dir, label, val, kind, sub, cls) => `<div class="r ${cls || ''}" ${kind ? `data-action="kpi" data-kind="${kind}"` : ''}>${dir}<div class="l">${label}${sub ? `<div class="s">${sub}</div>` : ''}</div><div class="v">${val}</div></div>`;
+    h += `<div class="card rows">
+      ${row(`<span class="dir n">${ico('inn')}</span>`, 'إجمالي الدخل المؤكد', money(R.income), 'income')}
+      ${row(`<span class="dir o">${ico('out')}</span>`, 'الإنفاق الحقيقي', money(R.spend), 'spend', spendSub)}
+      ${row(`<span class="dir x">${ico('wallet')}</span>`, 'الفائض', money(R.surplus, R.surplus < 0 ? 'neg' : ''), null, 'الدخل المؤكد − الإنفاق الحقيقي')}
+      ${row(`<span class="dir x">${ico('repeat')}</span>`, 'الالتزامات المعروفة', money(R.commitments), 'commitments', cnt(R.commitmentItems.length, 'op'))}
+      <details class="more"><summary>أرقام أكثر</summary>
+      ${row(`<span class="dir w">${ico('out')}</span>`, 'خارج غير مصنف', money(R.unclassifiedOut), 'unclassified_out', R.unclassifiedOutCount ? `${cnt(R.unclassifiedOutCount, 'op')}${R.roundUpUnknownCount ? `، منها تقريب ${fmt(R.roundUpUnknown)}` : ''}` : 'لا يوجد', 'sub')}
+      ${row(`<span class="dir w">${ico('inn')}</span>`, 'داخل غير مصنف', money(R.unclassifiedIn), 'unclassified_in', R.unclassifiedInCount ? cnt(R.unclassifiedInCount, 'op') : 'لا يوجد', 'sub')}
+      ${row(`<span class="dir x">${ico('swap')}</span>`, 'التحويلات الداخلية', money(R.internal), 'internal', `${cnt(R.internalCount, 'tr')}${R.internalOneSided ? `، ${R.internalOneSided === R.internalCount ? 'كلها' : R.internalOneSided} غير مكتمل الربط` : ''}`, 'sub')}
+      ${row(`<span class="dir x">${ico('card')}</span>`, 'سداد البطاقات', money(R.cardPayments), 'card', `${cnt(R.cardPaymentsCount, 'op')}${R.cardPaymentsUnmatched ? `، ${R.cardPaymentsUnmatched === R.cardPaymentsCount ? 'كلها' : R.cardPaymentsUnmatched} غير مطابقة` : ''}`, 'sub')}
+      ${row(`<span class="dir x">${ico('receipt')}</span>`, 'الرسوم', money(R.fees), 'fees', null, 'sub')}
+      </details></div>`;
+  }
+  h += `<div class="card"><h2 class="soft">وين راحت الدراهم؟</h2>`;
+  if (sel && bucket === 'day') {
+    const list = st.all('transactions').filter(t => (t.transactionDate || t.postingDate) === sel).sort(sortTx);
+    h += list.length ? list.map(t => txRow(t)).join('') : `<div class="muted">ما فيه عمليات في هذا اليوم.</div>`;
+  } else h += whereList(R);
+  h += `</div>`;
+  if (!sel) {
+    h += `<div class="grid2"><div class="card"><h2 class="soft">أكثر التجار</h2>`;
+    h += R.topMerchants.length ? `<div class="list">${R.topMerchants.slice(0, 6).map(m => { const mm = st.get('merchants', m.merchantId); const u = catUi(mm && (mm.categoryId || mm.suggestedCategoryId)); return `<div class="it" data-action="merchantDrill" data-id="${m.merchantId}">${icCircle(u, 's')}<div class="m"><div class="t">${esc(mm ? mm.name : '—')}</div><div class="s">${cnt(m.count, 'op')}</div></div>${money(m.amount)}</div>`; }).join('')}</div>` : `<div class="muted">لا يوجد.</div>`;
+    h += `</div><div class="card"><h2 class="soft">أعلى العمليات</h2>`;
+    h += R.topTx.length ? R.topTx.slice(0, 6).map(x => txRow(st.get('transactions', x.id), true)).join('') : `<div class="muted">لا يوجد.</div>`;
+    h += `</div></div>`;
+  }
+  return h;
 }
 
 /* ---------- العمليات ---------- */
@@ -435,7 +668,7 @@ function vReview() {
     p.matches.review.forEach(r => {
       const a = txById.get(r.newId), b = store().get('transactions', r.existingId);
       const d = S.decisions[r.newId];
-      h += `<div class="pair"><div class="small muted">النقاط ${r.score}${r.reason === 'tie' ? ' · أكثر من مرشح بنفس الدرجة' : r.reason === 'manual' ? ' · إدخال يدوي' : ''}</div><div class="cmp">
+      h += `<div class="pair"><div class="small muted">النقاط ${r.score}${r.reason === 'tie' ? ' · أكثر من مرشح بنفس الدرجة' : r.reason === 'manual' ? ' · إدخال يدوي' : ''}</div><div class="cmp2">
         <div><b>الجديدة</b><br>${esc(a.merchantRaw || a.beneficiaryRaw || '')}<br>${fdate(a.transactionDate)} ${a.time ? `<span class="num">${a.time}</span>` : ''}<br>${num(a.grossAmount)}</div>
         <div><b>الموجودة</b><br>${esc(b ? txTitle(b) : '')}<br>${b ? fdate(b.transactionDate) : ''} ${b && b.time ? `<span class="num">${b.time}</span>` : ''}<br>${b ? num(b.grossAmount) : ''} <span class="small muted">${b ? esc((b.sourceLinks || []).map(s => SRC_L[s.sourceType]).join('، ')) : ''}</span></div></div>
         <div class="seg"><button class="${d === 'merge' ? 'on' : ''}" data-action="decide" data-id="${r.newId}" data-val="merge">نفس العملية (دمج)</button><button class="${d === 'separate' ? 'on' : ''}" data-action="decide" data-id="${r.newId}" data-val="separate">عمليتان منفصلتان</button></div></div>`;
@@ -479,9 +712,9 @@ function guessTeach(rows, forcedHeader) {
 /* ---------- الحسابات ---------- */
 function vAccounts() {
   const st = store();
-  let h = `<div class="card"><h2>الحسابات</h2><div class="list">${E.accountBalances(st).map(a => `<div class="it" data-action="editAccount" data-id="${a.id}"><div class="m"><div class="t">${esc(a.name)}</div><div class="s">${esc(a.bank || '')} · ${ACC_L[a.type]}${a.last4 ? ' · …' + a.last4 : ''}${a.isMine ? '' : ' · ليس لك'}</div></div>${a.balance == null ? '<span class="muted small">الرصيد غير معروف</span>' : num(a.type === 'credit_card' ? Math.abs(a.balance) : a.balance)}</div>`).join('') || '<div class="muted">لا توجد حسابات بعد.</div>'}</div>
+  let h = `<div class="card"><h2>الحسابات</h2><div class="list">${E.accountBalances(st).map(a => `<div class="it" data-action="editAccount" data-id="${a.id}">${icCircle(a.type === 'credit_card' ? { color: PAL.blue, icon: 'card' } : a.type === 'cash' ? { color: PAL.green, icon: 'cash' } : a.type === 'wallet' ? { color: PAL.violet, icon: 'wallet' } : { color: '#3A49D6', icon: 'bank' }, 's')}<div class="m"><div class="t">${esc(a.name)}</div><div class="s">${esc(a.bank || '')} · ${ACC_L[a.type]}${a.last4 ? ' · …' + a.last4 : ''}${a.isMine ? '' : ' · ليس لك'}</div></div>${a.balance == null ? '<span class="muted small">الرصيد غير معروف</span>' : num(a.type === 'credit_card' ? Math.abs(a.balance) : a.balance)}</div>`).join('') || '<div class="muted">لا توجد حسابات بعد.</div>'}</div>
     <div class="btns" style="margin-top:10px"><button class="btn" data-action="newAccount">+ حساب</button><button class="btn" data-action="reconcileCash">تسوية النقد</button></div></div>`;
-  h += `<div class="card"><h2>أدوات الدفع</h2><p class="small muted">الأداة اللي مالكها غير محدد تنحسب في إنفاقك مؤقتًا مع علامة، وتقدر تستبعدها إذا طلعت لشخص ثاني.</p><div class="list">${st.all('instruments').map(i => { const a = accOf(i.accountId); return `<div class="it" data-action="editInstrument" data-id="${i.id}"><div class="m"><div class="t">${esc(i.label)}</div><div class="s">${esc(a ? a.name : '')} · المالك: ${OWNER_L[i.instrumentOwner]}${i.includeInPersonalSpend === false ? ' · خارج مصروفك' : ''}</div></div>${i.instrumentOwner === 'unknown' ? '<span class="b w">غير محدد</span>' : ''}</div>`; }).join('') || '<div class="muted">لا يوجد.</div>'}</div></div>`;
+  h += `<div class="card"><h2>أدوات الدفع</h2><p class="small muted">الأداة اللي مالكها غير محدد تنحسب في إنفاقك مؤقتًا مع علامة، وتقدر تستبعدها إذا طلعت لشخص ثاني.</p><div class="list">${st.all('instruments').map(i => { const a = accOf(i.accountId); return `<div class="it" data-action="editInstrument" data-id="${i.id}">${icCircle({ color: i.instrumentOwner === 'unknown' ? PAL.yellow : PAL.blue, icon: i.kind === 'cash' ? 'cash' : 'card' }, 's')}<div class="m"><div class="t">${esc(i.label)}</div><div class="s">${esc(a ? a.name : '')} · المالك: ${OWNER_L[i.instrumentOwner]}${i.includeInPersonalSpend === false ? ' · خارج مصروفك' : ''}</div></div>${i.instrumentOwner === 'unknown' ? '<span class="b w">غير محدد</span>' : ''}</div>`; }).join('') || '<div class="muted">لا يوجد.</div>'}</div></div>`;
   h += `<div class="card"><h2>المستفيدون <span class="sp"></span><button class="btn" data-action="go" data-view="beneficiaries">عرض الكل</button></h2><p class="small muted">${st.all('beneficiaries').length} مستفيد. التصنيف اللي تختاره لمستفيد ينحفظ لحوالاته الجاية.</p></div>`;
   return h;
 }
@@ -494,15 +727,16 @@ function vBeneficiaries() {
 
 /* ---------- المزيد ---------- */
 function vMore() {
-  const item = (view, t, s) => `<div class="it" data-action="go" data-view="${view}"><div class="m"><div class="t">${t}</div><div class="s">${s}</div></div><span class="muted">‹</span></div>`;
+  const item = (view, t, sub, icon, color) => `<div class="it" data-action="go" data-view="${view}">${icCircle({ color: color || PAL.blue, icon }, 's')}<div class="m"><div class="t">${t}</div><div class="s">${sub}</div></div>${ico('chevL', 'chev')}</div>`;
   return banners() + `<div class="card"><div class="list">
-    ${item('report', 'التقرير', 'تقرير الفترة المختارة، للطباعة أو الحفظ PDF')}
-    ${item('merchants', 'التجار', 'صنّف تاجرًا مرة ويتطبق على كل عملياته')}
-    ${item('beneficiaries', 'المستفيدون', 'تحويلاتك للأشخاص وحساباتك')}
-    ${item('imports', 'سجل الاستيراد', 'الكشوف المستوردة وحذفها')}
-    ${item('settings', 'الإعدادات', 'الدورة، يوم الراتب، أسماؤك، وجهة التقريب')}
-    ${item('backup', 'النسخ الاحتياطي', 'تصدير واستعادة')}
-    ${item('methods', 'طريقة الحساب', 'كيف ينحسب كل رقم')}
+    ${item('report', 'التقرير', 'تقرير الفترة المختارة، للطباعة أو الحفظ PDF', 'doc', PAL.violet)}
+    ${item('merchants', 'التجار', 'صنّف تاجرًا مرة ويتطبق على كل عملياته', 'store', PAL.magenta)}
+    ${item('beneficiaries', 'المستفيدون', 'تحويلاتك للأشخاص وحساباتك', 'people', PAL.yellow)}
+    ${item('imports', 'سجل الاستيراد', 'الكشوف المستوردة وحذفها', 'upload', PAL.aqua)}
+  </div></div><div class="card"><div class="list">
+    ${item('settings', 'الإعدادات', 'الدورة، يوم الراتب، أسماؤك، وجهة التقريب', 'gear', PAL.gray)}
+    ${item('backup', 'النسخ الاحتياطي', 'تصدير واستعادة', 'shield', PAL.green)}
+    ${item('methods', 'طريقة الحساب', 'كيف ينحسب كل رقم', 'chart', PAL.blue)}
   </div></div><div class="muted small" style="text-align:center">الإصدار ${E.version} · البيانات على هذا الجهاز فقط</div>`;
 }
 function vMerchants() {
@@ -547,7 +781,7 @@ function vReport() {
   const inP = (t) => { const d = t.transactionDate || t.postingDate; return d >= p.start && d <= p.end; };
   const all = st.all('transactions').filter(inP).sort(sortTx).reverse();
   let h = `<div class="noprint btns" style="margin-bottom:10px"><button class="btn p" data-action="print">طباعة / حفظ PDF</button><button class="btn" data-action="pickPeriod">تغيير الفترة</button></div><div class="report">`;
-  h += `<h1>التقرير المالي</h1><div class="muted">${p.kind === 'cycle' ? 'دورة الراتب' : p.kind === 'month' ? 'الشهر الميلادي' : 'فترة مخصصة'}: ${fperiod(p)} · أُعد في ${fday(E.todayISO())}</div>`;
+  h += `<h1>التقرير المالي</h1><div class="muted">${{ cycle: 'دورة الراتب', month: 'الشهر الميلادي', week: 'الأسبوع', year: 'السنة' }[p.kind] || 'فترة مخصصة'}: ${fperiod(p)} · أُعد في ${fday(E.todayISO())}</div>`;
   if (R.coverage.periodOpen) h += `<p class="small"><b>ملاحظة:</b> الفترة ما انتهت؛ الأرقام حتى تاريخ إعداد التقرير.</p>`;
   R.coverage.notes.forEach(n => { h += `<p class="small"><b>بيانات ناقصة:</b> «${esc(n.name)}» لا يغطي الفترة من ${fdate(n.from)} إلى ${fdate(n.to)}.</p>`; });
   h += `<h2>الملخص</h2><div class="rk"><div><div class="l">الدخل المؤكد</div><div class="v">${num(R.income)}</div></div><div><div class="l">الإنفاق الحقيقي</div><div class="v">${num(R.spend)}</div></div><div><div class="l">الفائض</div><div class="v">${num(R.surplus)}</div></div>
@@ -605,6 +839,13 @@ function vMethods() {
   <li><b>الالتزامات المعروفة</b> = عمليات دفع تكرارها الفعلي «متكرر» وتصنيفها أو تصنيفها الفرعي معلّم «التزام».</li>
   <li>التكرار والضرورة يؤخذان من الأدق: العملية ← التاجر ← التصنيف الفرعي ← التصنيف الرئيسي.</li></ul>
   <h3>الدورة المالية</h3><p>تبدأ من تاريخ عملية الراتب («إيداع راتب»)، وكل عمليات ذاك اليوم للدورة الجديدة، وتنتهي باليوم اللي قبل الراتب الجاي. أي شهر ما فيه راتب يُستخدم فيه يوم الراتب الافتراضي. التوزيع على الدورات بتاريخ العملية الفعلي (المكتوب في الوصف)، وتاريخ قيد البنك احتياطي.</p>
+  <h3>صفحة «صرفياتك»</h3><ul>
+  <li><b>أسبوعي</b>: من الأحد إلى السبت. <b>الدورة</b>: دورة الراتب، أو الشهر الميلادي إذا اخترته في الإعدادات. <b>سنوي</b>: من 1 يناير إلى 31 ديسمبر، والأعمدة لكل شهر.</li>
+  <li>كل عمود = الإنفاق الحقيقي لذاك اليوم (أو الشهر) بنفس طريقة حساب الإنفاق الحقيقي فوق، فمجموع الأعمدة يساوي إنفاق الفترة.</li>
+  <li>الألوان لأكبر خمسة تصنيفات في الفترة، ولكل تصنيف لونه الثابت. إذا تصنيفان لهما نفس اللون، الأصغر ينضم لـ«باقي التصنيفات» (رمادي).</li>
+  <li><b>المقارنة</b>: الفترة اللي ما انتهت تُقارن أيامها اللي مضت (حتى اليوم) بنفس عدد الأيام من بداية الفترة السابقة. الفترة المنتهية تُقارن بالسابقة كاملة. إذا بيانات أي حساب ناقصة في إحدى الفترتين، ما تظهر المقارنة.</li>
+  <li>إذا اخترت يومًا من الرسم، يُقارن باليوم اللي قبله.</li>
+  <li>«وين راحت الدراهم؟»: نسبة كل تصنيف = إنفاقه ÷ الإنفاق الحقيقي للفترة. والرقم الصغير بجانبها = نسبة أكبر تصنيف فرعي فيه من نفس الإجمالي.</li></ul>
   <h3>بطاقة الإنماء الائتمانية</h3><p>الرصيد الختامي = الرصيد السابق (باتجاهه) + المشتريات + الرسوم − المدفوعات − الاستردادات. الملف يكتب الرصيد السابق بدون إشارة، فيُحسب بالاتجاهين ويُعتمد اللي يطابق «كامل المبلغ المستحق» و«الحد − المتاح» معًا؛ وإذا ما اتضح يسألك التطبيق.</p>
   <h3>منع التكرار</h3><ul>
   <li>عمليات نفس الملف ما تندمج أبدًا.</li>
@@ -632,6 +873,11 @@ function askScope(what) {
     <div class="it" data-action="answer" data-val="all"><div class="m"><div class="t">السابقة والقادمة</div><div class="s">كل العمليات ما عدا اللي صنفتها يدويًا لعملية وحدة.</div></div></div></div>`);
 }
 
+function catPath(cat, sub) {
+  if (!cat) return 'بدون تصنيف';
+  const s = sub ? store().get('categories', sub) : null;
+  return s ? `${E.catName(store(), cat)} › ${s.name}` : E.catName(store(), cat);
+}
 function sheetTx(id) {
   const st = store(), t = st.get('transactions', id); if (!t) return;
   const m = merchantOf(t), b = benOf(t), ins = insOf(t), acc = accOf(t.accountId);
@@ -639,33 +885,78 @@ function sheetTx(id) {
   const types = ['Payment', 'Income', 'InternalTransfer', 'CreditCardPayment', 'PersonTransfer', 'Refund', 'CashWithdrawal', 'Unknown'];
   const recDef = E.effective(st, Object.assign({}, t, { recurrenceType: null }), 'rec'), necDef = E.effective(st, Object.assign({}, t, { necessityType: null }), 'nec');
   const recL = { recurring: 'متكرر', variable: 'متغير' }, necL = { essential: 'ضروري', discretionary: 'اختياري' };
-  let h = `<h3>${esc(txTitle(t))}<span class="sp"></span><button class="close" data-action="closeSheet">×</button></h3>
-    <div style="font-size:22px;font-weight:700;margin-bottom:4px">${amountCell(t)}</div><div class="muted small">${fday(t.transactionDate)}${t.time ? ` · <span class="num">${t.time}</span>` : ''}</div>${badges(t)}`;
+  const u = txUi(t);
+  const src0 = (t.sourceLinks || [])[0];
+  let h = `<h3><button class="close" data-action="closeSheet" aria-label="إغلاق">×</button><span class="sp"></span></h3>
+    <div class="txh">
+      ${canCat ? `<button class="catbtn" data-action="txCat" data-id="${t.id}" style="border-color:${tint(u.color, '66')}"><span style="color:${u.color};display:flex">${ico(u.icon)}</span><span>${esc(catLabel(t))}</span></button>`
+        : `<div class="catbtn" style="cursor:default;border-color:${tint(u.color, '66')}"><span style="color:${u.color};display:flex">${ico(u.icon)}</span><span>${TYPE_L[t.transactionType]}</span></div>`}
+      <div class="nm">${m ? `<span class="ic s" style="background:var(--pri-soft);color:var(--pri)">${ico('store')}</span>` : b ? `<span class="ic s" style="background:var(--pri-soft);color:var(--pri)">${ico('person')}</span>` : ''}<span>${esc(txTitle(t))}</span>${m ? `<a data-action="merchantDrill" data-id="${m.id}" aria-label="كل عمليات التاجر" style="display:flex">${ico('chevL')}</a>` : ''}</div>
+      <div class="amt">${money(t.grossAmount)}${dirBadge(t)}</div>
+      <div class="badges" style="justify-content:center">${badges(t).replace(/^<div class="badges">|<\/div>$/g, '')}</div>
+    </div>
+    <input type="hidden" id="s_cat" value="${esc(t.categoryId || '')}"><input type="hidden" id="s_sub" value="${esc(t.subcategoryId || '')}">
+    <div class="drow">${ico('note')}<div class="m"><input type="text" id="s_note" placeholder="إضافة ملاحظة" value="${esc(t.note || '')}"></div></div>
+    <div class="drow">${ico(acc && acc.type === 'credit_card' ? 'card' : 'bank')}<div class="m">${esc(acc ? acc.name : '—')}${ins ? ` · ${esc(ins.label)}` : ''}${t.paymentMethod && t.paymentMethod !== 'Unknown' ? ` · ${METHOD_L[t.paymentMethod] || esc(t.paymentMethod)}` : ''}</div></div>
+    <div class="drow">${ico('cal')}<div class="m">${fday(t.transactionDate)}${t.time ? '، ' + ftime(t.time) : ''}</div></div>
+    ${src0 ? `<div class="drow" style="align-items:flex-start">${ico('msg')}<div class="m small">${esc(src0.rawDescription || '')}</div></div>` : ''}`;
   if (t.transferSubtype === 'round_up') {
     const orig = t.roundUpOfId ? st.get('transactions', t.roundUpOfId) : null;
-    h += `<div class="banner i" style="margin-top:10px"><div>تقريب لأقرب ريال${orig ? ` لشراء ${fmt(orig.grossAmount)} من ${esc(txTitle(orig))}` : ''}. <a href="#" data-action="setRoundUp">حدد وجهة التقريب</a> (تنطبق على كل عمليات التقريب).</div></div>`;
+    h += `<div class="banner i" style="margin-top:10px"><div>تقريب لأقرب ريال${orig ? ` لشراء ${fmt(orig.grossAmount)} من ${esc(txTitle(orig))}` : ''}. <a data-action="setRoundUp">حدد وجهة التقريب</a> (تنطبق على كل عمليات التقريب).</div></div>`;
   }
-  h += `<label class="f">النوع</label><select id="s_type">${types.map(x => `<option value="${x}" ${x === t.transactionType ? 'selected' : ''}>${TYPE_L[x]}</option>`).join('')}</select>
+  h += `<details class="more"><summary>تعديل النوع والخصائص والتفاصيل</summary>
+    <label class="f">النوع</label><select id="s_type">${types.map(x => `<option value="${x}" ${x === t.transactionType ? 'selected' : ''}>${TYPE_L[x]}</option>`).join('')}</select>
     <div id="s_cp_wrap" class="${t.transactionType === 'InternalTransfer' ? '' : 'hide'}"><label class="f">الحساب الآخر (لك)</label><select id="s_cp">${ownAccountOptions(t.counterpartyAccountId, true)}</select></div>`;
-  if (canCat) {
-    h += `<label class="f">التصنيف</label><select id="s_cat" data-change="catChanged">${catOptions(t.categoryId, true)}</select><label class="f">التصنيف الفرعي</label><select id="s_sub">${subOptions(t.categoryId, t.subcategoryId)}</select>`;
-    h += `<div class="grid2"><div><label class="f">التكرار</label><select id="s_rec"><option value="">افتراضي (${recL[recDef] || '—'})</option><option value="recurring" ${t.recurrenceType === 'recurring' ? 'selected' : ''}>متكرر</option><option value="variable" ${t.recurrenceType === 'variable' ? 'selected' : ''}>متغير</option></select></div>
+  if (canCat) h += `<div class="grid2"><div><label class="f">التكرار</label><select id="s_rec"><option value="">افتراضي (${recL[recDef] || '—'})</option><option value="recurring" ${t.recurrenceType === 'recurring' ? 'selected' : ''}>متكرر</option><option value="variable" ${t.recurrenceType === 'variable' ? 'selected' : ''}>متغير</option></select></div>
       <div><label class="f">الضرورة</label><select id="s_nec"><option value="">افتراضي (${necL[necDef] || '—'})</option><option value="essential" ${t.necessityType === 'essential' ? 'selected' : ''}>ضروري</option><option value="discretionary" ${t.necessityType === 'discretionary' ? 'selected' : ''}>اختياري</option></select></div></div>`;
-  }
-  h += `<label class="f">ملاحظة</label><textarea id="s_note" placeholder="اختياري">${esc(t.note || '')}</textarea>
-    <div class="btns" style="margin-top:12px"><button class="btn p" data-action="saveTx" data-id="${t.id}">حفظ</button>${(t.sourceLinks || []).every(s => s.sourceType === 'manual' || s.sourceType === 'cash_reconciliation') ? `<button class="btn r" data-action="deleteTx" data-id="${t.id}">حذف</button>` : ''}</div>`;
-  h += `<h3 style="margin-top:18px">التفاصيل</h3><dl class="kv">
+  h += `<dl class="kv" style="margin-top:14px">
     <dt>تاريخ العملية</dt><dd>${fdate(t.transactionDate, true)}</dd>${t.postingDate && t.postingDate !== t.transactionDate ? `<dt>تاريخ القيد</dt><dd>${fdate(t.postingDate, true)}</dd>` : ''}
-    <dt>الحساب</dt><dd>${esc(acc ? acc.name : '—')}</dd><dt>الأداة</dt><dd>${ins ? esc(ins.label) + ` (المالك: ${OWNER_L[ins.instrumentOwner]}) <a href="#" data-action="editInstrument" data-id="${ins.id}">تعديل</a>` : 'أداة دفع غير محددة'}</dd>
-    <dt>الطريقة</dt><dd>${METHOD_L[t.paymentMethod] || t.paymentMethod || 'غير محددة'}</dd>
-    ${m ? `<dt>التاجر</dt><dd>${esc(m.name)} <a href="#" data-action="merchantDrill" data-id="${m.id}">كل عملياته</a></dd>` : ''}
-    ${b ? `<dt>المستفيد</dt><dd>${esc(b.name)} · ${esc(b.bank || '')} …${esc(b.accountLast4 || '')} <a href="#" data-action="editBeneficiary" data-id="${b.id}">تعديل</a></dd>` : ''}
+    <dt>الأداة</dt><dd>${ins ? esc(ins.label) + ` (المالك: ${OWNER_L[ins.instrumentOwner]}) <a data-action="editInstrument" data-id="${ins.id}">تعديل</a>` : 'أداة دفع غير محددة'}</dd>
+    ${m ? `<dt>التاجر</dt><dd>${esc(m.name)} <a data-action="editMerchant" data-id="${m.id}">تعديل التاجر</a></dd>` : ''}
+    ${b ? `<dt>المستفيد</dt><dd>${esc(b.name)} · ${esc(b.bank || '')} …${esc(b.accountLast4 || '')} <a data-action="editBeneficiary" data-id="${b.id}">تعديل</a></dd>` : ''}
     <dt>الإجمالي</dt><dd>${num(t.grossAmount)}</dd>${(t.feeAmount || t.vatAmount) ? `<dt>الأصل</dt><dd>${num(t.principalAmount)}</dd><dt>الرسوم</dt><dd>${num(t.feeAmount)}${t.feeTaxBreakdownKnown === false ? ' (الضريبة داخلها؛ التقسيم غير معروف)' : ''}</dd>${t.feeTaxBreakdownKnown !== false ? `<dt>ضريبة الرسوم</dt><dd>${num(t.vatAmount)}</dd>` : ''}` : ''}
     ${t.foreignAmount ? `<dt>المبلغ الأصلي</dt><dd><span class="num">${fmt(t.foreignAmount)} ${esc(t.foreignCurrency || '')}</span></dd>` : ''}
     ${t.reference ? `<dt>المرجع</dt><dd class="small"><span class="num">${esc(t.reference)}</span></dd>` : ''}${t.balanceAfter != null ? `<dt>الرصيد بعد العملية</dt><dd>${num(t.balanceAfter)}</dd>` : ''}
-    ${(t.linkedTransactionIds || []).length ? `<dt>مرتبطة بـ</dt><dd>${t.linkedTransactionIds.map(x => { const o = st.get('transactions', x); return o ? `<a href="#" data-action="openTx" data-id="${o.id}">${esc(txTitle(o))} ${fmt(o.grossAmount)}</a>` : ''; }).join('<br>')}</dd>` : ''}</dl>`;
-  h += `<h3 style="margin-top:14px">المصادر (${(t.sourceLinks || []).length})</h3>${(t.sourceLinks || []).map(s => { const imp = s.importId ? st.get('imports', s.importId) : null; return `<div class="small muted" style="margin-top:6px">${SRC_L[s.sourceType] || s.sourceType}${imp ? ' · ' + esc(imp.filename) : ''}</div><div class="raw">${esc(s.rawDescription || '')}</div>`; }).join('')}`;
+    ${(t.linkedTransactionIds || []).length ? `<dt>مرتبطة بـ</dt><dd>${t.linkedTransactionIds.map(x => { const o = st.get('transactions', x); return o ? `<a data-action="openTx" data-id="${o.id}">${esc(txTitle(o))} ${fmt(o.grossAmount)}</a>` : ''; }).join('<br>')}</dd>` : ''}</dl>
+    <h3 style="margin-top:14px;font-size:15px">المصادر (${(t.sourceLinks || []).length})</h3>${(t.sourceLinks || []).map(sl => { const imp = sl.importId ? st.get('imports', sl.importId) : null; return `<div class="small muted" style="margin-top:6px">${SRC_L[sl.sourceType] || sl.sourceType}${imp ? ' · ' + esc(imp.filename) : ''}</div><div class="raw">${esc(sl.rawDescription || '')}</div>`; }).join('')}
+    </details>
+    <div class="btns" style="margin-top:14px"><button class="btn p" style="flex:1" data-action="saveTx" data-id="${t.id}">حفظ</button>${(t.sourceLinks || []).every(sl => sl.sourceType === 'manual' || sl.sourceType === 'cash_reconciliation') ? `<button class="btn r" data-action="deleteTx" data-id="${t.id}">حذف</button>` : ''}</div>`;
   openSheet(h);
+}
+
+/* ---------- اختيار التصنيف (نافذة فوق النافذة) ---------- */
+function pickCategory(cur, opts) {
+  opts = opts || {};
+  return new Promise(res => {
+    S.pickResolve = res;
+    S.pick = { cat: cur.cat || null, sub: cur.sub || null, stage: 'grid', allowNone: opts.allowNone !== false };
+    renderPick();
+  });
+}
+function renderPick() {
+  const P = S.pick, st = store();
+  const byOrder = (a, b) => a.order - b.order;
+  let h = `<div class="sheet-bg" data-action="pickBg"><div class="sheet" role="dialog" aria-label="اختر التصنيف"><h3><button class="close" data-action="pickClose" aria-label="إغلاق">×</button><span class="sp" style="text-align:center;color:var(--ink-3);font-weight:500">اختر التصنيف</span><span style="width:34px"></span></h3>`;
+  if (P.stage === 'grid') {
+    const mains = st.all('categories').filter(c => !c.parentId && c.active !== false).sort(byOrder);
+    h += `<div class="catgrid">${mains.map(c => { const u = catUi(c.id); return `<button data-action="pickMain" data-id="${c.id}" class="${P.cat === c.id ? 'on' : ''}"><span style="color:${u.color};display:flex">${ico(u.icon)}</span><span>${esc(c.name)}</span></button>`; }).join('')}</div>`;
+    if (P.allowNone) h += `<div style="text-align:center;margin-top:16px"><button class="btn" data-action="pickNone">بدون تصنيف</button></div>`;
+  } else {
+    const c = st.get('categories', P.cat), u = catUi(c.id);
+    const subs = st.all('categories').filter(x => x.parentId === c.id && x.active !== false).sort(byOrder);
+    h += `<div class="subpick"><div class="sel"><span class="catbtn" style="border-color:${tint(u.color, '66')}"><span style="color:${u.color};display:flex">${ico(u.icon)}</span><span>${esc(c.name)}</span></span><button class="close" data-action="pickBack" aria-label="رجوع للتصنيفات">×</button></div>
+      <div class="chips2"><button data-action="pickSub" data-id="" class="${!P.sub ? 'on' : ''}">${esc(c.name)} بدون فرعي</button>${subs.map(x => `<button data-action="pickSub" data-id="${x.id}" class="${P.sub === x.id ? 'on' : ''}">${SUB_ICON[x.id] ? `<span style="color:${u.color};display:flex">${ico(SUB_ICON[x.id])}</span>` : ''}${esc(x.name)}</button>`).join('')}</div></div>`;
+  }
+  $('sheet2').innerHTML = h + `</div></div>`;
+}
+function finishPick(v) { $('sheet2').innerHTML = ''; const r = S.pickResolve; S.pickResolve = null; S.pick = null; if (r) r(v); }
+// حقل التصنيف داخل النماذج: زر يفتح الاختيار، والقيمة في حقلين مخفيين
+function catFieldInner(cat, sub) {
+  const u = cat ? catUi(sub && SUB_ICON[sub] ? sub : cat) : catUi(null);
+  return `${icCircle(u, 's')}<span>${esc(catPath(cat, sub))}</span><span class="sp"></span>${ico('chevL')}`;
+}
+function catField(cat, sub) {
+  return `<input type="hidden" id="s_cat" value="${esc(cat || '')}"><input type="hidden" id="s_sub" value="${esc(sub || '')}"><button type="button" class="catfield" id="catfield" data-action="catField">${catFieldInner(cat, sub)}</button>`;
 }
 
 function sheetPeriod() {
@@ -698,7 +989,7 @@ function sheetManual(kind, pre) {
     <label class="f">المبلغ</label><input type="text" inputmode="decimal" id="m_amt" value="${pre.amount || ''}" placeholder="0.00">
     <label class="f">التاريخ</label><input type="date" id="m_date" value="${E.todayISO()}">`;
   if (kind === 'expense') h += `<label class="f">الوصف أو التاجر</label><input type="text" id="m_desc" value="${esc(pre.description || '')}"><label class="f">دُفع عن طريق</label><select id="m_ins">${insList.map(i => `<option value="${i.id}" ${i.id === cashIns.id ? 'selected' : ''}>${esc(i.label)}</option>`).join('')}</select>
-    <label class="f">التصنيف</label><select id="s_cat" data-change="catChanged">${catOptions(pre.categoryId, true)}</select><label class="f">التصنيف الفرعي</label><select id="s_sub">${subOptions(pre.categoryId, pre.subcategoryId)}</select>
+    <label class="f">التصنيف</label>${catField(pre.categoryId, pre.subcategoryId)}
     <p class="small muted">إذا دفعت بالبطاقة، العملية بتظهر لاحقًا في الكشف، والتطبيق بيعرضها عليك كتكرار محتمل عشان ما تنحسب مرتين.</p>`;
   if (kind === 'income') h += `<label class="f">الوصف</label><input type="text" id="m_desc"><label class="f">النوع</label><select id="m_inc">${Object.entries(INCOME_L).map(([k, v]) => `<option value="${k}" ${k === 'other' ? 'selected' : ''}>${v}</option>`).join('')}</select><label class="f">الحساب</label><select id="m_acc">${st.all('accounts').map(a => `<option value="${a.id}">${esc(a.name)}</option>`).join('')}</select>`;
   if (kind === 'withdrawal' || kind === 'deposit') h += `<label class="f">${kind === 'withdrawal' ? 'سُحب من' : 'أُودع في'}</label><select id="m_acc">${st.all('accounts').filter(a => a.type !== 'cash' && a.type !== 'credit_card').map(a => `<option value="${a.id}">${esc(a.name)}</option>`).join('')}</select>`;
@@ -726,7 +1017,7 @@ function sheetBeneficiary(id) {
   const b = store().get('beneficiaries', id); if (!b) return;
   openSheet(`<h3>${esc(b.name)}<span class="sp"></span><button class="close" data-action="closeSheet">×</button></h3><div class="small muted">${esc(b.bank || '')} · حساب …${esc(b.accountLast4 || '')}</div>
     <label class="f"><input type="checkbox" id="b_mine" ${b.isMyAccount ? 'checked' : ''}> هذا حسابي (التحويلات له تحويلات داخلية)</label>
-    <label class="f">التصنيف المعتاد لحوالاته</label><select id="s_cat" data-change="catChanged">${catOptions(b.categoryId, true)}</select><label class="f">التصنيف الفرعي</label><select id="s_sub">${subOptions(b.categoryId, b.subcategoryId)}</select>
+    <label class="f">التصنيف المعتاد لحوالاته</label>${catField(b.categoryId, b.subcategoryId)}
     <label class="f">ملاحظات</label><input type="text" id="b_notes" value="${esc(b.notes || '')}">
     <div class="btns" style="margin-top:12px"><button class="btn p" data-action="saveBeneficiary" data-id="${b.id}">حفظ</button><button class="btn" data-action="benDrill" data-id="${b.id}">حوالاته</button></div>`);
 }
@@ -734,7 +1025,7 @@ function sheetMerchant(id) {
   const m = store().get('merchants', id); if (!m) return;
   const cat = m.categoryId || m.suggestedCategoryId, sub = m.categoryId ? m.subcategoryId : m.suggestedSubcategoryId;
   openSheet(`<h3>${esc(m.name)}<span class="sp"></span><button class="close" data-action="closeSheet">×</button></h3><div class="small muted">الأسماء في الكشوف: ${esc((m.aliases || []).join('، '))}</div>
-    <label class="f">التصنيف</label><select id="s_cat" data-change="catChanged">${catOptions(cat, true)}</select><label class="f">التصنيف الفرعي</label><select id="s_sub">${subOptions(cat, sub)}</select>
+    <label class="f">التصنيف</label>${catField(cat, sub)}
     <div class="grid2"><div><label class="f">التكرار (للتاجر)</label><select id="mm_rec"><option value="">من التصنيف</option><option value="recurring" ${m.defaultRecurrenceType === 'recurring' ? 'selected' : ''}>متكرر</option><option value="variable" ${m.defaultRecurrenceType === 'variable' ? 'selected' : ''}>متغير</option></select></div>
     <div><label class="f">الضرورة (للتاجر)</label><select id="mm_nec"><option value="">من التصنيف</option><option value="essential" ${m.defaultNecessityType === 'essential' ? 'selected' : ''}>ضروري</option><option value="discretionary" ${m.defaultNecessityType === 'discretionary' ? 'selected' : ''}>اختياري</option></select></div></div>
     <p class="small muted">يتطبق على كل عمليات التاجر السابقة والقادمة، ما عدا اللي صنفتها يدويًا لعملية وحدة.</p>
@@ -773,12 +1064,20 @@ const A = {
   pickFile: () => $('fileInput').click(),
   pickRestore: () => $('restoreInput').click(),
   pickPeriod: () => sheetPeriod(),
-  setPeriod: (el) => { S.period = E.listCycles(store())[+el.dataset.i]; S.filters.allTime = false; closeSheet(); render(); },
+  setPeriod: (el) => { S.period = E.listCycles(store())[+el.dataset.i]; S.selDay = null; S.filters.allTime = false; closeSheet(); render(); },
   setPeriodCurrent: () => { S.period = E.currentCycle(store()) || S.period; render(); },
   setPeriodPrev: () => { const c = E.currentCycle(store()); if (c) S.period = E.previousPeriod(store(), c); render(); },
   allTime: () => { S.filters.allTime = true; closeSheet(); render(); },
-  setCustomPeriod: () => { const a = $('p_from').value, b = $('p_to').value; if (!a || !b || a > b) return toast('تاريخ غير صحيح'); S.period = { start: a, end: b, kind: 'custom' }; S.filters.allTime = false; closeSheet(); render(); },
-  kpi: (el) => { const k = el.dataset.kind; closeSheet(); go('txs', { filters: { kind: k === 'unclassified_all' ? 'unclassified_all' : k } }); },
+  setCustomPeriod: () => { const a = $('p_from').value, b = $('p_to').value; if (!a || !b || a > b) return toast('تاريخ غير صحيح'); S.period = { start: a, end: b, kind: 'custom' }; S.selDay = null; S.filters.allTime = false; closeSheet(); render(); },
+  kpi: (el) => { const k = el.dataset.kind; if (el.dataset.p === 'cur') { const c = E.currentCycle(store()); if (c) S.period = c; } closeSheet(); go('txs', { filters: { kind: k } }); },
+  back: () => go(NAV_OF[S.view] || 'home'),
+  setPKind: (el) => { S.period = E.periodOf(store(), el.dataset.v, E.todayISO()) || S.period; S.selDay = null; render(); },
+  pShift: (el) => { const np = E.shiftPeriod(store(), S.period, Number(el.dataset.dir)); if (np) { S.period = np; S.selDay = null; render(); } },
+  selDay: (el) => { S.selDay = S.selDay === el.dataset.d ? null : el.dataset.d; render(); },
+  clearSel: (el, ev) => { if (ev) ev.stopPropagation(); S.selDay = null; render(); },
+  weekToSpend: (el) => { S.period = E.weekOf(E.todayISO()); S.selDay = (el && el.dataset.d) || null; go('spend'); },
+  accDrill: (el) => go('txs', { filters: { kind: 'all', accountId: el.dataset.id, allTime: true } }),
+  allTxs: () => go('txs', { filters: { kind: 'all', allTime: true } }),
   catDrill: (el) => go('txs', { filters: { kind: 'all', categoryId: el.dataset.cat } }),
   merchantDrill: (el) => { closeSheet(); go('txs', { filters: { kind: 'all', merchantId: el.dataset.id, allTime: true } }); },
   benDrill: (el) => { closeSheet(); go('txs', { filters: { kind: 'all', beneficiaryId: el.dataset.id, allTime: true } }); },
@@ -788,7 +1087,7 @@ const A = {
   applyFilters: () => { const v = (id) => $(id).value || null; S.filters = Object.assign({}, S.filters, { kind: v('f_kind') || 'all', accountId: v('f_acc'), instrumentId: v('f_ins'), method: v('f_method'), categoryId: v('f_cat'), source: v('f_src') }); closeSheet(); render(); },
   clearFilters: () => { S.filters = { kind: 'all', allTime: false }; S.q = ''; closeSheet(); render(); },
   openTx: (el) => sheetTx(el.dataset.id),
-  saveTx: async (el) => {
+  saveTx: async (el, ev, opts) => {
     const st = store(), t = st.get('transactions', el.dataset.id); if (!t) return;
     // نقرأ كل قيم النموذج قبل أي سؤال (سؤال النطاق يستبدل النافذة)
     const form = { type: $('s_type').value, cp: $('s_cp') ? $('s_cp').value : null, hasCat: !!$('s_cat'), cat: $('s_cat') ? ($('s_cat').value || null) : null,
@@ -808,7 +1107,7 @@ const A = {
       const cat = form.cat, sub = form.sub;
       if (cat !== (t.categoryId || null) || sub !== (t.subcategoryId || null)) {
         let scope = 'this';
-        if (t.merchantId || t.beneficiaryId) { scope = await askScope(t.merchantId ? `التاجر: ${txTitle(t)}` : `المستفيد: ${txTitle(t)}`); if (!scope) return; }
+        if (t.merchantId || t.beneficiaryId) { scope = await askScope(t.merchantId ? `التاجر: ${txTitle(t)}` : `المستفيد: ${txTitle(t)}`); if (!scope) { if (opts && opts.reopen) sheetTx(t.id); return; } }
         const n = E.setCategory(st, t.id, cat, sub, scope);
         if (n > 1) toast(`تصنّف ${cnt(n, 'op')}`);
       }
@@ -818,7 +1117,27 @@ const A = {
     const t3 = st.get('transactions', t.id); const note = form.note;
     if ((t3.note || '') !== note) { t3.note = note; t3.updatedAt = new Date().toISOString(); st.put('transactions', t3); }
     st.touch(); await persist(); closeSheet(); render(); toast('تم الحفظ');
+    if (opts && opts.reopen) sheetTx(t.id);
   },
+  txCat: async (el) => {
+    const id = el.dataset.id;
+    const r = await pickCategory({ cat: $('s_cat').value || null, sub: $('s_sub').value || null });
+    if (!r || !$('s_cat')) return;
+    $('s_cat').value = r.cat || ''; $('s_sub').value = r.sub || '';
+    await A.saveTx({ dataset: { id } }, null, { reopen: true });
+  },
+  catField: async () => {
+    const r = await pickCategory({ cat: $('s_cat').value || null, sub: $('s_sub').value || null });
+    if (!r || !$('s_cat')) return;
+    $('s_cat').value = r.cat || ''; $('s_sub').value = r.sub || '';
+    $('catfield').innerHTML = catFieldInner(r.cat, r.sub);
+  },
+  pickMain: (el) => { const id = el.dataset.id; const subs = store().all('categories').filter(c => c.parentId === id && c.active !== false); if (!subs.length) return finishPick({ cat: id, sub: null }); if (S.pick.cat !== id) S.pick.sub = null; S.pick.cat = id; S.pick.stage = 'subs'; renderPick(); },
+  pickSub: (el) => finishPick({ cat: S.pick.cat, sub: el.dataset.id || null }),
+  pickNone: () => finishPick({ cat: null, sub: null }),
+  pickBack: () => { S.pick.stage = 'grid'; renderPick(); },
+  pickClose: () => finishPick(null),
+  pickBg: (el, ev) => { if (ev.target === el) finishPick(null); },
   deleteTx: async (el) => { if (!await confirmBox('حذف العملية', 'حذف هذا الإدخال اليدوي نهائيًا؟', 'حذف', true)) return; store().remove('transactions', el.dataset.id); store().touch(); await persist(); render(); toast('تم الحذف'); },
   quickAdd: () => { const q = E.parseQuickEntry($('quick').value); if (!q.amount) return toast('اكتب المبلغ، مثل: قهوة 18'); sheetManual('expense', q); },
   manual: (el) => sheetManual(el.dataset.kind),
@@ -941,7 +1260,7 @@ function onClick(ev) {
   const el = ev.target.closest('[data-action]'); if (!el) return;
   const fn = A[el.dataset.action]; if (!fn) return;
   if (el.tagName === 'A') ev.preventDefault();
-  if (el.dataset.action === 'sheetBg' && ev.target !== el) return;
+  if ((el.dataset.action === 'sheetBg' || el.dataset.action === 'pickBg') && ev.target !== el) return;
   fn(el, ev);
 }
 function onChange(ev) {
@@ -958,7 +1277,7 @@ function onChange(ev) {
 document.addEventListener('input', (ev) => {
   if (ev.target.id === 'q') { S.q = ev.target.value; clearTimeout(S._qt); S._qt = setTimeout(() => { const box = $('txlist'); if (box) box.innerHTML = txListHtml(); }, 200); }
 });
-document.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' && ev.target.id === 'quick') A.quickAdd(); if (ev.key === 'Escape' && $('sheet').innerHTML) closeSheet(null); });
+document.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' && ev.target.id === 'quick') A.quickAdd(); if (ev.key === 'Escape') { if ($('sheet2').innerHTML) finishPick(null); else if ($('sheet').innerHTML) closeSheet(null); } });
 
 /* ---------- الملفات ---------- */
 async function readSheetRows(file) {
