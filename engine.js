@@ -192,6 +192,7 @@ const DEFAULT_SETTINGS = {
   baseCurrency: 'SAR', roundUpDestination: { kind: 'unknown', accountId: null },
   backupReminderDays: 7, lastBackupAt: null, lastChangeAt: null, schemaVersion: 2,
   limitAlertPct: 80, inbox: { url: '', token: '', autoFetch: true, lastFetchAt: null },
+  smsDateShapes: {}, dateShapesMigrated: false,
 };
 
 class Store {
@@ -667,11 +668,11 @@ function resolveMerchant(store, rawName, planMerchants) {
     m = all.find(x => x.seedKey === seed.name);
     if (m) { if (!m.aliases.includes(norm)) { m.aliases.push(norm); m._aliasAdded = true; } return m; }
     m = { id: uid(), name: seed.name, seedKey: seed.name, aliases: [norm], keywords: [], categoryId: null, subcategoryId: null, categorySource: null,
-      suggestedCategoryId: seed.cat, suggestedSubcategoryId: seed.sub || null, defaultRecurrenceType: seed.rec || null, defaultNecessityType: null, _new: true };
+      suggestedCategoryId: liveCat(store, seed.cat, seed.sub)[0], suggestedSubcategoryId: liveCat(store, seed.cat, seed.sub)[1], defaultRecurrenceType: seed.rec || null, defaultNecessityType: null, _new: true };
     planMerchants.set(m.id, m); return m;
   }
   m = { id: uid(), name: cleanText(rawName).replace(/_+$/, ''), seedKey: null, aliases: [norm], keywords: [], categoryId: null, subcategoryId: null, categorySource: null,
-    suggestedCategoryId: keywordCategory(norm), suggestedSubcategoryId: null, defaultRecurrenceType: null, defaultNecessityType: null, _new: true };
+    suggestedCategoryId: liveCat(store, keywordCategory(norm), null)[0], suggestedSubcategoryId: null, defaultRecurrenceType: null, defaultNecessityType: null, _new: true };
   planMerchants.set(m.id, m); return m;
 }
 
@@ -881,6 +882,8 @@ async function buildTx(store, plan, H, acc, info, line, sourceType, recordId) {
     }
     default: tx.transactionType = 'Unknown'; tx.classificationStatus = 'unclassified'; tx.merchantRaw = cleanText(line.raw).slice(0, 60);
   }
+  // تصنيف انحذف ما ينحط على عملية جديدة (بذور التجار والكلمات المفتاحية ثابتة في الكود)
+  if (tx.categoryId || tx.subcategoryId) { const [lc, ls] = liveCat(store, tx.categoryId, tx.subcategoryId); if (lc !== tx.categoryId) tx.categorySource = null; tx.categoryId = lc; tx.subcategoryId = ls; }
   return tx;
 }
 
@@ -1336,7 +1339,7 @@ async function prepareSms(store, msgs, opts) {
     const contentHash = await sha256Hex((m.sender || '') + '|' + text.toLowerCase().replace(/\s+/g, ' '));
     const ids = (m.ids && m.ids.length) ? m.ids : await localIds(text, m.sender);
     const rec = { id: m.id, source: m.source || 'paste', sender: m.sender || null, receivedAt: received, processedAt: now, contentHash, cls: null, clsReason: '', status: null,
-      text: null, ids: ids.map(x => ({ type: x.type, fingerprint: x.fingerprint || null, alt: x.alt || null, last4: x.last4, bankCode: x.bankCode || null })), txId: null, reviewId: null, parser: null, templateId: null, importId: plan.id, ackedAt: null };
+      text: null, ids: ids.map(x => ({ type: x.type, fingerprint: x.fingerprint || null, alt: x.alt || null, last4: x.last4, bankCode: x.bankCode || null })), txId: null, reviewId: null, parser: null, templateId: null, importId: plan.id, ackedAt: prev ? (prev.ackedAt || null) : null }; // إعادة المعالجة ما تلغي تأكيد الاستلام
     plan.msgRecords.push(rec);
     let c = R.classify(text);
     // صيغة متعلّمة تنطبق على الرسالة = رسالة مالية حتى لو الفرز العام ما عرفها
@@ -1355,7 +1358,13 @@ async function prepareSms(store, msgs, opts) {
     if (!info.ok) { newReview(plan, rec, 'sms_unparsed', { missing: info.missing || [], partial: stripInfo(info) }); continue; }
     // التاريخ اللي حدده المستخدم ينحفظ مع الرسالة، عشان ما ينطلب مرة ثانية لو احتاجت مراجعة ثانية (مثل الحساب)
     rec.userDate = (opts.forceDate && opts.forceDate[m.id]) || m.userDate || null;
-    info.transactionDate = info.transactionDate || rec.userDate || receivedDate;
+    // التاريخ: من ترتيب شكل التاريخ المحفوظ. شكل جديد أو تاريخ في المستقبل = مراجعة قبل الحفظ
+    const dr = resolveSmsDate(store, text, info, rec, received);
+    rec.dateShape = dr.sig || null;
+    if (dr.review) { newReview(plan, rec, 'sms_date_shape', Object.assign({ info: stripInfo(info) }, dr.review)); continue; }
+    info.transactionDate = dr.date; info.dateSource = dr.source; info.dateShape = dr.sig || null;
+    if (!info.transactionDate && receivedDate) { info.transactionDate = receivedDate; info.dateSource = 'received'; }
+    rec.dateSource = info.dateSource || null;
     if (!info.transactionDate) { newReview(plan, rec, 'sms_no_date', { info: stripInfo(info) }); continue; }
     info.fingerprints = rec.ids;
     const acc = resolveSmsAccount(store, plan, info, rec.ids, opts.forceAccount && opts.forceAccount[m.id]);
@@ -1363,6 +1372,7 @@ async function prepareSms(store, msgs, opts) {
     const line = { raw: text, balance: info.balanceAfter != null ? info.balanceAfter : null, rowIndex: row };
     const tx = await buildTx(store, plan, H, acc, info, line, 'sms', m.id);
     tx.sourceLinks[0].messageId = m.id;
+    tx.dateSource = info.dateSource || null; tx.dateShape = info.dateShape || null;
     tx._msgId = m.id;
     plan.txs.push(tx); rec.status = 'tx'; rec.txId = tx.id;
     const missing = (info.missing || []).filter(k => k !== 'amount');
@@ -1392,6 +1402,97 @@ async function prepareSms(store, msgs, opts) {
   return plan;
 }
 // المراجعة ما تحمل آيبان أو رقم حساب كامل؛ آخر 4 أرقام فقط
+/* ---------- أشكال التاريخ في الرسائل ----------
+   كل شكل (Signature من sms.js) له ترتيب يختاره المستخدم مرة: سنة-شهر-يوم أو غيره. مستقل عن اسم البنك.
+   dateSource على العملية والرسالة: shape (من الشكل المحفوظ) · template (صيغة متعلّمة) · user (حدده المستخدم) · received (تاريخ الاستلام) */
+function resolveSmsDate(store, text, info, rec, received) {
+  const R = SR(), tok = R.findDateToken(text), sig = tok ? tok.sig : null;
+  const limit = addDays(String(received || new Date().toISOString()).slice(0, 10), 1);
+  const ask = (reason) => ({ review: { reason, sig, pat: tok.pat, token: tok.raw, sample: sanitizeText(tok.sample), candidates: tok.candidates } });
+  if (rec.userDate) return { date: rec.userDate, source: 'user', sig };
+  if (info.parser === 'template' && info.via && info.via.date && info.transactionDate) {
+    if (info.transactionDate > limit && tok) return ask('future');
+    return { date: info.transactionDate, source: 'template', sig: null };
+  }
+  if (!tok) return { date: null, source: null, sig: null };
+  const known = (store.settings.smsDateShapes || {})[sig];
+  if (!known) return ask('new');
+  const d = R.readDateOrder(tok, known.order);
+  if (!d) return ask('order_invalid');
+  if (d > limit) return ask('future');
+  return { date: d, source: 'shape', sig };
+}
+function setDateShape(store, sig, order, sample, pat) {
+  const s = store.settings; s.smsDateShapes = Object.assign({}, s.smsDateShapes || {});
+  const prev = s.smsDateShapes[sig], now = new Date().toISOString();
+  s.smsDateShapes[sig] = { order, sample: sample || (prev && prev.sample) || '', pat: pat || (prev && prev.pat) || sig.split('|')[2], createdAt: (prev && prev.createdAt) || now, updatedAt: now };
+  store.put('settings', s);
+}
+function removeDateShape(store, sig) {
+  const s = store.settings; if (!s.smsDateShapes || !s.smsDateShapes[sig]) return false;
+  s.smsDateShapes = Object.assign({}, s.smsDateShapes); delete s.smsDateShapes[sig]; store.put('settings', s); return true;
+}
+// التصحيح الرجعي: فقط العمليات اللي انحفظت من رسالة بنفس الشكل وتاريخها جا آليًا. تاريخ حدده المستخدم ما يتغير
+function retroDateFix(store, sig) {
+  const shape = (store.settings.smsDateShapes || {})[sig]; if (!shape) return 0;
+  const R = SR(), now = new Date().toISOString(); let n = 0;
+  store.all('messages').forEach(m => {
+    if (m.dateShape !== sig || m.userDate || !m.text || !m.txId) return;
+    if (m.dateSource && m.dateSource !== 'shape' && m.dateSource !== 'legacy') return;
+    const tx = store.get('transactions', m.txId); if (!tx) return;
+    const own = (tx.sourceLinks || [])[0];
+    if (!own || own.sourceType !== 'sms' || own.messageId !== m.id) return; // عملية أصلها كشف: تاريخها من الكشف
+    if (tx.dateSource && tx.dateSource !== 'shape' && tx.dateSource !== 'legacy') return;
+    const tok = R.findDateToken(m.text); if (!tok || tok.sig !== sig) return;
+    const d = R.readDateOrder(tok, shape.order);
+    if (m.dateSource !== 'shape') { m.dateSource = 'shape'; store.put('messages', m); }
+    if (!d || d === tx.transactionDate) { if (tx.dateSource !== 'shape') { tx.dateSource = 'shape'; tx.dateShape = sig; store.put('transactions', tx); } return; }
+    tx.transactionDate = d; tx.dateSource = 'shape'; tx.dateShape = sig; tx.updatedAt = now; store.put('transactions', tx); n++;
+  });
+  if (n) { pairTransfers(store); store.touch(); }
+  return n;
+}
+// جواب المستخدم على مراجعة «شكل تاريخ»: شكل جديد ← يحفظ الترتيب ويصحح اللي قبل ويعيد معالجة الرسائل المعلقة بنفس الشكل.
+// تاريخ في المستقبل أو ما ينطبق عليه الترتيب المحفوظ ← لهذي الرسالة فقط
+function answerDateShape(store, reviewId, order) {
+  const r = store.get('reviews', reviewId); if (!r || r.kind !== 'sms_date_shape' || r.status !== 'open') return null;
+  const cand = (r.candidates || []).find(c => c.order === order); if (!cand) return null;
+  const out = { saved: false, fixed: 0, reprocess: [], forceDate: null, date: cand.date };
+  if (r.reason === 'new' || r.reason === 'legacy') {
+    setDateShape(store, r.sig, order, r.sample, r.pat); out.saved = true;
+    out.fixed = retroDateFix(store, r.sig);
+    store.all('reviews').filter(x => x.status === 'open' && x.kind === 'sms_date_shape' && x.sig === r.sig && (x.reason === 'new' || x.reason === 'legacy')).forEach(x => {
+      if (x.reason === 'legacy') closeReview(store, x, 'answered'); else out.reprocess.push(x.messageId);
+    });
+    // رسائل من قبل هذا التحديث بنفس الشكل ولها مراجعة مفتوحة (حساب غير معروف أو تكرار محتمل): تنعاد بالتاريخ الصحيح
+    store.all('reviews').filter(x => x.status === 'open' && (x.kind === 'sms_no_account' || x.kind === 'sms_duplicate')).forEach(x => {
+      const msg = store.get('messages', x.messageId); if (msg && msg.dateShape === r.sig && !msg.userDate) out.reprocess.push(x.messageId);
+    });
+  } else {
+    out.forceDate = { [r.messageId]: cand.date }; out.reprocess.push(r.messageId);
+  }
+  out.reprocess = Array.from(new Set(out.reprocess));
+  store.touch();
+  return out;
+}
+// ترقية 1.4.0: الرسائل المحفوظة قبل هذا الإصدار تنعرف أشكال تواريخها، وكل شكل يطلع سؤال واحد في المراجعة
+function migrateDateShapes(store) {
+  const s = store.settings; if (s.dateShapesMigrated) return 0;
+  const R = SR(), groups = new Map(), shapes = s.smsDateShapes || {};
+  store.all('messages').forEach(m => {
+    if (m.dateShape !== undefined || !m.text) return;
+    const tok = R.findDateToken(m.text);
+    m.dateShape = tok ? tok.sig : null;
+    m.dateSource = m.userDate ? 'user' : (tok ? 'legacy' : null);
+    store.put('messages', m);
+    if (tok && !m.userDate && m.txId && !shapes[tok.sig] && !groups.has(tok.sig)) groups.set(tok.sig, { m, tok });
+  });
+  const now = new Date().toISOString();
+  groups.forEach(({ m, tok }, sig) => store.put('reviews', { id: uid(), kind: 'sms_date_shape', status: 'open', createdAt: now, messageId: m.id, importId: m.importId || null,
+    reason: 'legacy', sig, pat: tok.pat, token: tok.raw, sample: sanitizeText(tok.sample), candidates: tok.candidates }));
+  s.dateShapesMigrated = true; store.put('settings', s);
+  return groups.size;
+}
 function stripInfo(info) {
   const o = Object.assign({}, info); delete o.fingerprints;
   if (o.iban) { o.ibanLast4 = normIban(o.iban).slice(-4); delete o.iban; }
@@ -1591,6 +1692,97 @@ function limitsStatus(store, period, R) {
     const pct = spent / Number(l.amount) * 100;
     return Object.assign({}, l, { spent: round2(spent), remaining: round2(Number(l.amount) - spent), pct: Math.round(pct * 10) / 10, level: pct >= 100 ? 'over' : pct >= alertPct ? 'warn' : 'ok' });
   }).sort((a, b) => b.pct - a.pct);
+}
+
+/* ---------- 11و. إدارة التصنيفات (1.4.0) ----------
+   التصنيف له ID ثابت، والعمليات والتجار والمستفيدون والقواعد والحدود مربوطة بالـID مو بالاسم، فتغيير الاسم ما يكسر شي.
+   «رسوم» وفرعياتها و«تبرعات» محمية من الحذف لأن الحساب يستخدمها (فصل الرسوم، والتقريب لجهة خيرية). */
+const PROTECTED_CATS = new Set(['fees', 'fees.bank', 'fees.fx', 'donations']);
+// تصنيف ما عاد موجود (انحذف) ما ينحط على عملية جديدة
+function liveCat(store, cat, sub) {
+  const c = cat ? store.get('categories', cat) : null;
+  if (!c || c.active === false) return [null, null];
+  const x = sub ? store.get('categories', sub) : null;
+  return [cat, x && x.active !== false && x.parentId === cat ? sub : null];
+}
+function saveCategory(store, d) {
+  const name = String(d.name || '').replace(/\s+/g, ' ').trim(); if (!name) return { error: 'name' };
+  const parentId = d.parentId || null;
+  if (parentId) { const p = store.get('categories', parentId); if (!p || p.parentId) return { error: 'parent' }; }
+  let c = d.id ? store.get('categories', d.id) : null;
+  if (store.all('categories').some(x => x.id !== (c && c.id) && (x.parentId || null) === parentId && x.active !== false && normAr(x.name) === normAr(name))) return { error: 'dup' };
+  if (c) {
+    const oldParent = c.parentId || null;
+    if (oldParent !== parentId) {
+      if (!oldParent || !parentId) return { error: 'level' }; // رئيسي ↔ فرعي ما يتغير بعد الإنشاء
+      if (PROTECTED_CATS.has(c.id)) return { error: 'protected' };
+      moveSubCategory(store, c.id, parentId);
+    }
+  } else {
+    const sib = store.all('categories').filter(x => (x.parentId || null) === parentId);
+    c = { id: uid(), order: sib.reduce((m, x) => Math.max(m, x.order || 0), -1) + 1, active: true, custom: true, createdAt: new Date().toISOString() };
+  }
+  const main = !parentId;
+  // الرئيسي: قيم صريحة. الفرعي: null = يتبع الرئيسي
+  const pick = (v, dflt) => v === undefined ? dflt : v;
+  Object.assign(c, { name, parentId, emoji: d.emoji || null, color: d.color || null,
+    defaultRecurrenceType: pick(d.defaultRecurrenceType, main ? 'variable' : null),
+    defaultNecessityType: pick(d.defaultNecessityType, null),
+    isCommitment: main ? !!pick(d.isCommitment, false) : pick(d.isCommitment, null),
+    savingsEligible: main ? !!pick(d.savingsEligible, false) : pick(d.savingsEligible, null) });
+  store.put('categories', c); store.touch();
+  return { category: c };
+}
+// كل شي يشير لتصنيف (عمليات، تجار، مستفيدون، قواعد، عمليات معلّقة في المراجعة)
+function forEachCatRef(store, fn) {
+  store.all('transactions').forEach(t => { if (fn(t, 'categoryId', 'subcategoryId')) { t.updatedAt = new Date().toISOString(); store.put('transactions', t); } });
+  store.all('merchants').forEach(m => { const a = fn(m, 'categoryId', 'subcategoryId'), b = fn(m, 'suggestedCategoryId', 'suggestedSubcategoryId'); if (a || b) store.put('merchants', m); });
+  store.all('beneficiaries').forEach(b => { if (fn(b, 'categoryId', 'subcategoryId')) store.put('beneficiaries', b); });
+  store.all('rules').forEach(r => { if (r.then && fn(r.then, 'categoryId', 'subcategoryId')) { if (!r.then.categoryId && !r.then.type && !r.then.merchantId) r.enabled = false; store.put('rules', r); } });
+  store.all('reviews').forEach(r => { if (r.heldTx && fn(r.heldTx, 'categoryId', 'subcategoryId')) store.put('reviews', r); });
+}
+function moveSubCategory(store, subId, newParent) {
+  forEachCatRef(store, (o, ck, sk) => { if (o[sk] !== subId || o[ck] === newParent) return false; o[ck] = newParent; return true; });
+}
+function categoryUsage(store, id) {
+  const c = store.get('categories', id); if (!c) return null;
+  const ids = new Set([id].concat(c.parentId ? [] : store.all('categories').filter(x => x.parentId === id).map(x => x.id)));
+  const hit = (cat, sub) => c.parentId ? sub === id : ids.has(cat);
+  return { ids: Array.from(ids), txs: store.all('transactions').filter(t => hit(t.categoryId, t.subcategoryId)).length,
+    subs: ids.size - 1, limits: c.parentId ? 0 : store.all('limits').filter(l => l.scope === 'category' && l.categoryId === id).length };
+}
+// الحذف ما يحذف أي عملية. target = {cat, sub} للنقل، أو null:
+//   رئيسي ← عملياته وكل المرتبط فيه «بدون تصنيف» وحدوده تنحذف. فرعي ← عملياته تبقى في الرئيسي
+function deleteCategory(store, id, target) {
+  const c = store.get('categories', id); if (!c) return null;
+  if (PROTECTED_CATS.has(id)) return { error: 'protected' };
+  const u = categoryUsage(store, id), ids = new Set(u.ids), isSub = !!c.parentId;
+  if (target && (ids.has(target.cat) || ids.has(target.sub))) return { error: 'target' };
+  if (target) { const [tc, ts] = liveCat(store, target.cat, target.sub); if (!tc) return { error: 'target' }; target = { cat: tc, sub: ts }; }
+  let n = 0;
+  forEachCatRef(store, (o, ck, sk) => {
+    const cat = o[ck], sub = o[sk] || null;
+    const affected = isSub ? sub === id : ids.has(cat);
+    if (!affected) return false;
+    if (target) { o[ck] = target.cat; o[sk] = target.sub || null; }
+    else if (isSub) { o[sk] = null; }
+    else {
+      o[ck] = null; o[sk] = null;
+      if (o.categorySource !== undefined) o.categorySource = null;
+      if (o.transactionType === 'PersonTransfer') o.classificationStatus = 'temporary';
+    }
+    if (o.transactionType !== undefined && o.grossAmount !== undefined) n++;
+    return true;
+  });
+  let limitsMoved = 0, limitsRemoved = 0;
+  if (!isSub) store.all('limits').filter(l => l.scope === 'category' && l.categoryId === id).forEach(l => {
+    // نقل الحد للتصنيف الجديد، إلا إذا عليه حد من قبل (نبقي الموجود)
+    if (target && !store.all('limits').some(x => x.id !== l.id && x.scope === 'category' && x.categoryId === target.cat)) { l.categoryId = target.cat; store.put('limits', l); limitsMoved++; }
+    else { store.remove('limits', l.id); limitsRemoved++; }
+  });
+  u.ids.forEach(x => store.remove('categories', x));
+  store.touch();
+  return { txs: n, subs: u.subs, limitsMoved, limitsRemoved };
 }
 
 /* ---------- 11هـ. التعديل الجماعي ---------- */
@@ -2147,17 +2339,18 @@ function validateBackup(obj) {
 }
 
 const Engine = {
-  version: '1.3.1', round2, parseNum, cellToISO, cleanText, sha256Hex, uid, todayISO, addDays, daysBetween, isoDate,
+  version: '1.4.0', round2, parseNum, cellToISO, cleanText, sha256Hex, uid, todayISO, addDays, daysBetween, isoDate,
   CATEGORY_SEED, buildCategoryRecords, Store, STORE_NAMES, DEFAULT_SETTINGS,
   sanitizeText, sanitizeFilename, fingerprintIban, fingerprintAccountNo, fingerprintNum, matchesOwner, normMerchant,
   detectTemplate, signatureOf, parseAlinmaAccount, interpretAlinmaLine, parseAlinmaCard, cardBalanceCheck,
   prepareImport, commitImport, deleteImport, findDuplicates, scorePair, pairTransfers,
   listCycles, currentCycle, previousPeriod, weekOf, yearOf, cycleOf, periodOf, shiftPeriod, spendParts, spendIn, spendSeries, comparePeriods, compareDay, coverageFor,
   computePeriod, accountBalances, catName, effective, isCommitmentCat, spendEffect, feeOf,
+  saveCategory, deleteCategory, categoryUsage, liveCat, PROTECTED_CATS,
   parseQuickEntry, addManual, ensureCashAccount, cashBalance, reconcileCash, mergeInto,
   setCategory, setMerchantCategory, setBeneficiaryMine, applyOwnerAliases, setRoundUpDestination, setType, applyBeneficiaryClassification,
   makeBackup, validateBackup, prepareRestore, FX_FEE_RATE, onlyStampsChanged,
-  parseSmsText, prepareSms, commitSms, markAcked, localIds, resolveDuplicate, resolveMessageReview, reprocessMessages, saveSmsTemplate, fillFromTemplate, SMS_FAMILY_L,
+  parseSmsText, prepareSms, commitSms, markAcked, localIds, setDateShape, removeDateShape, retroDateFix, answerDateShape, migrateDateShapes, resolveDuplicate, resolveMessageReview, reprocessMessages, saveSmsTemplate, fillFromTemplate, SMS_FAMILY_L,
   ruleMatches, applyRulesTo, previewRule, applyRuleToAll, limitsStatus, bulkEdit, bulkDelete, completeFromStatement,
 };
 if (typeof module !== 'undefined' && module.exports) module.exports = Engine;

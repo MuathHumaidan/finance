@@ -252,6 +252,20 @@ input:focus,select:focus,textarea:focus{outline:2px solid var(--pri);outline-off
 .catgrid button{border:1px solid var(--line);background:#fff;border-radius:22px;padding:12px 6px;display:flex;align-items:center;justify-content:center;gap:6px;font-weight:700;font-size:14px;cursor:pointer;min-height:60px;box-shadow:0 2px 8px rgba(20,22,31,.05);color:var(--ink);line-height:1.25;text-align:center}
 .catgrid button.on{border:2px solid var(--pri)}
 .catgrid button svg.i{flex:none}
+.emo{font-family:"Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif;font-size:21px;line-height:1;display:inline-flex;align-items:center;justify-content:center}
+.ic.s .emo{font-size:18px} .ic .mini .emo{font-size:10px} .where .bar .sc .emo{font-size:12px} .catbtn .emo{font-size:18px} .catgrid .emo{font-size:19px}
+.catgrid button.newcat{border-style:dashed;color:var(--pri);box-shadow:none}
+.subpick .chips2 button.addsub{border-style:dashed;color:var(--pri);box-shadow:none}
+.emogrid{display:grid;grid-template-columns:repeat(8,1fr);gap:6px;margin-top:8px}
+.emogrid button{font-family:"Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif;font-size:21px;line-height:1;border:1px solid var(--line);background:#fff;border-radius:12px;padding:7px 0;cursor:pointer}
+.colors{display:flex;gap:9px;flex-wrap:wrap;align-items:center;margin-top:4px}
+.colors button{width:30px;height:30px;border-radius:50%;border:3px solid #fff;box-shadow:0 0 0 1px var(--line);cursor:pointer;padding:0}
+.colors button.on{box-shadow:0 0 0 2px var(--ink)}
+.colors button.auto{width:auto;height:30px;border-radius:999px;padding:0 12px;background:#fff;font-size:13px;font-weight:600;color:var(--ink-2);border:1px solid var(--line);box-shadow:none}
+.colors button.auto.on{border:2px solid var(--ink)}
+.list .it.sub{padding-inline-start:26px}
+.list .it.add .t{color:var(--pri);font-weight:600}
+.catform{margin-top:4px}
 @media (max-width:360px){ .catgrid{grid-template-columns:repeat(2,1fr)} }
 .subpick{text-align:center;padding:8px 0}
 .subpick .sel{display:inline-flex;align-items:center;gap:8px;margin-bottom:16px}

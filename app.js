@@ -29,6 +29,8 @@ const INCOME_L = { salary: 'راتب', reward: 'مكافأة', extra: 'دخل إ
 /* ---------- الأيقونات والألوان ---------- */
 const IC = {
   cart: '<path d="M3 4h2l2.2 10.3a1 1 0 0 0 1 .7h9a1 1 0 0 0 1-.8L20 8H6.2"/><circle cx="9.5" cy="19" r="1.4"/><circle cx="16.5" cy="19" r="1.4"/>',
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  grid: '<rect x="4" y="4" width="7" height="7" rx="1.6"/><rect x="13" y="4" width="7" height="7" rx="1.6"/><rect x="4" y="13" width="7" height="7" rx="1.6"/><rect x="13" y="13" width="7" height="7" rx="1.6"/>',
   food: '<path d="M7 3v18M4.5 3v5a2.5 2.5 0 0 0 5 0V3"/><path d="M18 21V3c-2.2 1.2-3.5 4-3.5 7.5V13H18"/>',
   cup: '<path d="M4 9h12v4a5 5 0 0 1-5 5H9a5 5 0 0 1-5-5z"/><path d="M16 10.5h1.5a2.5 2.5 0 0 1 0 5H16"/><path d="M8 3.5v2.5M12 3.5v2.5"/><path d="M4 21h12"/>',
   car: '<path d="M5 11l1.7-4.3A2 2 0 0 1 8.6 5.5h6.8a2 2 0 0 1 1.9 1.2L19 11"/><rect x="3" y="11" width="18" height="6" rx="2"/><path d="M6 17v2.5M18 17v2.5"/><path d="M7 14h1.5M15.5 14H17"/>',
@@ -87,16 +89,25 @@ const CAT_UI = {
   fees: ['gray', 'receipt'], other: ['gray', 'dots'], __none: ['gray', 'question'], __person: ['yellow', 'person'],
 };
 const SUB_ICON = { 'transport.parking': 'parking', 'transport.ride': 'car', 'transport.fuel': 'fuel', 'bills.electricity': 'bolt', 'bills.water': 'drop', 'home.electricity': 'bolt', 'home.water': 'drop', 'telecom.devices': 'phone', 'telecom.prepaid': 'phone', 'travel.hotels': 'bed', 'hotels': 'bed', 'fees.fx': 'swap', 'social.occasions': 'gift', 'family.gifts': 'gift' };
+// شكل التصنيف: أيقونة ولون ثابتين للتصنيفات الأساسية، والإيموجي واللون اللي يختاره المستخدم يغلبونها
 function catUi(id) {
   if (!id) return { color: PAL.gray, icon: 'question' };
+  if (id === '__none' || id === '__person') { const u0 = CAT_UI[id]; return { color: PAL[u0[0]], icon: u0[1], hue: u0[0] }; }
+  const c = S.store ? store().get('categories', id) : null;
   let u = CAT_UI[id];
   if (!u && id.includes('.')) { const p = CAT_UI[id.split('.')[0]]; if (p) u = [p[0], SUB_ICON[id] || p[1]]; }
-  if (!u && S.store) { const c = store().get('categories', id); if (c && c.parentId) return catUi(c.parentId); }
-  u = u || ['gray', 'dots'];
-  return { color: PAL[u[0]] || PAL.gray, icon: u[1], hue: u[0] };
+  let out;
+  if (c && c.parentId) {
+    const pu = catUi(c.parentId); // الفرعي يورث شكل الرئيسي إذا الرئيسي له إيموجي أو لون مخصص
+    out = u && !pu.custom ? { color: PAL[u[0]] || PAL.gray, icon: u[1], hue: u[0] } : Object.assign({}, pu, { custom: false });
+  } else out = u ? { color: PAL[u[0]] || PAL.gray, icon: u[1], hue: u[0] } : { color: PAL.gray, icon: 'dots', hue: 'gray' };
+  if (c && c.color && PAL[c.color]) { out.color = PAL[c.color]; out.hue = c.color; out.custom = true; }
+  if (c && c.emoji) { out.emoji = c.emoji; out.custom = true; }
+  return out;
 }
+function glyph(u, icon) { return u.emoji ? `<span class="emo">${esc(u.emoji)}</span>` : ico(icon || u.icon); }
 const tint = (hex, a) => hex + (a || '1F');
-function icCircle(u, cls, mini) { return `<span class="ic ${cls || ''}" style="background:${tint(u.color)};color:${u.color}">${ico(u.icon)}${mini ? `<span class="mini" style="color:${mini.color}">${ico(mini.icon)}</span>` : ''}</span>`; }
+function icCircle(u, cls, mini) { return `<span class="ic ${cls || ''}" style="background:${tint(u.color)};color:${u.color}">${glyph(u)}${mini ? `<span class="mini" style="color:${mini.color}">${ico(mini.icon)}</span>` : ''}</span>`; }
 function txUi(tx) {
   const t = tx.transactionType;
   if (tx.transferSubtype === 'round_up') return { color: tx.classificationStatus === 'unclassified' ? PAL.yellow : PAL.gray, icon: 'coins' };
@@ -106,7 +117,7 @@ function txUi(tx) {
   if (t === 'CreditCardPayment') return { color: PAL.blue, icon: 'card' };
   if (t === 'CashWithdrawal' || t === 'CashDeposit') return { color: PAL.gray, icon: 'cash' };
   if (t === 'Unknown') return { color: PAL.yellow, icon: 'question' };
-  if (tx.categoryId) return catUi(tx.subcategoryId && SUB_ICON[tx.subcategoryId] ? tx.subcategoryId : tx.categoryId);
+  if (tx.categoryId) { const sc = tx.subcategoryId ? store().get('categories', tx.subcategoryId) : null; return catUi(tx.subcategoryId && (SUB_ICON[tx.subcategoryId] || (sc && (sc.emoji || sc.color))) ? tx.subcategoryId : tx.categoryId); }
   if (t === 'PersonTransfer') return catUi('__person');
   return catUi('__none');
 }
@@ -230,6 +241,7 @@ function txRow(tx, withDate) {
   return `<div class="tx ${on ? 'sel' : ''}" data-action="${sm ? 'toggleSel' : 'openTx'}" data-id="${tx.id}">${sm ? `<span class="ck">${on ? '✓' : ''}</span>` : ''}${icCircle(txUi(tx))}<div class="m"><div class="t">${esc(txTitle(tx))}</div><div class="s">${subLine(tx, withDate)}</div>${badges(tx)}</div><div class="a"><span class="num">${fmt(tx.grossAmount)}</span>${dirBadge(tx)}</div></div>`;
 }
 const sortTx = (a, b) => ((b.transactionDate || '') + (b.time || '')).localeCompare((a.transactionDate || '') + (a.time || ''));
+const isCardUnmatched = (t) => t.transactionType === 'CreditCardPayment' && t.cardPaymentStatus !== 'matched' && !(t.transferLinkStatus === 'linked');
 const isRoundUpUnknown = (t) => t.transferSubtype === 'round_up' && t.classificationStatus === 'unclassified';
 function catOptions(selected, includeNone) {
   const cats = store().all('categories').filter(c => !c.parentId).sort((a, b) => a.order - b.order);
@@ -290,6 +302,9 @@ async function boot() {
     const ch = S.store.takeChanges(); // التصنيفات والإعدادات الافتراضية لأول مرة
     if (!data.categories.length || !data.settings.length) await DB.apply({ puts: { categories: S.store.all('categories'), settings: [S.store.settings] }, removes: {} });
     else void ch;
+    // ترقية 1.4.0: أشكال تواريخ الرسائل المحفوظة سابقًا
+    E.migrateDateShapes(S.store);
+    const c2 = S.store.takeChanges(); if (Object.keys(c2.puts).length || Object.keys(c2.removes).length) await DB.apply(c2);
     S.store.startHistory();
   } catch (e) {
     $('main').innerHTML = `<div class="card"><h2>تعذر فتح قاعدة البيانات</h2><p>${esc(e && e.message ? e.message : e)}</p><p class="muted">إذا كنت في وضع التصفح الخاص، افتح التطبيق في وضع عادي.</p></div>`;
@@ -321,8 +336,8 @@ function registerSW() {
 }
 
 /* ---------- العرض ---------- */
-const TITLES = { reviewc: 'المراجعة', teachsms: 'تعليم صيغة رسالة', messages: 'الرسائل البنكية', audit: 'سجل التعديلات', limits: 'حدود الصرف', rules: 'القواعد', home: 'الرئيسية', spend: 'صرفياتك', txs: 'العمليات', add: 'إضافة واستيراد', accounts: 'الحسابات', more: 'المزيد', review: 'مراجعة الاستيراد', teach: 'تعليم كشف جديد', merchants: 'التجار', beneficiaries: 'المستفيدون', settings: 'الإعدادات', backup: 'النسخ الاحتياطي', report: 'التقرير', methods: 'طريقة الحساب', imports: 'سجل الاستيراد' };
-const NAV_OF = { reviewc: 'more', teachsms: 'reviewc', messages: 'more', audit: 'more', limits: 'more', rules: 'more', add: 'home', review: 'add', teach: 'add', imports: 'add', merchants: 'more', beneficiaries: 'accounts', settings: 'more', backup: 'more', report: 'more', methods: 'more' };
+const TITLES = { categories: 'التصنيفات', reviewc: 'المراجعة', teachsms: 'تعليم صيغة رسالة', messages: 'الرسائل البنكية', audit: 'سجل التعديلات', limits: 'حدود الصرف', rules: 'القواعد', home: 'الرئيسية', spend: 'صرفياتك', txs: 'العمليات', add: 'إضافة واستيراد', accounts: 'الحسابات', more: 'المزيد', review: 'مراجعة الاستيراد', teach: 'تعليم كشف جديد', merchants: 'التجار', beneficiaries: 'المستفيدون', settings: 'الإعدادات', backup: 'النسخ الاحتياطي', report: 'التقرير', methods: 'طريقة الحساب', imports: 'سجل الاستيراد' };
+const NAV_OF = { categories: 'more', reviewc: 'more', teachsms: 'reviewc', messages: 'more', audit: 'more', limits: 'more', rules: 'more', add: 'home', review: 'add', teach: 'add', imports: 'add', merchants: 'more', beneficiaries: 'accounts', settings: 'more', backup: 'more', report: 'more', methods: 'more' };
 function render() {
   ensurePeriod();
   const v = S.view;
@@ -335,12 +350,13 @@ function render() {
   const pb = $('periodBtn'); pb.classList.toggle('hide', !showPeriod);
   if (showPeriod) pb.textContent = (v === 'txs' && S.filters.allTime) ? 'كل الفترات' : fperiod(S.period);
   document.querySelectorAll('.nav button').forEach(b => b.classList.toggle('on', b.dataset.view === (NAV_OF[v] || v)));
-  const views = { reviewc: vReviewCenter, teachsms: vTeachSms, messages: vMessages, audit: vAudit, limits: vLimits, rules: vRules, home: vHome, spend: vSpend, txs: vTxs, add: vAdd, accounts: vAccounts, more: vMore, review: vReview, teach: vTeach, merchants: vMerchants, beneficiaries: vBeneficiaries, settings: vSettings, backup: vBackup, report: vReport, methods: vMethods, imports: vImports };
+  const views = { categories: vCategories, reviewc: vReviewCenter, teachsms: vTeachSms, messages: vMessages, audit: vAudit, limits: vLimits, rules: vRules, home: vHome, spend: vSpend, txs: vTxs, add: vAdd, accounts: vAccounts, more: vMore, review: vReview, teach: vTeach, merchants: vMerchants, beneficiaries: vBeneficiaries, settings: vSettings, backup: vBackup, report: vReport, methods: vMethods, imports: vImports };
   $('main').innerHTML = (views[v] || vHome)();
 }
 function go(view, opts) {
   if (view !== 'txs') S.sel = null;
-  S.view = view; if (opts && opts.filters) S.filters = Object.assign({ kind: 'all', allTime: false }, opts.filters);
+  // الدخول من رابط أو بطاقة أو تصنيف = فلتر جديد، فيمسح البحث القديم
+  S.view = view; if (opts && opts.filters) { S.filters = Object.assign({ kind: 'all', allTime: false }, opts.filters); S.q = ''; }
   if (history.replaceState) history.replaceState(null, '', '#' + view);
   render(); window.scrollTo(0, 0);
 }
@@ -501,8 +517,8 @@ function whereList(R) {
     const pct = R.spend ? c.amount / R.spend * 100 : 0;
     const w = Math.max(40, Math.min(100, c.amount / max * 100));
     const s0 = c.subs.find(s => s.subcategoryId && s.amount < c.amount - 0.005);
-    const sc = s0 ? `<span class="sc" style="color:${u.color}">${ico(SUB_ICON[s0.subcategoryId] || u.icon)}<span class="num" style="color:var(--ink-2)">${(s0.amount / R.spend * 100).toFixed(2)}%</span></span>` : '';
-    return `<div class="w" data-action="catDrill" data-cat="${key}"><div class="bar" style="background:${tint(u.color, '24')};width:${w}%"><span style="color:${u.color}">${ico(u.icon)}</span><div class="m"><div class="t">${esc(bucketName(c.categoryId))}</div><div class="p"><span class="num">${pct.toFixed(2)}%</span>${sc}</div></div></div><div class="a">${money(c.amount)}</div></div>`;
+    const sc = s0 ? `<span class="sc" style="color:${u.color}">${glyph(catUi(s0.subcategoryId))}<span class="num" style="color:var(--ink-2)">${(s0.amount / R.spend * 100).toFixed(2)}%</span></span>` : '';
+    return `<div class="w" data-action="catDrill" data-cat="${key}"><div class="bar" style="background:${tint(u.color, '24')};width:${w}%"><span style="color:${u.color}">${glyph(u)}</span><div class="m"><div class="t">${esc(bucketName(c.categoryId))}</div><div class="p"><span class="num">${pct.toFixed(2)}%</span>${sc}</div></div></div><div class="a">${money(c.amount)}</div></div>`;
   }).join('')}</div>`;
 }
 function vSpend() {
@@ -559,7 +575,7 @@ function vSpend() {
 }
 
 /* ---------- العمليات ---------- */
-const KIND_L = { all: 'الكل', spend: 'إنفاق', income: 'دخل', internal: 'تحويلات داخلية', card: 'سداد بطاقات', unclassified_out: 'خارج غير مصنف', unclassified_in: 'داخل غير مصنف', unclassified_all: 'غير معروف', temporary: 'تصنيف مؤقت', uncategorized: 'بدون تصنيف', commitments: 'التزامات', roundup: 'تقريب', unowned: 'مالك الأداة غير محدد', fees: 'رسوم' };
+const KIND_L = { all: 'الكل', spend: 'إنفاق', income: 'دخل', internal: 'تحويلات داخلية', card: 'سداد بطاقات', card_unmatched: 'سداد بطاقة غير مطابق', unclassified_out: 'خارج غير مصنف', unclassified_in: 'داخل غير مصنف', unclassified_all: 'غير معروف', temporary: 'تصنيف مؤقت', uncategorized: 'بدون تصنيف', commitments: 'التزامات', roundup: 'تقريب', unowned: 'مالك الأداة غير محدد', fees: 'رسوم' };
 function matchKind(t, kind) {
   const st = store();
   switch (kind) {
@@ -568,6 +584,7 @@ function matchKind(t, kind) {
     case 'income': return t.transactionType === 'Income';
     case 'internal': return t.transactionType === 'InternalTransfer' && !isRoundUpUnknown(t);
     case 'card': return t.transactionType === 'CreditCardPayment';
+    case 'card_unmatched': return isCardUnmatched(t);
     case 'unclassified_out': return (t.transactionType === 'Unknown' && t.direction === 'out') || isRoundUpUnknown(t);
     case 'unclassified_in': return t.transactionType === 'Unknown' && t.direction === 'in';
     case 'unclassified_all': return t.transactionType === 'Unknown';
@@ -607,9 +624,9 @@ function filteredTxs() {
   });
   return list.sort(sortTx);
 }
-function vTxs() {
-  const f = S.filters, list = filteredTxs();
-  const active = [];
+// سطر الفلاتر (ومعه كلمة البحث)؛ يتحدث مع الكتابة في البحث
+function filtersLine() {
+  const f = S.filters, active = [];
   if (f.kind !== 'all') active.push(KIND_L[f.kind]);
   if (f.categoryId) active.push(bucketName(f.categoryId === '__none' ? null : f.categoryId));
   if (f.accountId) { const a = accOf(f.accountId); active.push(a ? a.name : 'حساب'); }
@@ -618,9 +635,14 @@ function vTxs() {
   if (f.source) active.push(SRC_L[f.source] || f.source);
   if (f.merchantId) { const m = store().get('merchants', f.merchantId); active.push(m ? m.name : 'تاجر'); }
   if (f.beneficiaryId) { const b = store().get('beneficiaries', f.beneficiaryId); active.push(b ? b.name : 'مستفيد'); }
+  if (S.q.trim()) active.push(`بحث: «${S.q.trim()}»`);
+  return active.length || f.allTime ? `<div class="small muted" style="margin-top:6px">الفلاتر: ${esc(active.join(' + ') || 'بدون')}${f.allTime ? ' · كل الفترات' : ''} — <a href="#" data-action="clearFilters">مسح</a></div>` : '';
+}
+function vTxs() {
+  const f = S.filters, list = filteredTxs();
   let h = `<div class="card noprint" style="padding:10px"><input type="search" id="q" placeholder="ابحث: تاجر، مستفيد، تصنيف، بنك، آخر أرقام البطاقة، ملاحظة…" value="${esc(S.q)}" data-input="search">
     <div class="chips" style="margin-top:8px">${['all', 'spend', 'income', 'uncategorized', 'temporary', 'unclassified_out', 'internal', 'card'].map(k => `<button class="chip ${f.kind === k ? 'on' : ''}" data-action="setKind" data-kind="${k}">${KIND_L[k]}</button>`).join('')}<button class="chip" data-action="filterSheet">فلاتر أكثر…</button><button class="chip ${S.sel ? 'on' : ''}" data-action="${S.sel ? 'selEnd' : 'selStart'}">${S.sel ? 'إنهاء التحديد' : 'تحديد'}</button></div>
-    ${active.length || f.allTime ? `<div class="small muted" style="margin-top:6px">الفلاتر: ${esc(active.join(' + ') || 'بدون')}${f.allTime ? ' · كل الفترات' : ''} — <a href="#" data-action="clearFilters">مسح</a></div>` : ''}</div>`;
+    <div id="fline">${filtersLine()}</div></div>`;
   return h + `<div id="txlist">${txListHtml(list)}</div>` + selBar();
 }
 function txListHtml(list) {
@@ -779,6 +801,7 @@ function vMore() {
     ${item('beneficiaries', 'المستفيدون', 'تحويلاتك للأشخاص وحساباتك', 'people', PAL.yellow)}
     ${item('imports', 'سجل الاستيراد', 'الكشوف المستوردة وحذفها', 'upload', PAL.aqua)}
   </div></div><div class="card"><div class="list">
+    ${item('categories', 'التصنيفات', 'أضف وعدّل واحذف التصنيفات الرئيسية والفرعية', 'grid', PAL.orange)}
     ${item('rules', 'القواعد', 'صنّف تلقائيًا حسب التاجر أو المستفيد أو النص أو المبلغ', 'repeat', PAL.violet)}
     ${item('limits', 'حدود الصرف', 'حد لكل تصنيف أو للإنفاق الكلي', 'wallet', PAL.green)}
     ${item('audit', 'سجل التعديلات', 'كل تعديل مع التراجع والإعادة', 'list', PAL.gray)}
@@ -808,15 +831,108 @@ function vSettings() {
     <label class="f">يوم الراتب الافتراضي (يُستخدم إذا ما وُجد الراتب)</label><input type="number" id="payday" min="1" max="31" value="${s.defaultPayday}">
     <p class="small muted">الدورة تبدأ من تاريخ عملية الراتب نفسها، وكل عمليات ذاك اليوم تدخل في الدورة الجديدة. المكافأة والاسترداد والتحويل الداخلي ما تبدأ دورة.</p></div>
     <div class="card"><h2>أسماؤك كما تظهر في الكشوف</h2><p class="small muted">أي تحويل من أو إلى هذي الأسماء يُعتبر تحويلًا داخليًا. اسم في كل سطر.</p><textarea id="aliases" rows="4">${esc((s.ownerAliases || []).join('\n'))}</textarea></div>
+    <div class="card"><h2>التصنيفات</h2><p class="small muted">أضف تصنيف رئيسي أو فرعي، وغيّر الاسم والإيموجي واللون والخصائص.</p><button class="btn" data-action="go" data-view="categories">إدارة التصنيفات</button></div>
     <div class="card"><h2>وجهة التقريب</h2><p class="small">الحالية: <b>${esc(destLabel)}</b></p><button class="btn" data-action="setRoundUp">تغيير</button></div>
     <div class="card"><h2>تذكير النسخة الاحتياطية</h2><label class="f">ذكّرني إذا مرّ (يوم)</label><input type="number" id="bkdays" min="1" max="60" value="${s.backupReminderDays || 7}"></div>
     <div class="card"><button class="btn p w100" data-action="saveSettings">حفظ الإعدادات</button></div>
-    ${inboxCard()}`;
+    ${inboxCard()}
+    ${dateShapesCard()}`;
+}
+/* ---------- التصنيفات (البند 4 في 1.4.0) ---------- */
+const EMOJI_SET = ['🛒', '🍔', '☕', '⛽', '🚗', '🏠', '💡', '📱', '🎁', '🧾', '✈️', '🏨', '🎮', '👕', '💊', '📚', '💳', '🕌', '🎉', '🧸', '🐑', '🧴', '🛠️', '💰'];
+const CAT_COLORS = ['blue', 'green', 'orange', 'red', 'violet', 'magenta', 'aqua', 'yellow', 'gray'];
+const CAT_ERR = { name: 'اكتب اسم التصنيف', dup: 'فيه تصنيف بنفس الاسم في نفس المكان', parent: 'التصنيف الرئيسي غير صحيح', level: 'ما يتغير التصنيف من رئيسي إلى فرعي أو العكس بعد إنشائه', protected: 'هذا التصنيف يستخدمه الحساب، فما ينحذف ولا ينقل', target: 'اختر تصنيف ثاني غير اللي تحذفه' };
+const byOrder = (a, b) => (a.order || 0) - (b.order || 0);
+function oneEmoji(v) {
+  v = String(v || '').trim(); if (!v) return null;
+  try { if (window.Intl && Intl.Segmenter) { const it = new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(v)[Symbol.iterator]().next(); return it.value ? it.value.segment.slice(0, 16) : null; } } catch (e) { /* احتياط */ }
+  return Array.from(v).slice(0, 2).join('');
+}
+function vCategories() {
+  const st = store(), cats = st.all('categories').filter(c => c.active !== false), counts = new Map();
+  st.all('transactions').forEach(t => { [t.categoryId, t.subcategoryId].forEach(k => { if (k) counts.set(k, (counts.get(k) || 0) + 1); }); });
+  const mains = cats.filter(c => !c.parentId).sort(byOrder);
+  const row = (c, sub) => `<div class="it ${sub ? 'sub' : ''}" data-action="catEdit" data-id="${c.id}">${icCircle(catUi(c.id), 's')}<div class="m"><div class="t">${esc(c.name)}${E.PROTECTED_CATS.has(c.id) ? ' <span class="b n">أساسي</span>' : ''}</div><div class="s">${cnt(counts.get(c.id) || 0, 'op')}</div></div>${ico('chevL', 'chev')}</div>`;
+  return `<div class="card"><h2>التصنيفات<span class="sp"></span><button class="btn p" data-action="catNew">+ تصنيف</button></h2>
+    <p class="small muted">التصنيف مربوط بعملياته برقم ثابت، فتغيير اسمه أو إيموجيه أو لونه ما يأثر على شي. حذف التصنيف ما يحذف أي عملية.</p>
+    <div class="list">${mains.map(c => row(c, false) + cats.filter(x => x.parentId === c.id).sort(byOrder).map(x => row(x, true)).join('')).join('')}</div>
+    <p class="small muted" style="margin-top:8px">لإضافة تصنيف فرعي: افتح التصنيف الرئيسي واضغط «+ تصنيف فرعي».</p></div>`;
+}
+// نموذج التصنيف: full = كل الحقول (من صفحة التصنيفات)، وإلا الاسم والإيموجي واللون (من نافذة الاختيار)
+function catFormHtml(c, parentId, full, keep) {
+  const st = store(), k = keep || {}, prot = c && E.PROTECTED_CATS.has(c.id);
+  const mains = st.all('categories').filter(x => !x.parentId && x.active !== false && (!c || x.id !== c.id)).sort(byOrder);
+  const val = (key, dflt) => k[key] !== undefined ? k[key] : dflt;
+  const pid = val('parentId', c ? (c.parentId || '') : (parentId || ''));
+  const isMain = !pid;
+  let h = `<label class="f">الاسم</label><input type="text" id="ce_name" maxlength="40" value="${esc(val('name', c ? c.name : ''))}">`;
+  if (c && !c.parentId) h += `<input type="hidden" id="ce_parent" value=""><p class="small muted" style="margin:6px 0 0">تصنيف رئيسي</p>`;
+  else if (prot) h += `<input type="hidden" id="ce_parent" value="${esc(pid)}">`;
+  else h += `<label class="f">المكان</label><select id="ce_parent" data-change="ceParent">${c ? '' : `<option value="">تصنيف رئيسي</option>`}${mains.map(m => `<option value="${m.id}" ${m.id === pid ? 'selected' : ''}>فرعي تحت «${esc(m.name)}»</option>`).join('')}</select>`;
+  const emo = val('emoji', c ? (c.emoji || '') : ''), col = val('color', c ? (c.color || '') : '');
+  h += `<label class="f">الإيموجي</label><div style="display:flex;gap:8px;align-items:center"><input type="text" id="ce_emoji" value="${esc(emo)}" placeholder="🙂" style="width:84px;text-align:center;font-size:22px"><button type="button" class="btn" data-action="ceEmoji" data-e="">بدون</button></div>
+    <div class="emogrid">${EMOJI_SET.map(e => `<button type="button" data-action="ceEmoji" data-e="${e}">${e}</button>`).join('')}</div>
+    <label class="f">اللون</label><input type="hidden" id="ce_color" value="${esc(col)}"><div class="colors"><button type="button" data-action="ceColor" data-c="" class="auto ${!col ? 'on' : ''}">تلقائي</button>${CAT_COLORS.map(x => `<button type="button" data-action="ceColor" data-c="${x}" class="${col === x ? 'on' : ''}" style="background:${PAL[x]}" aria-label="${x}"></button>`).join('')}</div>`;
+  if (full) {
+    const opt = (v, l, cur) => `<option value="${v}" ${String(cur) === String(v) ? 'selected' : ''}>${l}</option>`;
+    const inh = isMain ? '' : opt('', 'يتبع الرئيسي', '');
+    const cur = (key, dflt) => { const v = val(key, c ? c[key] : dflt); return v === null || v === undefined ? '' : String(v); };
+    h += `<div class="grid2"><div><label class="f">التكرار الافتراضي</label><select id="ce_rec">${inh}${opt('recurring', 'متكرر', cur('defaultRecurrenceType', isMain ? 'variable' : null))}${opt('variable', 'متغير', cur('defaultRecurrenceType', isMain ? 'variable' : null))}</select></div>
+      <div><label class="f">الضرورة الافتراضية</label><select id="ce_nec">${isMain ? opt('', 'غير محددة', cur('defaultNecessityType', null)) : inh}${opt('essential', 'ضروري', cur('defaultNecessityType', null))}${opt('discretionary', 'اختياري', cur('defaultNecessityType', null))}</select></div>
+      <div><label class="f">التزام</label><select id="ce_commit">${inh}${opt('false', 'لا', cur('isCommitment', isMain ? false : null))}${opt('true', 'نعم', cur('isCommitment', isMain ? false : null))}</select></div>
+      <div><label class="f">يدخل فرص التوفير</label><select id="ce_save">${inh}${opt('false', 'لا', cur('savingsEligible', isMain ? false : null))}${opt('true', 'نعم', cur('savingsEligible', isMain ? false : null))}</select></div></div>
+      <p class="small muted">«التزام» يدخل رقم «الالتزامات المعروفة» إذا كانت العملية متكررة.</p>`;
+  }
+  return h;
+}
+function autoCatColor() {
+  const used = new Map(CAT_COLORS.filter(x => x !== 'gray').map(x => [x, 0]));
+  store().all('categories').filter(c => !c.parentId && c.active !== false).forEach(c => { const h = catUi(c.id).hue; if (used.has(h)) used.set(h, used.get(h) + 1); });
+  return Array.from(used.entries()).sort((a, b) => a[1] - b[1])[0][0];
+}
+function readCatForm(full) {
+  const v = (id) => $(id) ? $(id).value : undefined;
+  const d = { name: v('ce_name'), parentId: v('ce_parent') || null, emoji: oneEmoji(v('ce_emoji')), color: v('ce_color') || null };
+  if (full) {
+    const main = !d.parentId, b = (x) => x === '' ? (main ? false : null) : x === 'true';
+    d.defaultRecurrenceType = v('ce_rec') || (main ? 'variable' : null);
+    d.defaultNecessityType = v('ce_nec') || null;
+    d.isCommitment = b(v('ce_commit')); d.savingsEligible = b(v('ce_save'));
+  }
+  return d;
+}
+function sheetCategory(id, parentId, keep) {
+  const c = id ? store().get('categories', id) : null;
+  openSheet(`<h3>${c ? 'تعديل التصنيف' : 'تصنيف جديد'}<span class="sp"></span><button class="close" data-action="closeSheet">×</button></h3>
+    <div class="catform" data-id="${c ? c.id : ''}" data-parent="${esc(parentId || '')}">${catFormHtml(c, parentId, true, keep)}</div>
+    <div class="btns" style="margin-top:14px"><button class="btn p" data-action="catSave" data-id="${c ? c.id : ''}">حفظ</button>${c && !c.parentId ? `<button class="btn" data-action="catNew" data-parent="${c.id}">+ تصنيف فرعي</button>` : ''}${c && !E.PROTECTED_CATS.has(c.id) ? `<button class="btn r" data-action="catDel" data-id="${c.id}">حذف</button>` : ''}</div>
+    ${c && E.PROTECTED_CATS.has(c.id) ? '<p class="small muted">تصنيف أساسي يستخدمه الحساب: تقدر تغيّر اسمه وشكله، لكن ما ينحذف.</p>' : ''}`);
+}
+
+// أشكال التاريخ المحفوظة (البند 1 في 1.4.0)
+function dateShapesCard() {
+  const sh = settings().smsDateShapes || {}, OL = SR().ORDER_L, keys = Object.keys(sh).sort((a, b) => String(sh[b].updatedAt || '').localeCompare(String(sh[a].updatedAt || '')));
+  return `<div class="card"><h2>أشكال التاريخ في الرسائل</h2><p class="small muted">كل شكل تاريخ جديد في رسائل البنك يسألك عنه التطبيق مرة، ويعتمد جوابك لكل رسالة بنفس الشكل.</p>
+    ${keys.length ? `<div class="list">${keys.map(k => `<div class="it" data-action="shapeEdit" data-sig="${esc(k)}"><div class="m"><div class="t">${shapeSampleHtml(sh[k].sample || k, (SR().findDateToken(sh[k].sample || '') || {}).raw)}</div><div class="s">${OL[sh[k].order] || sh[k].order}</div></div>${ico('chevL', 'chev')}</div>`).join('')}</div>` : '<div class="muted small">ما فيه أشكال محفوظة للحين.</div>'}</div>`;
+}
+// المساحة: حجم بياناتك (تقريبًا حجم ملف النسخة) + المستخدم والمتاح إذا المتصفح يعطيها
+const backupAge = () => { const b = settings().lastBackupAt; return b ? Math.max(0, E.daysBetween(b.slice(0, 10), E.todayISO())) : null; };
+function agoText(n) { return n === 0 ? 'اليوم' : n === 1 ? 'أمس' : n === 2 ? 'قبل يومين' : n <= 10 ? `قبل ${n} أيام` : `قبل ${n} يومًا`; }
+function fmtBytes(b) { if (b == null) return '—'; const u = ['بايت', 'ك.ب', 'م.ب', 'ج.ب']; let i = 0; while (b >= 1024 && i < u.length - 1) { b /= 1024; i++; } return `${i ? b.toFixed(b < 10 ? 1 : 0) : Math.round(b)} ${u[i]}`; }
+async function fillSpace() {
+  const el = $('bk_space'); if (!el) return;
+  let used = null, quota = null;
+  try { if (navigator.storage && navigator.storage.estimate) { const e = await navigator.storage.estimate(); used = typeof e.usage === 'number' ? e.usage : null; quota = typeof e.quota === 'number' ? e.quota : null; } } catch (e) { /* المتصفح ما يدعمها */ }
+  const data = new Blob([JSON.stringify(store().exportAll())]).size;
+  if (!$('bk_space')) return;
+  el.innerHTML = `حجم بياناتك: <b>${fmtBytes(data)}</b>${used != null ? ` · المستخدم على الجهاز: ${fmtBytes(used)}` : ''} · المتاح: ${quota != null && used != null ? fmtBytes(Math.max(0, quota - used)) : 'المتصفح ما يعطي هذا الرقم'}`;
 }
 function vBackup() {
   const s = settings();
+  setTimeout(fillSpace, 0);
   return `<div class="card"><h2>تصدير نسخة احتياطية</h2><p class="small">ملف JSON فيه كل بياناتك: الحسابات والعمليات والتجار والمستفيدون والتصنيفات والقواعد والإعدادات. الآيبانات وأرقام الهوية ما تكون فيه لأنها ما تنحفظ أصلًا.</p>
-    <p class="small muted">آخر نسخة: ${s.lastBackupAt ? fday(s.lastBackupAt.slice(0, 10)) : 'لا يوجد'}</p><button class="btn p" data-action="backup">تصدير الآن</button>
+    <p class="small ${backupAge() === null || backupAge() > (s.backupReminderDays || 7) ? 'warn-t' : 'muted'}">آخر نسخة: ${s.lastBackupAt ? fday(s.lastBackupAt.slice(0, 10)) + ' (' + agoText(backupAge()) + ')' : 'ما سويت نسخة للحين'}</p>
+    <p class="small muted" id="bk_space">جاري حساب المساحة…</p><button class="btn p" data-action="backup">تصدير الآن</button>
     <p class="small muted">على الآيفون: تفتح قائمة المشاركة ← «حفظ في الملفات».</p></div>
     <div class="card"><h2>استعادة نسخة</h2><p class="small"><b class="warn-t">الاستعادة تستبدل كل بيانات هذا الجهاز</b> بمحتوى النسخة. ما فيه دمج.</p><button class="btn r" data-action="pickRestore">اختيار ملف نسخة…</button></div>`;
 }
@@ -911,12 +1027,13 @@ function vMethods() {
   <li><b>الفرز</b>: «رمز تحقق» فقط بعبارات قوية (رمز التحقق، كلمة مرور لمرة واحدة، OTP، verification code، لا تشارك هذا الرمز، login code…) وما ينحفظ نصها. كلمة مفردة مثل «رمز» ما تكفي، والرسالة المشكوك فيها تروح المراجعة كـ«غير معروفة». عملية مرفوضة أو تذكير بمبلغ مستحق = «معلومات» بدون عملية. مبلغ + حركة مالية = «مالية».</li>
   <li><b>القراءة</b>: صيغة متعلّمة (السياق قبل القيمة وبعدها، وإذا ما انطبق فرقم السطر) ← صيغة الإنماء ← قارئ عام. الحقول الناقصة من صيغة متعلّمة تتكمل من القارئ العام، وتظهر للمراجعة.</li>
   <li><b>التعليم</b>: المبلغ مطلوب. التاجر أو المستفيد، آخر 4 أرقام، الرصيد، الرسوم، والتاريخ والوقت ووسيلة الدفع اختيارية. اللي ما تحدده يكمله القارئ العام. التاريخ الملتبس (مثل 05/09/26) تختار ترتيبه مرة وحدة وينحفظ مع الصيغة.</li>
-  <li><b>تاريخ العملية</b> من نص الرسالة. إذا ما فيه تاريخ: رسالة الصندوق تاخذ تاريخ استلامها، والرسالة الملصوقة تروح المراجعة لين تحدد تاريخها (وقت اللصق ما يعتبر تاريخ العملية لأنها ممكن تكون قديمة). وقت الاستلام ما يعتبر وقت العملية.</li>
+  <li><b>تاريخ العملية</b>: أول تاريخ في نص الرسالة، ويُقرأ بترتيب «شكله» المحفوظ (سنة-شهر-يوم أو يوم-شهر-سنة أو شهر-يوم-سنة). الشكل = نوع أجزاء التاريخ والفاصل بينها، وموضع الوقت، والكلمة اللي قبله، مثل «في 19:03 26-09-28»؛ ما له علاقة باسم البنك. أول مرة يجي شكل جديد يسألك التطبيق دائمًا ويعرض التواريخ المحتملة، والرسالة (ملصوقة أو من الصندوق) تنتظر في المراجعة ما تنحفظ لين تجاوب. إذا طلع التاريخ بعد وقت وصول الرسالة أو لصقها بأكثر من يوم: مراجعة لهذي الرسالة بس، والترتيب المحفوظ ما يتغير. تغيير ترتيب شكل من «الإعدادات» يصحح تاريخ العمليات اللي جا تاريخها آليًا من نفس الشكل فقط، وما يغيّر تاريخ حددته بنفسك ولا عملية أصلها كشف. الصيغة المتعلّمة اللي فيها حقل تاريخ تستخدم ترتيبها هي. إذا الرسالة ما فيها تاريخ: رسالة الصندوق تاخذ تاريخ استلامها، والملصوقة تروح المراجعة لين تحدد تاريخها. وقت الاستلام ما يعتبر وقت العملية.</li>
   <li><b>المستفيد</b>: بالبصمة (الآيبان أو رقم الحساب قبل إخفائه)، أو آخر 4 أرقام مع الاسم مطابق تمامًا. ما فيه مطابقة تقريبية لأسماء الأشخاص.</li>
   <li><b>منع التكرار</b>: رقم الطلب هو المفتاح؛ رسالة محفوظة سابقًا ما تنعالج مرة ثانية (يتأكد استلامها فقط). نفس النص برقم جديد يروح المراجعة. المطابقة مع العمليات بنفس نقاط الكشوف: دليل حاسم أو 90+ دمج، 65–89 أو تعادل مراجعة (ما تنحسب لين تقرر)، أقل مستقلة.</li>
   <li><b>لما يوصل الكشف بعد الرسالة</b>: يندمج معها، والكشف يكمّل الأصل والرسوم وتاريخ القيد والرصيد والمرجع والمستفيد. تصنيفك يبقى.</li>
   <li><b>الرسائل ما تعتبر تغطية</b>: تنبيه «البيانات ناقصة» والمقارنات تعتمد على الكشوف فقط.</li>
   <li><b>تأكيد الاستلام (ack)</b> ما يرسل إلا بعد نجاح الحفظ على الجهاز. إذا فشل الحفظ، البيانات في الذاكرة ترجع لآخر حالة محفوظة فعلًا، والرسالة تبقى في الصندوق وتنعالج في الجلب القادم.</li></ul>
+  <h3>التصنيفات</h3><p>كل تصنيف له رقم ثابت، والعمليات والتجار والمستفيدون والقواعد والحدود مربوطة بالرقم مو بالاسم؛ فتغيير الاسم أو الإيموجي أو اللون ما يغيّر أي رقم. التكرار والضرورة: العملية ← التاجر ← الفرعي ← الرئيسي («يتبع الرئيسي» في الفرعي = يأخذ قيمة الرئيسي). «التزام» يدخل رقم الالتزامات المعروفة إذا العملية متكررة. الحذف ما يحذف أي عملية: تنتقل لتصنيف تختاره، أو تبقى بدون تصنيف (وفي الفرعي تبقى تحت الرئيسي)، والتجار والمستفيدون والقواعد المرتبطة تتبع نفس الاختيار؛ القاعدة اللي ما يبقى لها عمل تتوقف. حد الصرف على تصنيف رئيسي محذوف ينتقل مع العمليات، إلا إذا التصنيف الجديد عليه حد من قبل أو اخترت «بدون تصنيف» فينحذف. «رسوم» وفرعياتها و«تبرعات» ما تنحذف لأن الحساب يستخدمها.</p>
   <h3>القواعد</h3><p>الأولوية: تعديلك لعملية وحدة ← القاعدة ← التاجر أو المستفيد ← التصنيف الفرعي ← الرئيسي. القاعدة تحتاج شرط حقيقي واحد على الأقل (نص، تاجر، مستفيد، حساب، أو مبلغ). إذا انطبقت أكثر من قاعدة، الأعلى في القائمة تكسب. تنطبق على العمليات الجديدة من الكشوف والرسائل، وعلى السابقة فقط إذا اخترت «طبّقها على السابق».</p>
   <h3>حدود الصرف</h3><p>على الدورة الحالية. مصروف التصنيف = نفس رقمه في «وين راحت الدراهم» (الإنفاق الحقيقي للتصنيف)، والحد الكلي = الإنفاق الحقيقي كله. النسبة = المصروف ÷ الحد. تنبيه عند نسبة الإعداد (80% افتراضيًا) وعند 100%.</p>
   <h3>التراجع وسجل التعديلات</h3><p>كل حفظ خطوة وحدة (بما فيها الاستيراد وجلب الرسائل). التراجع والإعادة لآخر 30 خطوة في الجلسة. سجل التعديلات يبقى (آخر 2000) ويدخل النسخة الاحتياطية. المفتاح السري لصندوق الرسائل ما يدخل النسخة الاحتياطية أبدًا.</p>
@@ -953,8 +1070,8 @@ function sheetTx(id) {
   const src0 = (t.sourceLinks || [])[0];
   let h = `<h3><button class="close" data-action="closeSheet" aria-label="إغلاق">×</button><span class="sp"></span></h3>
     <div class="txh">
-      ${canCat ? `<button class="catbtn" data-action="txCat" data-id="${t.id}" style="border-color:${tint(u.color, '66')}"><span style="color:${u.color};display:flex">${ico(u.icon)}</span><span>${esc(catLabel(t))}</span></button>`
-        : `<div class="catbtn" style="cursor:default;border-color:${tint(u.color, '66')}"><span style="color:${u.color};display:flex">${ico(u.icon)}</span><span>${TYPE_L[t.transactionType]}</span></div>`}
+      ${canCat ? `<button class="catbtn" data-action="txCat" data-id="${t.id}" style="border-color:${tint(u.color, '66')}"><span style="color:${u.color};display:flex">${glyph(u)}</span><span>${esc(catLabel(t))}</span></button>`
+        : `<div class="catbtn" style="cursor:default;border-color:${tint(u.color, '66')}"><span style="color:${u.color};display:flex">${glyph(u)}</span><span>${TYPE_L[t.transactionType]}</span></div>`}
       <div class="nm">${m ? `<span class="ic s" style="background:var(--pri-soft);color:var(--pri)">${ico('store')}</span>` : b ? `<span class="ic s" style="background:var(--pri-soft);color:var(--pri)">${ico('person')}</span>` : ''}<span>${esc(txTitle(t))}</span>${m ? `<a data-action="merchantDrill" data-id="${m.id}" aria-label="كل عمليات التاجر" style="display:flex">${ico('chevL')}</a>` : ''}</div>
       <div class="amt">${money(t.grossAmount)}${dirBadge(t)}</div>
       <div class="badges" style="justify-content:center">${badges(t).replace(/^<div class="badges">|<\/div>$/g, '')}</div>
@@ -963,7 +1080,7 @@ function sheetTx(id) {
     <div class="drow">${ico('note')}<div class="m"><input type="text" id="s_note" placeholder="إضافة ملاحظة" value="${esc(t.note || '')}"></div></div>
     <div class="drow">${ico(acc && acc.type === 'credit_card' ? 'card' : 'bank')}<div class="m">${esc(acc ? acc.name : '—')}${ins ? ` · ${esc(ins.label)}` : ''}${t.paymentMethod && t.paymentMethod !== 'Unknown' ? ` · ${METHOD_L[t.paymentMethod] || esc(t.paymentMethod)}` : ''}</div></div>
     <div class="drow">${ico('cal')}<div class="m">${fday(t.transactionDate)}${t.time ? '، ' + ftime(t.time) : ''}</div></div>
-    ${src0 ? `<div class="drow" style="align-items:flex-start">${ico('msg')}<div class="m small">${esc(src0.rawDescription || '')}</div></div>` : ''}`;
+    ${src0 ? `<div class="drow" style="align-items:flex-start">${ico('msg')}<div class="m small">${rawHtml(src0.rawDescription || '')}</div></div>` : ''}`;
   if (t.transferSubtype === 'round_up') {
     const orig = t.roundUpOfId ? st.get('transactions', t.roundUpOfId) : null;
     h += `<div class="banner i" style="margin-top:10px"><div>تقريب لأقرب ريال${orig ? ` لشراء ${fmt(orig.grossAmount)} من ${esc(txTitle(orig))}` : ''}. <a data-action="setRoundUp">حدد وجهة التقريب</a> (تنطبق على كل عمليات التقريب).</div></div>`;
@@ -983,7 +1100,7 @@ function sheetTx(id) {
     ${t.reference ? `<dt>المرجع</dt><dd class="small"><span class="num">${esc(t.reference)}</span></dd>` : ''}${t.balanceAfter != null ? `<dt>الرصيد بعد العملية</dt><dd>${num(t.balanceAfter)}</dd>` : ''}
     ${(t.linkedTransactionIds || []).length ? `<dt>مرتبطة بـ</dt><dd>${t.linkedTransactionIds.map(x => { const o = st.get('transactions', x); return o ? `<a data-action="openTx" data-id="${o.id}">${esc(txTitle(o))} ${fmt(o.grossAmount)}</a>` : ''; }).join('<br>')}</dd>` : ''}</dl>
     <div class="btns" style="margin-top:12px"><button class="btn" data-action="ruleFromTx" data-id="${t.id}">قاعدة من هذي العملية</button></div>
-    <h3 style="margin-top:14px;font-size:15px">المصادر (${(t.sourceLinks || []).length})</h3>${(t.sourceLinks || []).map(sl => { const imp = sl.importId ? st.get('imports', sl.importId) : null; return `<div class="small muted" style="margin-top:6px">${SRC_L[sl.sourceType] || sl.sourceType}${imp ? ' · ' + esc(imp.filename) : ''}</div><div class="raw">${esc(sl.rawDescription || '')}</div>`; }).join('')}
+    <h3 style="margin-top:14px;font-size:15px">المصادر (${(t.sourceLinks || []).length})</h3>${(t.sourceLinks || []).map(sl => { const imp = sl.importId ? st.get('imports', sl.importId) : null; return `<div class="small muted" style="margin-top:6px">${SRC_L[sl.sourceType] || sl.sourceType}${imp ? ' · ' + esc(imp.filename) : ''}</div><div class="raw">${rawHtml(sl.rawDescription || '')}</div>`; }).join('')}
     </details>
     <div class="btns" style="margin-top:14px"><button class="btn p" style="flex:1" data-action="saveTx" data-id="${t.id}">حفظ</button>${(t.sourceLinks || []).every(sl => sl.sourceType === 'manual' || sl.sourceType === 'cash_reconciliation') ? `<button class="btn r" data-action="deleteTx" data-id="${t.id}">حذف</button>` : ''}</div>`;
   openSheet(h);
@@ -1004,13 +1121,17 @@ function renderPick() {
   let h = `<div class="sheet-bg" data-action="pickBg"><div class="sheet" role="dialog" aria-label="اختر التصنيف"><h3><button class="close" data-action="pickClose" aria-label="إغلاق">×</button><span class="sp" style="text-align:center;color:var(--ink-3);font-weight:500">اختر التصنيف</span><span style="width:34px"></span></h3>`;
   if (P.stage === 'grid') {
     const mains = st.all('categories').filter(c => !c.parentId && c.active !== false).sort(byOrder);
-    h += `<div class="catgrid">${mains.map(c => { const u = catUi(c.id); return `<button data-action="pickMain" data-id="${c.id}" class="${P.cat === c.id ? 'on' : ''}"><span style="color:${u.color};display:flex">${ico(u.icon)}</span><span>${esc(c.name)}</span></button>`; }).join('')}</div>`;
+    h += `<div class="catgrid">${mains.map(c => { const u = catUi(c.id); return `<button data-action="pickMain" data-id="${c.id}" class="${P.cat === c.id ? 'on' : ''}"><span style="color:${u.color};display:flex">${glyph(u)}</span><span>${esc(c.name)}</span></button>`; }).join('')}</div>`;
+    h = h.replace(/<\/div>$/, '');
+    h += `<button data-action="pickNew" class="newcat"><span style="display:flex">${ico('plus')}</span><span>تصنيف جديد</span></button></div>`;
     if (P.allowNone) h += `<div style="text-align:center;margin-top:16px"><button class="btn" data-action="pickNone">بدون تصنيف</button></div>`;
+  } else if (P.stage === 'new') {
+    h += `<div class="catform">${catFormHtml(null, P.newParent || null, false)}<div class="btns" style="margin-top:12px"><button class="btn p" data-action="catSave" data-pick="1">إضافة واختيار</button><button class="btn" data-action="pickBack">رجوع</button></div></div>`;
   } else {
     const c = st.get('categories', P.cat), u = catUi(c.id);
     const subs = st.all('categories').filter(x => x.parentId === c.id && x.active !== false).sort(byOrder);
-    h += `<div class="subpick"><div class="sel"><span class="catbtn" style="border-color:${tint(u.color, '66')}"><span style="color:${u.color};display:flex">${ico(u.icon)}</span><span>${esc(c.name)}</span></span><button class="close" data-action="pickBack" aria-label="رجوع للتصنيفات">×</button></div>
-      <div class="chips2"><button data-action="pickSub" data-id="" class="${!P.sub ? 'on' : ''}">${esc(c.name)} بدون فرعي</button>${subs.map(x => `<button data-action="pickSub" data-id="${x.id}" class="${P.sub === x.id ? 'on' : ''}">${SUB_ICON[x.id] ? `<span style="color:${u.color};display:flex">${ico(SUB_ICON[x.id])}</span>` : ''}${esc(x.name)}</button>`).join('')}</div></div>`;
+    h += `<div class="subpick"><div class="sel"><span class="catbtn" style="border-color:${tint(u.color, '66')}"><span style="color:${u.color};display:flex">${glyph(u)}</span><span>${esc(c.name)}</span></span><button class="close" data-action="pickBack" aria-label="رجوع للتصنيفات">×</button></div>
+      <div class="chips2"><button data-action="pickSub" data-id="" class="${!P.sub ? 'on' : ''}">${esc(c.name)} بدون فرعي</button>${subs.map(x => `<button data-action="pickSub" data-id="${x.id}" class="${P.sub === x.id ? 'on' : ''}">${x.emoji || SUB_ICON[x.id] ? `<span style="color:${u.color};display:flex">${glyph(catUi(x.id), SUB_ICON[x.id])}</span>` : ''}${esc(x.name)}</button>`).join('')}<button data-action="pickNewSub" data-parent="${c.id}" class="addsub">+ فرعي</button></div></div>`;
   }
   $('sheet2').innerHTML = h + `</div></div>`;
 }
@@ -1115,7 +1236,8 @@ function sheetReconcile() {
 
 /* ================= MVP1.1 + 1.1.1: الرسائل، المراجعة، التعديل الجماعي، السجل، الحدود، القواعد ================= */
 const SR = () => window.SmsReader;
-const REVIEW_L = { sms_duplicate: 'تكرار محتمل مع عملية موجودة', sms_no_account: 'الحساب غير معروف', sms_unparsed: 'ما قدرت أقرأ الرسالة', sms_unknown: 'رسالة غير معروفة النوع', sms_same_content: 'نفس نص رسالة سابقة', sms_partial: 'عملية ناقصة الحقول', sms_no_date: 'رسالة بدون تاريخ' };
+const REVIEW_L = { sms_duplicate: 'تكرار محتمل مع عملية موجودة', sms_no_account: 'الحساب غير معروف', sms_unparsed: 'ما قدرت أقرأ الرسالة', sms_unknown: 'رسالة غير معروفة النوع', sms_same_content: 'نفس نص رسالة سابقة', sms_partial: 'عملية ناقصة الحقول', sms_no_date: 'رسالة بدون تاريخ', sms_date_shape: 'ترتيب التاريخ' };
+const SHAPE_TITLE = { new: 'شكل تاريخ جديد', legacy: 'تاريخ رسائل سابقة', future: 'تاريخ في المستقبل', order_invalid: 'التاريخ ما ينطبق على الترتيب المحفوظ' };
 const MSG_STATUS_L = { tx: 'عملية', merged: 'اندمجت', review: 'مراجعة', informational: 'معلومات', discarded: 'رمز تحقق', ignored: 'متجاهلة', manual: 'أدخلت يدويًا', deleted: 'محذوفة' };
 const CLS_L = { financial: 'مالية', otp: 'رمز تحقق', informational: 'معلومات', unknown: 'غير معروفة' };
 const FIELD_L = { amount: 'المبلغ', merchant: 'التاجر', beneficiary: 'المستفيد', counterparty: 'المرسل', cardLast4: 'آخر 4 للبطاقة', accountLast4: 'آخر 4 للحساب', balance: 'الرصيد', fee: 'الرسوم', direction: 'الاتجاه', date: 'التاريخ', time: 'الوقت', method: 'وسيلة الدفع' };
@@ -1193,7 +1315,7 @@ const openReviews = () => store().all('reviews').filter(r => r.status === 'open'
 function dataIssues() {
   const st = store(), items = [];
   const unk = st.all('transactions').filter(t => t.transactionType === 'Unknown');
-  if (unk.length) items.push({ t: `${cnt(unk.length, 'op')} نوعها غير معروف`, a: `<a data-action="kpi" data-kind="unclassified_all">صنّفها</a>` });
+  if (unk.length) items.push({ t: `${cnt(unk.length, 'op')} نوعها غير معروف`, a: `<a data-action="issueTxs" data-kind="unclassified_all">صنّفها</a>` });
   const tmp = st.all('transactions').filter(t => t.classificationStatus === 'temporary');
   if (tmp.length) items.push({ t: `${cnt(tmp.length, 'tr')} لأشخاص بتصنيف مؤقت`, a: `<a data-action="issueTxs" data-kind="temporary">حدد تصنيفها</a>` });
   const unc = st.all('transactions').filter(t => (t.transactionType === 'Payment' || t.transactionType === 'CashExpense') && !t.categoryId);
@@ -1202,15 +1324,22 @@ function dataIssues() {
   if (ru) items.push({ t: `وجهة التقريب غير محددة (${cnt(ru, 'op')})`, a: `<a data-action="setRoundUp">حددها</a>` });
   st.all('instruments').filter(i => i.instrumentOwner === 'unknown').forEach(i => items.push({ t: `مالك «${esc(i.label)}» غير محدد`, a: `<a data-action="editInstrument" data-id="${i.id}">حدده</a>` }));
   st.all('accounts').filter(a => a.type === 'unknown').forEach(a => items.push({ t: `نوع «${esc(a.name)}» غير محدد`, a: `<a data-action="editAccount" data-id="${a.id}">حدده</a>` }));
-  const cp = st.all('transactions').filter(t => t.transactionType === 'CreditCardPayment' && t.cardPaymentStatus !== 'matched' && !(t.transferLinkStatus === 'linked'));
-  if (cp.length) items.push({ t: `${cnt(cp.length, 'op')} سداد بطاقة غير مطابق`, a: `<a data-action="issueTxs" data-kind="card">اعرضها</a>` });
+  const cp = st.all('transactions').filter(isCardUnmatched);
+  if (cp.length) items.push({ t: `${cnt(cp.length, 'op')} سداد بطاقة غير مطابق`, a: `<a data-action="issueTxs" data-kind="card_unmatched">اعرضها</a>` });
   st.all('imports').filter(i => i.balanceValidated === false).forEach(i => items.push({ t: `كشف «${esc(i.filename)}» الرصيد فيه ما تطابق`, a: `<a data-action="go" data-view="imports">سجل الاستيراد</a>` }));
   return items;
 }
 function reviewBadge() { const n = openReviews().length; return n ? `<span class="cnt">${n}</span>` : ''; }
+// نص الرسالة: التاريخ المفصول بشرطات بعد كلمة عربية يقلبه اتجاه الكتابة (26-09-28 يظهر 28-09-26)،
+// فنعزله باتجاه يسار-يمين عشان يظهر بترتيبه الحقيقي
+function rawHtml(text) { return esc(text || '').replace(/\d{1,4}(?:[-.]\d{1,4}){2}/g, x => `<bdi dir="ltr">${x}</bdi>`); }
+function shapeSampleHtml(sample, token) {
+  sample = String(sample || ''); const i = token ? sample.indexOf(token) : -1;
+  return i < 0 ? rawHtml(sample) : `${rawHtml(sample.slice(0, i))}<bdi dir="ltr" class="num">${esc(token)}</bdi>${rawHtml(sample.slice(i + token.length))}`;
+}
 function msgBox(m) {
   if (!m) return '';
-  return `<div class="small muted" style="margin:6px 0 4px">${esc(m.sender || (m.source === 'paste' ? 'لصق' : 'صندوق'))} · ${m.receivedAt ? fdate(m.receivedAt.slice(0, 10), true) + (m.receivedAt.length > 15 ? '، ' + ftime(m.receivedAt.slice(11, 16)) : '') : ''}</div><div class="raw">${esc(m.text || '')}</div>`;
+  return `<div class="small muted" style="margin:6px 0 4px">${esc(m.sender || (m.source === 'paste' ? 'لصق' : 'صندوق'))} · ${m.receivedAt ? fdate(m.receivedAt.slice(0, 10), true) + (m.receivedAt.length > 15 ? '، ' + ftime(m.receivedAt.slice(11, 16)) : '') : ''}</div><div class="raw">${rawHtml(m.text || '')}</div>`;
 }
 function txMini(t) {
   if (!t) return '<div class="muted small">—</div>';
@@ -1242,10 +1371,23 @@ function reviewCard(r) {
     case 'sms_no_date': body = `<div class="small">الرسالة ما فيها تاريخ واضح، وما أعتمد وقت اللصق لأنها ممكن تكون رسالة قديمة. المبلغ ${num(r.info ? r.info.grossAmount : 0)}.</div>
         <label class="f">تاريخ العملية</label><input type="date" id="rvdate_${r.id}" max="${E.todayISO()}">`;
       btns = `<button class="btn p" data-action="rvDate" data-id="${r.id}">احفظها بهذا التاريخ</button><button class="btn" data-action="rvMsg" data-id="${r.id}" data-v="ignore">تجاهل</button>`; break;
+    case 'sms_date_shape': {
+      const OL = SR().ORDER_L, n = st.all('messages').filter(m => m.dateShape === r.sig && !m.userDate && m.txId).length;
+      const why = r.reason === 'new' ? `أول مرة يجي هذا الشكل من التاريخ: <b>${shapeSampleHtml(r.sample, r.token)}</b>. اختر التاريخ الصحيح لهذي الرسالة، والتطبيق يعتمد ترتيبه لكل رسالة بنفس الشكل.`
+        : r.reason === 'legacy' ? `رسائل انحفظت قبل هذا التحديث بهذا الشكل من التاريخ: <b>${shapeSampleHtml(r.sample, r.token)}</b>${n ? ` (${cnt(n, 'msg')})` : ''}. اختر التاريخ الصحيح لهذي الرسالة، والتطبيق يصحح تاريخ عملياتها بنفس الترتيب (ما عدا اللي حددت تاريخها بنفسك).`
+        : r.reason === 'future' ? `التاريخ اللي طلع من هذي الرسالة بعد وقت وصولها. اختر التاريخ الصحيح لها هي بس، والترتيب المحفوظ ما يتغير.`
+        : `الترتيب المحفوظ لهذا الشكل ما يعطي تاريخ صحيح لهذي الرسالة. اختر تاريخها هي بس، والترتيب المحفوظ ما يتغير.`;
+      body = `<div class="small">${why}${r.info && r.info.grossAmount ? ` المبلغ ${num(r.info.grossAmount)}.` : ''}</div>
+        <div class="kvbox" style="margin-top:8px">${(r.candidates || []).map((c, i) => `<label class="f" style="margin:6px 0"><input type="radio" name="shp_${r.id}" value="${c.order}" ${i === 0 && (r.candidates || []).length === 1 ? 'checked' : ''}> <b>${fdate(c.date, true)}</b> <span class="small muted">· ${OL[c.order]}</span></label>`).join('')}</div>
+        ${r.reason === 'future' || r.reason === 'order_invalid' ? `<label class="f">أو حدد التاريخ بنفسك</label><input type="date" id="rvdate_${r.id}" max="${E.todayISO()}">` : ''}`;
+      btns = `<button class="btn p" data-action="rvShape" data-id="${r.id}">اعتمد</button>${r.reason !== 'legacy' ? `<button class="btn" data-action="rvMsg" data-id="${r.id}" data-v="ignore">تجاهل</button>` : ''}`;
+      break;
+    }
     case 'sms_partial': { const t = st.get('transactions', r.txId); body = `<div class="small">انحفظت العملية، لكن ناقص: ${(r.missing || []).map(k => FIELD_L[k] || k).join('، ')}.</div><div class="kvbox" style="margin-top:6px;font-size:12.5px">${txMini(t)}</div>`;
       btns = `<button class="btn p" data-action="teachSms" data-id="${r.id}">علّم الصيغة وأكملها</button>${t ? `<button class="btn" data-action="openTx" data-id="${t.id}">افتح العملية</button>` : ''}<button class="btn" data-action="rvMsg" data-id="${r.id}" data-v="ignore">تم</button>`; break; }
   }
-  return `<div class="rv"><div class="rvh"><b>${REVIEW_L[r.kind] || r.kind}</b><span class="sp"></span><span class="small muted">${fdate(r.createdAt.slice(0, 10))}</span></div>${msgBox(m)}${body}<div class="btns" style="margin-top:10px">${btns}</div></div>`;
+  const title = r.kind === 'sms_date_shape' ? (SHAPE_TITLE[r.reason] || REVIEW_L[r.kind]) : (REVIEW_L[r.kind] || r.kind);
+  return `<div class="rv"><div class="rvh"><b>${title}</b><span class="sp"></span><span class="small muted">${fdate(r.createdAt.slice(0, 10))}</span></div>${msgBox(m)}${body}<div class="btns" style="margin-top:10px">${btns}</div></div>`;
 }
 function vReviewCenter() {
   const rs = openReviews(), issues = dataIssues();
@@ -1449,20 +1591,23 @@ const A = {
       if (type === 'CreditCardPayment') { const cards = st.all('accounts').filter(a => a.type === 'credit_card'); extra.targetCardLast4 = cards.length === 1 ? cards[0].last4 : null; }
       E.setType(st, t.id, type, extra);
     } else if (type === 'InternalTransfer' && form.cp && form.cp !== '__new' && form.cp !== t.counterpartyAccountId) { E.setType(st, t.id, type, { counterpartyAccountId: form.cp }); }
+    S.savedCount = 0;
     if (form.hasCat) {
       const cat = form.cat, sub = form.sub;
       if (cat !== (t.categoryId || null) || sub !== (t.subcategoryId || null)) {
         let scope = 'this';
         if (t.merchantId || t.beneficiaryId) { scope = await askScope(t.merchantId ? `التاجر: ${txTitle(t)}` : `المستفيد: ${txTitle(t)}`); if (!scope) { if (opts && opts.reopen) sheetTx(t.id); return; } }
         const n = E.setCategory(st, t.id, cat, sub, scope);
-        if (n > 1) toast(`تصنّف ${cnt(n, 'op')}`);
+        if (scope !== 'this') S.savedCount = n; // «السابقة والقادمة» أو «القادمة»: العدد يظهر مع «تم الحفظ» في رسالة وحدة
       }
       const t2 = st.get('transactions', t.id);
       if ((t2.recurrenceType || null) !== form.rec || (t2.necessityType || null) !== form.nec) { t2.recurrenceType = form.rec; t2.necessityType = form.nec; st.put('transactions', t2); }
     }
     const t3 = st.get('transactions', t.id); const note = form.note;
     if ((t3.note || '') !== note) { t3.note = note; t3.updatedAt = new Date().toISOString(); st.put('transactions', t3); }
-    st.touch(); await persist(); closeSheet(); render(); toast('تم الحفظ');
+    st.touch(); await persist(); closeSheet(); render();
+    const nCat = S.savedCount; S.savedCount = 0;
+    toast(nCat ? `تم الحفظ، وتصنّفت ${cnt(nCat, 'op')}` : 'تم الحفظ');
     if (opts && opts.reopen) sheetTx(t.id);
   },
   txCat: async (el) => {
@@ -1477,6 +1622,7 @@ const A = {
     if (!r || !$('s_cat')) return;
     $('s_cat').value = r.cat || ''; $('s_sub').value = r.sub || '';
     $('catfield').innerHTML = catFieldInner(r.cat, r.sub);
+    if ($('cd_move') && r.cat) $('cd_move').checked = true;
   },
   pickMain: (el) => { const id = el.dataset.id; const subs = store().all('categories').filter(c => c.parentId === id && c.active !== false); if (!subs.length) return finishPick({ cat: id, sub: null }); if (S.pick.cat !== id) S.pick.sub = null; S.pick.cat = id; S.pick.stage = 'subs'; renderPick(); },
   pickSub: (el) => finishPick({ cat: S.pick.cat, sub: el.dataset.id || null }),
@@ -1485,7 +1631,7 @@ const A = {
   pickClose: () => finishPick(null),
   pickBg: (el, ev) => { if (ev.target === el) finishPick(null); },
   deleteTx: async (el) => { if (!await confirmBox('حذف العملية', 'حذف هذا الإدخال اليدوي نهائيًا؟', 'حذف', true)) return; store().remove('transactions', el.dataset.id); store().touch(); await persist(); render(); toast('تم الحذف'); },
-  quickAdd: () => { const q = E.parseQuickEntry($('quick').value); if (!q.amount) return toast('اكتب المبلغ، مثل: قهوة 18'); sheetManual('expense', q); },
+  quickAdd: () => { const q = E.parseQuickEntry($('quick').value); if (!q.amount) return toast('اكتب المبلغ، مثل: قهوة 18'); [q.categoryId, q.subcategoryId] = E.liveCat(store(), q.categoryId, q.subcategoryId); sheetManual('expense', q); },
   manual: (el) => sheetManual(el.dataset.kind),
   saveManual: async (el) => {
     const kind = el.dataset.kind, amt = E.parseNum($('m_amt').value);
@@ -1537,7 +1683,7 @@ const A = {
     const cat = $('s_cat').value || null, sub = $('s_sub').value || null;
     m.defaultRecurrenceType = $('mm_rec').value || null; m.defaultNecessityType = $('mm_nec').value || null; st.put('merchants', m);
     const n = E.setMerchantCategory(st, m.id, cat, sub);
-    await persist(); closeSheet(); render(); toast(`تصنّف ${cnt(n, 'op')}`);
+    await persist(); closeSheet(); render(); toast(n ? `تم الحفظ، وتصنّفت ${cnt(n, 'op')}` : 'تم الحفظ');
   },
   merchantsFilter: (el) => { S.merchantsOnlyNone = el.dataset.v === '1'; render(); },
   setRoundUp: (el, ev) => { if (ev) ev.preventDefault(); sheetRoundUp(); },
@@ -1672,6 +1818,91 @@ Object.assign(A, {
     const plan = await E.reprocessMessages(store(), [r.messageId], { forceDate: { [r.messageId]: d } });
     if (plan) E.commitSms(store(), plan);
     await persist('تحديد تاريخ رسالة'); render(); toast(plan ? smsSummaryText(plan.smsSummary) : 'تم');
+  },
+  catNew: (el) => sheetCategory(null, el.dataset.parent || null),
+  ceParent: () => {
+    // تغيير المكان (رئيسي/فرعي) في النموذج الكامل يغيّر الخيارات المتاحة؛ نعيد رسمه ونحتفظ بالمكتوب
+    if (!$('ce_rec')) return;
+    const box = document.querySelector('.catform'); const keep = { name: $('ce_name').value, parentId: $('ce_parent').value || '', emoji: $('ce_emoji').value, color: $('ce_color').value };
+    sheetCategory(box.dataset.id || null, keep.parentId || null, keep);
+  },
+  catEdit: (el) => sheetCategory(el.dataset.id, null),
+  ceEmoji: (el) => { if ($('ce_emoji')) $('ce_emoji').value = el.dataset.e || ''; },
+  ceColor: (el) => { $('ce_color').value = el.dataset.c || ''; el.parentNode.querySelectorAll('button').forEach(b => b.classList.toggle('on', b === el)); },
+  pickNew: () => { S.pick.stage = 'new'; S.pick.newParent = null; renderPick(); },
+  pickNewSub: (el) => { S.pick.stage = 'new'; S.pick.newParent = el.dataset.parent; renderPick(); },
+  catSave: async (el) => {
+    const inPick = el.dataset.pick === '1', id = el.dataset.id || null, d = readCatForm(!inPick);
+    if (!id && !d.parentId && !d.color) d.color = autoCatColor(); // تصنيف رئيسي جديد: لون من ألوان التطبيق الأقل استخدامًا
+    const r = E.saveCategory(store(), Object.assign({ id }, d));
+    if (r.error) return toast(CAT_ERR[r.error] || r.error);
+    await persist(id ? 'تعديل تصنيف' : 'تصنيف جديد');
+    const c = r.category;
+    if (inPick) return finishPick(c.parentId ? { cat: c.parentId, sub: c.id } : { cat: c.id, sub: null });
+    closeSheet(null); render(); toast(id ? 'انحفظ' : 'انضاف التصنيف');
+  },
+  catDel: (el) => {
+    const st = store(), c = st.get('categories', el.dataset.id); if (!c) return;
+    const u = E.categoryUsage(st, c.id), parent = c.parentId ? st.get('categories', c.parentId) : null;
+    openSheet(`<h3>حذف «${esc(c.name)}»<span class="sp"></span><button class="close" data-action="closeSheet">×</button></h3>
+      <p class="small">${u.txs ? `عليه ${cnt(u.txs, 'op')}` : 'ما عليه عمليات'}${u.subs ? `، ومعه ${u.subs === 1 ? 'تصنيف فرعي' : u.subs + ' تصنيفات فرعية'} بينحذف` : ''}. <b>العمليات نفسها ما تنحذف.</b> وين تروح؟</p>
+      <label class="f"><input type="radio" name="cd_mode" value="none" checked> ${parent ? `تبقى تحت «${esc(parent.name)}» بدون فرعي` : 'تبقى بدون تصنيف'}</label>
+      <label class="f"><input type="radio" name="cd_mode" id="cd_move" value="move"> تنتقل إلى تصنيف ثاني:</label>${catField(null, null)}
+      <p class="small muted">التجار والمستفيدون والقواعد المرتبطة فيه يتبعون نفس اختيارك${!parent ? '، وحد الصرف عليه ينتقل معه (أو ينحذف إذا بقت بدون تصنيف، أو إذا التصنيف الجديد عليه حد من قبل)' : ''}.</p>
+      <div class="btns" style="margin-top:12px"><button class="btn r" data-action="catDelGo" data-id="${c.id}">حذف التصنيف</button><button class="btn" data-action="catEdit" data-id="${c.id}">رجوع</button></div>`);
+  },
+  catDelGo: async (el) => {
+    const id = el.dataset.id, mode = (document.querySelector('input[name="cd_mode"]:checked') || {}).value;
+    const tcat = $('s_cat') ? $('s_cat').value : '', tsub = $('s_sub') ? $('s_sub').value : '';
+    if (mode === 'move' && !tcat) return toast('اختر التصنيف اللي تنتقل له العمليات');
+    const res = E.deleteCategory(store(), id, mode === 'move' ? { cat: tcat, sub: tsub || null } : null);
+    if (!res || res.error) return toast(CAT_ERR[res && res.error] || 'ما انحذف');
+    if (S.filters && (S.filters.categoryId === id)) S.filters = { kind: 'all', allTime: false };
+    await persist('حذف تصنيف'); closeSheet(null); render();
+    toast(res.txs ? `انحذف التصنيف، و${mode === 'move' ? 'انتقلت' : 'تعدّلت'} ${cnt(res.txs, 'op')}` : 'انحذف التصنيف', 6000);
+  },
+  rvShape: async (el) => {
+    const r = store().get('reviews', el.dataset.id); if (!r) return;
+    const pick = document.querySelector(`input[name="shp_${r.id}"]:checked`), own = $('rvdate_' + r.id);
+    if (!pick && own && own.value) {
+      if (own.value > E.todayISO()) return toast('التاريخ في المستقبل');
+      const plan = await E.reprocessMessages(store(), [r.messageId], { forceDate: { [r.messageId]: own.value } });
+      if (plan) E.commitSms(store(), plan);
+      await persist('تحديد تاريخ رسالة'); render(); return toast(plan ? smsSummaryText(plan.smsSummary) : 'تم');
+    }
+    if (!pick) return toast('اختر التاريخ الصحيح');
+    const res = E.answerDateShape(store(), r.id, pick.value); if (!res) return;
+    let plan = null;
+    if (res.reprocess.length) { plan = await E.reprocessMessages(store(), res.reprocess, res.forceDate ? { forceDate: res.forceDate } : {}); if (plan) E.commitSms(store(), plan); }
+    await persist(res.saved ? 'اعتماد ترتيب تاريخ' : 'تحديد تاريخ رسالة'); render();
+    const parts = [];
+    if (res.saved) parts.push('انحفظ الترتيب لهذا الشكل');
+    if (res.fixed) parts.push(`تصحح تاريخ ${cnt(res.fixed, 'op')}`);
+    if (plan) parts.push(smsSummaryText(plan.smsSummary));
+    toast(parts.join('، ') || 'تم', 6000);
+  },
+  shapeEdit: (el) => {
+    const sig = el.dataset.sig, sh = (settings().smsDateShapes || {})[sig]; if (!sh) return;
+    const tok = SR().findDateToken(sh.sample || ''), OL = SR().ORDER_L;
+    const orders = SR().ordersFor(sh.pat || sig.split('|')[2]);
+    openSheet(`<h3>ترتيب التاريخ<span class="sp"></span><button class="close" data-action="closeSheet">×</button></h3>
+      <p class="small">الشكل: <b>${shapeSampleHtml(sh.sample || '', tok && tok.raw)}</b></p>
+      <div class="kvbox">${orders.map(o => { const d = tok ? SR().readDateOrder(tok, o) : null; return `<label class="f" style="margin:6px 0"><input type="radio" name="shp_edit" value="${o}" ${o === sh.order ? 'checked' : ''}> <b>${d ? fdate(d, true) : '—'}</b> <span class="small muted">· ${OL[o]}</span></label>`; }).join('')}</div>
+      <p class="small muted">إذا غيّرت الترتيب، يتصحح تاريخ العمليات اللي جاء تاريخها آليًا من هذا الشكل. العمليات اللي حددت تاريخها بنفسك ما تتغير.</p>
+      <div class="btns" style="margin-top:12px"><button class="btn p" data-action="shapeSave" data-sig="${esc(sig)}">حفظ</button><button class="btn r" data-action="shapeDel" data-sig="${esc(sig)}">حذف الشكل</button></div>`);
+  },
+  shapeSave: async (el) => {
+    const sig = el.dataset.sig, sh = (settings().smsDateShapes || {})[sig], pick = document.querySelector('input[name="shp_edit"]:checked');
+    if (!sh || !pick) return;
+    if (pick.value === sh.order) return closeSheet(null);
+    E.setDateShape(store(), sig, pick.value); const n = E.retroDateFix(store(), sig);
+    await persist('تغيير ترتيب تاريخ'); closeSheet(null); render(); toast(n ? `انحفظ، وتصحح تاريخ ${cnt(n, 'op')}` : 'انحفظ');
+  },
+  shapeDel: async (el) => {
+    const sig = el.dataset.sig; closeSheet(null);
+    const ok = await confirmBox('حذف شكل التاريخ', 'العمليات الحالية تبقى بتواريخها. أول رسالة جاية بنفس الشكل بتسألك عن ترتيبها من جديد.', 'حذف', true);
+    if (!ok) return;
+    E.removeDateShape(store(), sig); await persist('حذف شكل تاريخ'); render(); toast('انحذف');
   },
   rvSame: async (el) => {
     const r = store().get('reviews', el.dataset.id); if (!r) return;
@@ -1840,7 +2071,7 @@ function onChange(ev) {
   }
 }
 document.addEventListener('input', (ev) => {
-  if (ev.target.id === 'q') { S.q = ev.target.value; clearTimeout(S._qt); S._qt = setTimeout(() => { const box = $('txlist'); if (box) box.innerHTML = txListHtml(); }, 200); }
+  if (ev.target.id === 'q') { S.q = ev.target.value; clearTimeout(S._qt); S._qt = setTimeout(() => { const box = $('txlist'); if (box) box.innerHTML = txListHtml(); const fl = $('fline'); if (fl) fl.innerHTML = filtersLine(); }, 200); }
 });
 document.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' && ev.target.id === 'quick') A.quickAdd(); if (ev.key === 'Escape') { if ($('sheet2').innerHTML) finishPick(null); else if ($('sheet').innerHTML) closeSheet(null); } });
 
@@ -1906,6 +2137,7 @@ async function restoreFrom(file) {
   S.store.replaceAll(data); S.store.takeChanges();
   S.store.addAudit({ id: E.uid(), at: new Date().toISOString(), label: 'استعادة نسخة احتياطية', source: 'user', changes: [] });
   await persist(null, { noStep: true });
+  E.migrateDateShapes(S.store); await persist(null, { noStep: true }); // نسخة من إصدار قديم: أشكال تواريخ رسائلها
   S.period = null; S.plan = null; go('home'); toast('تمت الاستعادة');
 }
 

@@ -176,6 +176,51 @@ function findDate(t) {
   }
   return { date, time };
 }
+/* ---------- شكل التاريخ في الرسالة (مستقل عن اسم البنك) ----------
+   أول تاريخ رقمي في الرسالة + شكله: نوع الأجزاء (n = رقم أو رقمين، Y = أربعة أرقام) والفاصل،
+   وموضع الوقت (قبل التاريخ T> أو بعده >T)، والكلمة اللي قبله. مثال: «في 19:03 26-09-28» = في|T>|n-n-n
+   الترتيب (سنة-شهر-يوم وغيره) ما ينحفظ هنا؛ يختاره المستخدم مرة لكل شكل. */
+const ORDER_L = { YMD: 'سنة-شهر-يوم', DMY: 'يوم-شهر-سنة', MDY: 'شهر-يوم-سنة' };
+function ordersFor(pat) {
+  const k = pat.replace(/[-/.]/g, '');
+  return k === 'Ynn' ? ['YMD'] : k === 'nnY' ? ['DMY', 'MDY'] : ['DMY', 'MDY', 'YMD'];
+}
+function readParts(a, b, c, order) {
+  let y, mo, d;
+  if (order === 'YMD') { y = a; mo = b; d = c; } else if (order === 'DMY') { d = a; mo = b; y = c; } else if (order === 'MDY') { mo = a; d = b; y = c; } else return null;
+  y = String(y).length <= 2 ? 2000 + Number(y) : Number(y);
+  return ymd(y, Number(mo), Number(d));
+}
+function findDateToken(text) {
+  const t = norm(text), g = /(^|[^\d])(\d{1,4})([-/.])(\d{1,2})\3(\d{1,4})(?!\d)/g; let m;
+  while ((m = g.exec(t))) {
+    const a = m[2], sep = m[3], b = m[4], c = m[5];
+    const idx = m.index + m[1].length, end = idx + a.length + b.length + c.length + 2;
+    let pat;
+    if (a.length === 4 && c.length <= 2) pat = 'Y' + sep + 'n' + sep + 'n';
+    else if (a.length <= 2 && c.length === 4) pat = 'n' + sep + 'n' + sep + 'Y';
+    else if (a.length <= 2 && c.length <= 2) pat = 'n' + sep + 'n' + sep + 'n';
+    else { g.lastIndex = m.index + m[0].length - c.length; continue; }
+    const candidates = ordersFor(pat).map(o => ({ order: o, date: readParts(a, b, c, o) })).filter(x => x.date);
+    if (!candidates.length) continue;
+    const ls = t.lastIndexOf('\n', idx - 1) + 1, le0 = t.indexOf('\n', end), le = le0 < 0 ? t.length : le0;
+    const before = t.slice(ls, idx), after = t.slice(end, le);
+    let timePos = '', pre = before;
+    const tb = before.match(/(\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM|am|pm|ص|م)?)[\s,،]*$/);
+    if (tb) { timePos = 'T>'; pre = before.slice(0, tb.index); }
+    else if (/^[\s,،\-]*(?:في|at|الساعة|الساعه)?\s*\d{1,2}:\d{2}/.test(after)) timePos = '>T';
+    const w = pre.match(/([\p{L}]+)[\s:：\-–]*$/u);
+    const prefix = w ? w[1].toLowerCase() : (pre.trim() ? '?' : '^');
+    const sig = [prefix, timePos, pat].join('|');
+    // مثال قصير حول التاريخ للعرض (الوقت والكلمة اللي قبله)
+    let s0 = Math.max(ls, idx - 26); if (s0 > ls) { const sp = t.indexOf(' ', s0); s0 = sp >= 0 && sp < idx ? sp + 1 : idx; }
+    let e0 = Math.min(le, end + 14); if (e0 < le) { const sp = t.lastIndexOf(' ', e0); e0 = sp > end ? sp : end; }
+    const sample = (s0 > ls ? '… ' : '') + t.slice(s0, e0).trim() + (e0 < le ? ' …' : '');
+    return { raw: t.slice(idx, end), a, b, c, sep, pat, sig, prefix, timePos, candidates, sample };
+  }
+  return null;
+}
+function readDateOrder(tok, order) { return tok ? readParts(tok.a, tok.b, tok.c, order) : null; }
 function ymd(y, mo, d) {
   if (!(mo >= 1 && mo <= 12 && d >= 1 && d <= 31)) return null;
   const dt = new Date(Date.UTC(y, mo - 1, d)); if (dt.getUTCMonth() !== mo - 1) return null;
@@ -405,6 +450,6 @@ function applyTemplate(tpl, text) {
   return out;
 }
 
-root.SmsReader = { norm, splitMessages, splitDetails, segWarn, dateChoices, parseTime, methodOf, classify, extractAmount, parseGeneric, learnTemplate, applyTemplate, templateScore, findDate, wordsOf, OTP_STRONG, FAMILY_RULES };
+root.SmsReader = { norm, splitMessages, splitDetails, segWarn, dateChoices, parseTime, methodOf, findDateToken, readDateOrder, ordersFor, ORDER_L, classify, extractAmount, parseGeneric, learnTemplate, applyTemplate, templateScore, findDate, wordsOf, OTP_STRONG, FAMILY_RULES };
 if (typeof module !== 'undefined' && module.exports) module.exports = root.SmsReader;
 })(typeof globalThis !== 'undefined' ? globalThis : this);
