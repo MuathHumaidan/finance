@@ -120,10 +120,10 @@ function normCur(c) {
   return c.toUpperCase();
 }
 
-function classify(text) {
+function classify(text, W) {
   const t = norm(text);
   if (OTP_STRONG.some(r => r.test(t))) return { cls: 'otp', reason: 'عبارة رمز تحقق أو دخول' };
-  const amt = extractAmount(t), verb = FIN_VERB.test(t);
+  const amt = extractAmount(t), verb = FIN_VERB.test(t) || !!(W && W.extraVerb && W.extraVerb.test(t)); // 1.6.1: الكلمات اللي أضفتها لنوع العملية تكفي
   if (amt && DECLINED.test(t)) return { cls: 'informational', reason: 'عملية مرفوضة أو غير مكتملة' };
   if (amt && REMINDER.test(t) && !DONE.test(t)) return { cls: 'informational', reason: 'تذكير بمبلغ مستحق' };
   if (amt && verb) return { cls: 'financial', reason: '' };
@@ -131,6 +131,76 @@ function classify(text) {
   if (INFO.test(t) || (amt && !verb)) return { cls: 'informational', reason: amt ? 'فيها مبلغ بدون حركة' : 'رسالة معلومات' };
   return { cls: 'unknown', reason: 'ما تعرفت على نوعها' };
 }
+
+/* ---------- 1.6.1: كلمات قراءة الرسائل ----------
+   مجموعات كلمات يقدر المستخدم يعدلها من «المزيد ← كلمات قراءة الرسائل»، ولها نسخ بالتاريخ (الرسالة تنقرأ بنسخة تاريخها).
+   المطابقة: الحروف الكبيرة والصغيرة سوا، وأ/ا/إ/آ وة/ه وى/ي سوا، والمسافات مرنة. الكلمة الإنجليزية لازم تكون بداية كلمة
+   (فـ POS ما تنطبق داخل deposited). كلمات رسائل الرمز (OTP) مقفلة وما تنعدل.
+   ترتيب «نوع العملية» ثابت: أول مجموعة تنطبق تكسب. */
+const WORD_GROUPS = [
+  { key: 'card_payment', kind: 'family', dir: 'out', label: 'سداد بطاقة ائتمانية', words: ['سداد بطاق', 'سداد البطاق', 'سداد مستحقات بطاق', 'سداد مستحقات البطاق', 'credit card payment', 'card payment'] },
+  { key: 'bill_payment', kind: 'family', dir: 'out', label: 'سداد فاتورة', words: ['سداد فاتور', 'فاتورة', 'SADAD', 'bill payment'] },
+  { key: 'sms_refund', kind: 'family', dir: 'in', label: 'استرداد', words: ['استرداد', 'مسترد', 'إرجاع', 'refund', 'reversal', 'عكس عملية'] },
+  { key: 'salary', kind: 'family', dir: 'in', label: 'راتب', words: ['إيداع راتب', 'راتب', 'salary', 'payroll'] },
+  { key: 'sms_transfer_in', kind: 'family', dir: 'in', label: 'حوالة واردة', words: ['حوالة وارد', 'تحويل وارد', 'إيداع حوال', 'incoming transfer', 'transfer from', 'received transfer', 'حوالة داخلية وارد'] },
+  { key: 'sms_transfer_out', kind: 'family', dir: 'out', label: 'حوالة صادرة', words: ['حوالة صادر', 'تحويل صادر', 'تحويل إلى', 'حوالة إلى', 'outgoing transfer', 'transfer to', 'سريع صادر', 'حوالة محلي', 'حوالة دولي'] },
+  { key: 'sms_cash_withdrawal', kind: 'family', dir: 'out', label: 'سحب نقدي', words: ['سحب نقد', 'سحب من صراف', 'سحب من الصراف', 'صراف', 'ATM', 'cash withdrawal'] },
+  { key: 'sms_cash_deposit', kind: 'family', dir: 'in', label: 'إيداع نقدي', words: ['إيداع نقد', 'cash deposit'] },
+  { key: 'sms_purchase', kind: 'family', dir: 'out', label: 'شراء', words: ['شراء', 'مشتريات', 'نقاط بيع', 'نقاط البيع', 'POS', 'purchase', 'apple pay', 'mada pay', 'مدى', 'أونلاين', 'عبر إنترنت', 'عبر الإنترنت', 'online', 'ecommerce', 'e-commerce', 'دفع'] },
+  { key: 'sms_debit', kind: 'family', dir: 'out', label: 'خصم (مبلغ طالع نوعه غير واضح)', words: ['خصم', 'مدين', 'debit', 'withdrawn'] },
+  { key: 'sms_credit', kind: 'family', dir: 'in', label: 'إيداع (مبلغ داخل نوعه غير واضح)', words: ['إيداع', 'دائن', 'credit', 'deposited'], not: ['credit card'] },
+  { key: 'm_applepay', kind: 'method', value: 'Apple Pay', label: 'وسيلة الدفع: Apple Pay', words: ['apple pay', 'أبل'] },
+  { key: 'm_online', kind: 'method', value: 'Online', label: 'وسيلة الدفع: أونلاين', words: ['إنترنت', 'online', 'أونلاين', 'ecommerce', 'e-commerce'] },
+  { key: 'l_merchant', kind: 'label', label: 'قبل اسم المحل', words: ['لدى', 'عند', 'التاجر', 'المتجر', 'Merchant', 'at'] },
+  { key: 'l_merchant2', kind: 'label', label: 'قبل اسم المحل إذا ما لقى اللي فوق (للشراء والاسترداد)', words: ['من', 'في'] },
+  { key: 'l_beneficiary', kind: 'label', label: 'قبل اسم المستفيد (حوالة صادرة)', words: ['إلى', 'لـ', 'المستفيد', 'اسم المستفيد', 'to', 'Beneficiary'] },
+  { key: 'l_sender', kind: 'label', label: 'قبل اسم المرسل (حوالة واردة وراتب)', words: ['من', 'المرسل', 'اسم المرسل', 'from', 'Sender', 'By'] },
+  { key: 'l_balance', kind: 'label', label: 'قبل الرصيد', words: ['الرصيد المتاح', 'الرصيد المتبقي', 'الرصيد', 'رصيد', 'Available Balance', 'Available Bal', 'Avail Balance', 'Avail Bal', 'Balance', 'Bal'] },
+];
+// مفتاح الكلمة لمنع التكرار: نفس قواعد المطابقة (الحروف الكبيرة والصغيرة، أ/ا/إ/آ، ة/ه، ى/ي في آخر الكلمة، والمسافات)،
+// بدون ما يشيل الشرطة أو النقطة لأنها تفرق في المطابقة («e-commerce» غير «ecommerce»)
+const wordKey = (w) => String(w || '').trim().toLowerCase().replace(/[أإآ]/g, 'ا').replace(/ة/g, 'ه').replace(/ى(?=\s|$)/g, 'ي').replace(/\s+/g, '');
+function defaultWords() { const o = {}; WORD_GROUPS.forEach(g => { o[g.key] = { words: g.words.slice(), not: (g.not || []).slice() }; }); return o; }
+const escRe = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+// كلمة ← نمط: أ/ا/إ/آ سوا، ة/ه سوا، والياء والألف المقصورة في آخر الكلمة سوا. والمسافات مرنة.
+// الكلمة اللي آخرها «ى» لازم تكون آخر الكلمة في الرسالة (عشان «مدى» ما تنطبق على «مدين» و«إلى» على «اليوم»)،
+// واللي آخرها «ي» تنطبق مثل أي كلمة ثانية («حوالة محلي» تنطبق على «حوالة محلية»، مثل 1.6.0)
+function flexPart(p) {
+  let x = escRe(p).replace(/[اأإآ]/g, '[اأإآ]').replace(/[ةه]/g, '[ةه]');
+  if (/ى$/.test(p)) x = x.slice(0, -1) + '[ىي](?![\\u0621-\\u064A])';
+  else if (/ي$/.test(p)) x = x.slice(0, -1) + '[ىي]';
+  return x;
+}
+const phraseSrc = (w) => String(w).trim().split(/\s+/).map(flexPart).join('\\s*');
+function wordSrc(w) { const src = phraseSrc(w); return /^[a-z0-9]/i.test(String(w).trim()) ? '(?:^|[^a-z0-9])' + src : src; }
+const altSrc = (list) => (list || []).map(w => String(w || '').trim()).filter(Boolean).sort((a, b) => b.length - a.length).map(phraseSrc).join('|');
+const DEF_FAMILY_KEYS = new Set(WORD_GROUPS.filter(g => g.kind === 'family').flatMap(g => g.words).map(wordKey));
+function compileWords(map) {
+  const W = { family: [], method: {}, labels: {}, extraVerb: null }, extra = [];
+  WORD_GROUPS.forEach(g => {
+    const cur = (map && map[g.key]) || { words: g.words, not: g.not || [] };
+    const list = (cur.words || []).filter(w => String(w || '').trim());
+    // كلمات نوع العملية اللي أضفتها (مو من الافتراضية) تكفي عشان الرسالة تعتبر مالية. الافتراضية ما تغيّر الفرز عن 1.6.0
+    if (g.kind === 'family') list.forEach(w => { if (!DEF_FAMILY_KEYS.has(wordKey(w))) extra.push(w); }); // كلمة افتراضية نقلتها لمجموعة ثانية ما تحسب جديدة
+    if (g.kind === 'family') W.family.push({ key: g.key, dir: g.dir, re: list.length ? new RegExp('(?:' + list.map(wordSrc).join('|') + ')', 'i') : null, not: (cur.not || []).filter(w => String(w || '').trim()).length ? new RegExp(cur.not.map(wordSrc).join('|'), 'gi') : null });
+    else if (g.kind === 'method') W.method[g.key] = list.length ? new RegExp('(?:' + list.map(wordSrc).join('|') + ')', 'i') : null;
+    else W.labels[g.key] = altSrc(list) || '(?!)';
+  });
+  if (extra.length) W.extraVerb = new RegExp('(?:' + extra.map(wordSrc).join('|') + ')', 'i');
+  return W;
+}
+const DEFAULT_W = compileWords(null);
+const useW = (W) => W || DEFAULT_W;
+// نوع العملية من الكلمات (أول مجموعة تنطبق)
+function familyOf(t, W) {
+  W = useW(W);
+  for (const f of W.family) { if (!f.re) continue; const x = f.not ? t.replace(f.not, ' ') : t; if (f.re.test(x)) return f; }
+  return null;
+}
+// وسيلة الدفع من الكلمات: Apple Pay ثم أونلاين، وإلا null
+// شراء أونلاين حتى لو الدفع بـ Apple Pay (مثل «شراء إنترنت … مدى-ApplePay»)
+function onlineByWords(t, W) { W = useW(W); return !!(W.method.m_online && W.method.m_online.test(t)); }
+function methodByWords(t, W) { W = useW(W); if (W.method.m_applepay && W.method.m_applepay.test(t)) return 'Apple Pay'; if (W.method.m_online && W.method.m_online.test(t)) return 'Online'; return null; }
 
 /* ---------- القراءة العامة ---------- */
 const FAMILY_RULES = [
@@ -233,7 +303,8 @@ function labeled(t, labels) {
   const v = m[1].replace(/^[\s:：\-–]+|[\s:：\-–.,،]+$/g, '').trim();
   return v && v.length <= 80 && !/^[\d.,\s]+$/.test(v) ? v : null;
 }
-function parseGeneric(text) {
+function parseGeneric(text, W) {
+  W = useW(W);
   const t = norm(text), out = { parser: 'generic', missing: [] };
   const amt = extractAmount(t);
   if (amt) { out.grossAmount = amt.value; out.currency = amt.currency; }
@@ -242,14 +313,15 @@ function parseGeneric(text) {
   const sar = amts.find(a => a.currency === 'SAR'), fx = amts.find(a => a.currency !== 'SAR');
   if (fx && sar) { out.grossAmount = sar.value; out.currency = 'SAR'; out.foreignAmount = fx.value; out.foreignCurrency = fx.currency; }
   else if (fx && !sar) { out.foreignAmount = fx.value; out.foreignCurrency = fx.currency; }
-  const fam = FAMILY_RULES.find(r => r[2].test(t));
-  if (fam) { out.family = fam[0]; out.direction = fam[1]; }
+  const fam = familyOf(t, W);
+  if (fam) { out.family = fam.key; out.direction = fam.dir; }
+  if (out.family === 'sms_purchase' || out.family === 'sms_refund') { const pm = methodByWords(t, W); if (pm) out.paymentMethod = pm; }
   const l4 = findLast4s(t);
   if (l4.card) out.instrumentLast4 = l4.card;
   if (l4.account) out.accountLast4 = l4.account;
   if (!l4.card && !l4.account && l4.others.length) { if (out.family === 'sms_purchase') out.instrumentLast4 = l4.others[0].d; else out.accountLast4 = l4.others[0].d; }
   const dt = findDate(t); out.transactionDate = dt.date; out.time = dt.time;
-  const bm = t.match(new RegExp('(?:الرصيد\\s*المتاح|الرصيد\\s*المتبقي|الرصيد|رصيد|Avail(?:able)?\\s*Bal(?:ance)?|Balance|Bal)\\s*[:：]?\\s*(?:' + CUR + ')?\\s*' + NUM, 'i'));
+  const bm = t.match(new RegExp('(?:' + W.labels.l_balance + ')\\s*[:：]?\\s*(?:' + CUR + ')?\\s*' + NUM, 'i'));
   if (bm) out.balanceAfter = Number(bm[1].replace(/,/g, ''));
   const rm = t.match(/(?:رقم\s*(ال)?مرجع|(ال)?مرجع|رقم\s*(ال)?عملية|Ref(?:erence)?\.?(?:\s*No\.?)?)\s*[:：]?\s*([A-Z0-9][A-Z0-9-]{5,})/i);
   if (rm) out.reference = rm[4];
@@ -258,10 +330,10 @@ function parseGeneric(text) {
   const im = t.match(/\bSA\d{22}\b/i); if (im) out.iban = im[0].toUpperCase();
   const im2 = t.match(/SA\s*[*•x]+\s*(\d{4})/i); if (im2) out.beneficiaryLast4 = im2[1];
   // التاجر أو الطرف الآخر حسب نوع العملية
-  if (out.family === 'sms_transfer_out') out.beneficiaryRaw = labeled(t, 'إلى|الى|لـ|المستفيد|اسم\\s*المستفيد|to|Beneficiary');
-  else if (out.family === 'sms_transfer_in' || out.family === 'salary') out.counterpartyName = labeled(t, 'من|المرسل|اسم\\s*المرسل|from|Sender|By');
-  else out.merchantRaw = labeled(t, 'لدى|عند|التاجر|المتجر|Merchant|at') || (out.family === 'sms_purchase' || out.family === 'sms_refund' ? labeled(t, 'من|في') : null);
-  if (out.family === 'sms_transfer_out' && !out.beneficiaryLast4) { const bl = t.match(/(?:إلى|الى|to)[^\n]{0,40}?[*•x]+\s?(\d{4})/i); if (bl) out.beneficiaryLast4 = bl[1]; }
+  if (out.family === 'sms_transfer_out') out.beneficiaryRaw = labeled(t, W.labels.l_beneficiary);
+  else if (out.family === 'sms_transfer_in' || out.family === 'salary') out.counterpartyName = labeled(t, W.labels.l_sender);
+  else out.merchantRaw = labeled(t, W.labels.l_merchant) || (out.family === 'sms_purchase' || out.family === 'sms_refund' ? labeled(t, W.labels.l_merchant2) : null);
+  if (out.family === 'sms_transfer_out' && !out.beneficiaryLast4) { const bl = t.match(/(?:إلى|الى|to)[^\n]{0,40}?[*•x]+\s?(\d{4})/i); if (bl) out.beneficiaryLast4 = bl[1]; } // نفس 1.6.0
   if (!out.grossAmount) out.missing.push('amount');
   if (!out.direction) out.missing.push('direction');
   out.ok = out.missing.length === 0;
@@ -299,10 +371,9 @@ function parseTime(v) {
   return h < 24 && mi < 60 ? String(h).padStart(2, '0') + ':' + String(mi).padStart(2, '0') : null;
 }
 // وسيلة الدفع من النص اللي حدده المستخدم
-function methodOf(v) {
+function methodOf(v, W) {
   const t = String(v || '');
-  if (/apple\s?pay|أبل\s?باي|ابل\s?باي/i.test(t)) return 'Apple Pay';
-  if (/(إنترنت|انترنت|online|أونلاين|اونلاين|e-?commerce)/i.test(t)) return 'Online';
+  const byW = methodByWords(t, W); if (byW) return byW; // 1.6.1: كلماتك لـ Apple Pay والأونلاين
   if (/(سداد|فاتور|sadad|bill)/i.test(t)) return 'Bill Payment';
   if (/(حوال|تحويل|transfer)/i.test(t)) return 'Bank Transfer';
   if (/(نقد|كاش|cash|صراف|atm)/i.test(t)) return 'Cash';
@@ -428,7 +499,7 @@ function templateScore(tpl, text) {
   const w = new Set(wordsOf(text)); if (!tpl.signature || !tpl.signature.length) return 0;
   return tpl.signature.filter(x => w.has(x)).length / tpl.signature.length;
 }
-function applyTemplate(tpl, text) {
+function applyTemplate(tpl, text, W) {
   const t = norm(text), lines = t.split('\n');
   const out = { parser: 'template', family: tpl.family, direction: tpl.direction, currency: 'SAR', missing: [], via: {} };
   let pos = 0;
@@ -442,7 +513,7 @@ function applyTemplate(tpl, text) {
     else if (k === 'merchant') out.merchantRaw = r.value; else if (k === 'beneficiary') out.beneficiaryRaw = r.value; else if (k === 'counterparty') out.counterpartyName = r.value;
     else if (k === 'date') { out.transactionDate = r.value; const tm = parseTime(r.raw || ''); if (tm && !out.time) out.time = tm; }
     else if (k === 'time') out.time = r.value;
-    else if (k === 'method') { out.methodRaw = r.value; out.paymentMethod = methodOf(r.value); }
+    else if (k === 'method') { out.methodRaw = r.value; out.paymentMethod = methodOf(r.value, W); }
   });
   // اللي ما تحدد في الصيغة يكمله القارئ العام
   const dt = findDate(t); if (!out.transactionDate) out.transactionDate = dt.date; if (!out.time) out.time = dt.time;
@@ -450,6 +521,6 @@ function applyTemplate(tpl, text) {
   return out;
 }
 
-root.SmsReader = { norm, splitMessages, splitDetails, segWarn, dateChoices, parseTime, methodOf, findDateToken, readDateOrder, ordersFor, ORDER_L, classify, extractAmount, parseGeneric, learnTemplate, applyTemplate, templateScore, findDate, wordsOf, OTP_STRONG, FAMILY_RULES };
+root.SmsReader = { WORD_GROUPS, wordKey, defaultWords, compileWords, DEFAULT_W, familyOf, methodByWords, onlineByWords, norm, splitMessages, splitDetails, segWarn, dateChoices, parseTime, methodOf, findDateToken, readDateOrder, ordersFor, ORDER_L, classify, extractAmount, parseGeneric, learnTemplate, applyTemplate, templateScore, findDate, wordsOf, OTP_STRONG, FAMILY_RULES };
 if (typeof module !== 'undefined' && module.exports) module.exports = root.SmsReader;
 })(typeof globalThis !== 'undefined' ? globalThis : this);
