@@ -343,6 +343,8 @@ async function boot() {
     else void ch;
     // ترقية 1.4.0: أشكال تواريخ الرسائل المحفوظة سابقًا
     E.migrateDateShapes(S.store);
+    // ترقية 1.6.2 (قبل أي إعادة معالجة): المرسلين في «البنوك» والأنواع اللي لها عمليات معتمدة، وأشكال التاريخ لكل بنك
+    E.migrate162(S.store);
     // ترقية 1.4.1: تصنيف «سحب نقدي»، ورسائل «أي حساب؟» تنحفظ على بطاقة مؤقتة
     const m141 = E.migrate141(S.store);
     if (m141.reprocess.length) { const plan = await E.reprocessMessages(S.store, m141.reprocess); if (plan) E.commitSms(S.store, plan); }
@@ -377,6 +379,7 @@ async function boot() {
 function registerSW() {
   if (!('serviceWorker' in navigator) || location.protocol === 'file:') return;
   navigator.serviceWorker.register('sw.js').then(reg => {
+    S.swReg = reg; // 1.6.2: للفحص اليدوي والتلقائي
     if (reg.waiting && navigator.serviceWorker.controller) { S.swWaiting = reg.waiting; render(); }
     reg.addEventListener('updatefound', () => {
       const w = reg.installing; if (!w) return;
@@ -794,7 +797,7 @@ function vAdd() {
   h += `<div class="card"><h2>رفع كشف</h2><div class="drop" data-action="pickFile"><b>اختر ملف Excel أو CSV</b><div class="muted small">كشف حساب الإنماء أو كشف البطاقة الائتمانية. أي بنك ثاني تعلّمه مرة وحدة.</div></div>
     <div class="muted small" style="margin-top:8px">الملف يُقرأ على جهازك ولا يُرسل لأي مكان. الآيبان ورقم الهوية وأرقام الحسابات تنخفي قبل الحفظ.</div></div>`;
   h += `<div class="card"><h2>لصق رسائل البنك</h2><textarea id="smsPaste" rows="5" placeholder="الصق رسالة أو أكثر. الأضمن: سطر فاضي بين كل رسالة."></textarea>
-    <div class="btns" style="margin-top:8px;flex-wrap:nowrap"><input type="text" id="smsSender" placeholder="المرسل (اختياري، مثل alinma)" style="flex:1"><button class="btn p" data-action="pasteSms">اقرأ الرسائل</button></div>
+    ${pasteBankField()}<div class="btns" style="margin-top:8px"><button class="btn p" data-action="pasteSms">اقرأ الرسائل</button></div>
     <div class="muted small" style="margin-top:6px">رسائل رموز التحقق ما ينحفظ نصها. الآيبان وأرقام الحسابات تتحول لبصمة وتنخفي قبل الحفظ.</div></div>`;
   h += `<div class="card"><h2>إدخال سريع</h2><div class="btns" style="flex-wrap:nowrap"><input type="text" id="quick" placeholder="مثال: قهوة 18" enterkeyhint="done" style="flex:1"><button class="btn p" data-action="quickAdd">أضف</button></div>
     <div class="btns" style="margin-top:10px"><button class="btn" data-action="manual" data-kind="expense">مصروف</button><button class="btn" data-action="manual" data-kind="withdrawal">سحب نقدي</button><button class="btn" data-action="manual" data-kind="deposit">إيداع نقدي</button><button class="btn" data-action="manual" data-kind="income">دخل</button></div></div>`;
@@ -938,6 +941,7 @@ function vMore() {
   </div></div><div class="card"><div class="list">
     ${item('categories', 'التصنيفات', 'أضف وعدّل واحذف التصنيفات الرئيسية والفرعية', 'grid', PAL.orange)}
     ${item('rules', 'القواعد', 'صنّف تلقائيًا حسب التاجر أو المستفيد أو النص أو المبلغ', 'repeat', PAL.violet)}
+    ${item('banks', 'البنوك', 'سمّ كل بنك، والأنواع اللي اعتمدتها منه، وتجاهل مرسل مو بنك', 'bank', PAL.aqua)}
     ${item('smswords', 'كلمات قراءة الرسائل', 'الكلمات اللي يعرف منها نوع الرسالة ووسيلة الدفع واسم المحل', 'msg', PAL.blue)}
     ${item('limits', 'حدود الصرف', 'حد لكل تصنيف (حسب الفواتير أو المنتجات) أو للإنفاق الكلي', 'wallet', PAL.green)}
     ${item('ignore', 'فترات التجاهل', 'فترة ما تبي فيها علامات المدينة أو التصنيف', 'cal', PAL.gray)}
@@ -945,7 +949,7 @@ function vMore() {
     ${item('settings', 'الإعدادات', 'الدورة، يوم الراتب، أسماؤك، وجهة التقريب', 'gear', PAL.gray)}
     ${item('backup', 'النسخ الاحتياطي', 'تصدير واستعادة', 'shield', PAL.green)}
     ${item('methods', 'طريقة الحساب', 'كيف ينحسب كل رقم', 'chart', PAL.blue)}
-  </div></div><div class="muted small" style="text-align:center">الإصدار ${E.version} · البيانات على هذا الجهاز فقط</div>`;
+  </div></div><div class="muted small" style="text-align:center" data-action="go" data-view="settings">الإصدار ${E.version} · البيانات على هذا الجهاز فقط</div>`;
 }
 function vMerchants() {
   const st = store();
@@ -963,7 +967,7 @@ function vSettings() {
   const s = settings();
   const dest = s.roundUpDestination || { kind: 'unknown' };
   const destLabel = dest.kind === 'account' ? 'حساب: ' + ((accOf(dest.accountId) || {}).name || '') : dest.kind === 'charity' ? 'جهة خيرية (تبرعات)' : 'غير محددة';
-  return `<div class="card"><h2>الدورة المالية</h2>
+  return `${updateCard()}<div class="card"><h2>الدورة المالية</h2>
     <div class="seg"><button class="${s.cycleMode === 'salary' ? 'on' : ''}" data-action="setCycleMode" data-v="salary">دورة الراتب</button><button class="${s.cycleMode === 'calendar' ? 'on' : ''}" data-action="setCycleMode" data-v="calendar">الشهر الميلادي</button></div>
     <label class="f">يوم الراتب الافتراضي (يُستخدم إذا ما وُجد الراتب)</label><input type="number" id="payday" min="1" max="31" value="${s.defaultPayday}">
     <p class="small muted">الدورة تبدأ من تاريخ عملية الراتب نفسها، وكل عمليات ذاك اليوم تدخل في الدورة الجديدة. المكافأة والاسترداد والتحويل الداخلي ما تبدأ دورة.</p></div>
@@ -1050,8 +1054,8 @@ function sheetCategory(id, parentId, keep) {
 // أشكال التاريخ المحفوظة (البند 1 في 1.4.0)
 function dateShapesCard() {
   const sh = settings().smsDateShapes || {}, OL = SR().ORDER_L, keys = Object.keys(sh).sort((a, b) => String(sh[b].updatedAt || '').localeCompare(String(sh[a].updatedAt || '')));
-  return `<div class="card"><h2>أشكال التاريخ في الرسائل</h2><p class="small muted">كل شكل تاريخ جديد في رسائل البنك يسألك عنه التطبيق مرة، ويعتمد جوابك لكل رسالة بنفس الشكل.</p>
-    ${keys.length ? `<div class="list">${keys.map(k => `<div class="it" data-action="shapeEdit" data-sig="${esc(k)}"><div class="m"><div class="t">${shapeSampleHtml(sh[k].sample || k, (SR().findDateToken(sh[k].sample || '') || {}).raw)}</div><div class="s">${OL[sh[k].order] || sh[k].order}</div></div>${ico('chevL', 'chev')}</div>`).join('')}</div>` : '<div class="muted small">ما فيه أشكال محفوظة للحين.</div>'}</div>`;
+  return `<div class="card"><h2>أشكال التاريخ في الرسائل</h2><p class="small muted">كل شكل تاريخ جديد يسألك عنه التطبيق مرة لكل بنك، ويعتمد جوابك لكل رسالة بنفس الشكل من نفس البنك (1.6.2: البنك الجديد ما ياخذ ترتيب بنك ثاني).</p>
+    ${keys.length ? `<div class="list">${keys.map(k => `<div class="it" data-action="shapeEdit" data-sig="${esc(k)}"><div class="m"><div class="t">${shapeSampleHtml(sh[k].sample || k, (SR().findDateToken(sh[k].sample || '') || {}).raw)}</div><div class="s">${OL[sh[k].order] || sh[k].order} · ${k.includes('§') ? esc(E.bankLabel(store(), k.split('§')[0])) : 'الرسائل الملصوقة بدون بنك'}</div></div>${ico('chevL', 'chev')}</div>`).join('')}</div>` : '<div class="muted small">ما فيه أشكال محفوظة للحين.</div>'}</div>`;
 }
 // المساحة: حجم بياناتك (تقريبًا حجم ملف النسخة) + المستخدم والمتاح إذا المتصفح يعطيها
 const backupAge = () => { const b = settings().lastBackupAt; return b ? Math.max(0, E.daysBetween(ldate(b), E.todayISO())) : null; };
@@ -1181,14 +1185,20 @@ function vMethods() {
   <li><b>الفرز</b>: «رمز تحقق» فقط بعبارات قوية (رمز التحقق، كلمة مرور لمرة واحدة، OTP، verification code، لا تشارك هذا الرمز، login code…) وما ينحفظ نصها. كلمة مفردة مثل «رمز» ما تكفي، والرسالة المشكوك فيها تروح المراجعة كـ«غير معروفة». عملية مرفوضة أو تذكير بمبلغ مستحق = «معلومات» بدون عملية. مبلغ + حركة مالية = «مالية».</li>
   <li><b>القراءة</b>: صيغة متعلّمة (السياق قبل القيمة وبعدها، وإذا ما انطبق فرقم السطر) ← صيغة الإنماء ← قارئ عام. الحقول الناقصة من صيغة متعلّمة تتكمل من القارئ العام، وتظهر للمراجعة. القارئ العام يعرف نوع العملية والكلمة اللي قبل الاسم أو الرصيد من «كلمات قراءة الرسائل»، ووسيلة الدفع لأي رسالة شراء أو استرداد ما حددتها صيغتها تنعرف من نفس الكلمات (وإذا ما انطبق شي: نقاط بيع).</li>
   <li><b>التعليم</b>: المبلغ مطلوب. التاجر أو المستفيد، آخر 4 أرقام، الرصيد، الرسوم، والتاريخ والوقت ووسيلة الدفع اختيارية. اللي ما تحدده يكمله القارئ العام. التاريخ الملتبس (مثل 05/09/26) تختار ترتيبه مرة وحدة وينحفظ مع الصيغة.</li>
-  <li><b>تاريخ العملية</b>: أول تاريخ في نص الرسالة، ويُقرأ بترتيب «شكله» المحفوظ (سنة-شهر-يوم أو يوم-شهر-سنة أو شهر-يوم-سنة). الشكل = نوع أجزاء التاريخ والفاصل بينها، وموضع الوقت، والكلمة اللي قبله، مثل «في 19:03 26-09-28»؛ ما له علاقة باسم البنك. أول مرة يجي شكل جديد يسألك التطبيق دائمًا ويعرض التواريخ المحتملة، والرسالة (ملصوقة أو من الصندوق) تنتظر في المراجعة ما تنحفظ لين تجاوب. إذا طلع التاريخ بعد وقت وصول الرسالة أو لصقها بأكثر من يوم: مراجعة لهذي الرسالة بس، والترتيب المحفوظ ما يتغير. تغيير ترتيب شكل من «الإعدادات» يصحح تاريخ العمليات اللي جا تاريخها آليًا من نفس الشكل فقط، وما يغيّر تاريخ حددته بنفسك ولا عملية أصلها كشف. الصيغة المتعلّمة اللي فيها حقل تاريخ تستخدم ترتيبها هي. إذا الرسالة ما فيها تاريخ: رسالة الصندوق تاخذ تاريخ استلامها، والملصوقة تروح المراجعة لين تحدد تاريخها. وقت الاستلام ما يعتبر وقت العملية.</li>
+  <li><b>تاريخ العملية</b>: أول تاريخ في نص الرسالة، ويُقرأ بترتيب «شكله» المحفوظ (سنة-شهر-يوم أو يوم-شهر-سنة أو شهر-يوم-سنة). الشكل = نوع أجزاء التاريخ والفاصل بينها، وموضع الوقت، والكلمة اللي قبله، مثل «في 19:03 26-09-28». <b>(1.6.2) الأشكال لكل بنك</b>: البنك الجديد ما ياخذ ترتيب بنك ثاني حتى لو شكل تاريخه نفسه (مثلًا «05-09-26» عند بنك يوم-شهر-سنة ما ينقرأ 2005)، والرسائل الملصوقة بدون بنك لها الأشكال العامة. أول مرة يجي شكل جديد يسألك التطبيق دائمًا ويعرض التواريخ المحتملة، والرسالة (ملصوقة أو من الصندوق) تنتظر في المراجعة ما تنحفظ لين تجاوب. إذا طلع التاريخ بعد وقت وصول الرسالة أو لصقها بأكثر من يوم: مراجعة لهذي الرسالة بس، والترتيب المحفوظ ما يتغير. <b>(1.6.2) التاريخ القديم</b>: رسالة من الصندوق تاريخها أقدم من وقت وصولها بأكثر من يومين (غالبًا قراءة غلط) تروح المراجعة «تاريخ أقدم من وصول الرسالة» وتختار تاريخها؛ الملصوقة ما ينطبق عليها. تغيير ترتيب شكل من «الإعدادات» يصحح تاريخ العمليات اللي جا تاريخها آليًا من نفس الشكل فقط، وما يغيّر تاريخ حددته بنفسك ولا عملية أصلها كشف. الصيغة المتعلّمة اللي فيها حقل تاريخ تستخدم ترتيبها هي. إذا الرسالة ما فيها تاريخ: رسالة الصندوق تاخذ تاريخ استلامها، والملصوقة تروح المراجعة لين تحدد تاريخها. وقت الاستلام ما يعتبر وقت العملية.</li>
   <li><b>المستفيد</b>: بالبصمة (الآيبان أو رقم الحساب قبل إخفائه)، أو آخر 4 أرقام مع الاسم مطابق تمامًا. ما فيه مطابقة تقريبية لأسماء الأشخاص.</li>
   <li><b>منع التكرار</b>: رقم الطلب هو المفتاح؛ رسالة محفوظة سابقًا ما تنعالج مرة ثانية (يتأكد استلامها فقط). نفس النص بالضبط (حتى الوقت) برقم جديد، أو نسخة منها لصقتها (الفرق بس في المرسل أو إخفاء الأرقام: نفس اليوم والدقيقة والمبلغ والبطاقة والتاجر، والرصيد والمرجع ما يختلفون؛ وبدون تاجر لازم رصيد أو مرجع متطابق) = نفس الرسالة وصلت مرتين: تنحسب مرة وحدة تلقائيًا وتطلع في «المراجعة» تحت «مكررة تلقائيًا» ومعها «مو مكررة» لو كانت عمليتين، إلا إذا الرسالة السابقة تجاهلتها أو كانت معلومات فقط (ما سوّت عملية). قرارك في المراجعة (عالجها، الحساب، التاريخ) ينحفظ على الرسالة، فما ينسأل مرة ثانية لو احتاجت مراجعة ثانية. المطابقة مع عمليات الكشف والإدخال اليدوي بنفس نقاط الكشوف: دليل حاسم أو 90+ دمج، 65–89 أو تعادل مراجعة (ما تنحسب لين تقرر)، أقل مستقلة. ومع عملية من رسالة ثانية: ما فيه مطابقة (عمليتان). الاتصال بالصندوق ينتظر لين 60 ثانية، وتأكيد الاستلام يتعاد مرة وحدة تلقائيًا إذا ما رجع رد.</li>
   <li><b>لما يوصل الكشف بعد الرسالة</b>: يندمج معها، والكشف يكمّل الأصل والرسوم وتاريخ القيد والرصيد والمرجع والمستفيد. تصنيفك يبقى.</li>
   <li><b>الرسائل ما تعتبر تغطية</b>: تنبيه «البيانات ناقصة» والمقارنات تعتمد على الكشوف فقط.</li>
   <li><b>تأكيد الاستلام (ack)</b> ما يرسل إلا بعد نجاح الحفظ على الجهاز. إذا فشل الحفظ، البيانات في الذاكرة ترجع لآخر حالة محفوظة فعلًا، والرسالة تبقى في الصندوق وتنعالج في الجلب القادم. إذا انحفظت الرسالة وما وصل رد التأكيد (مثلًا طلعت من التطبيق لحظتها)، كل جلب يعيد التأكيد لها لين يوصل، وعلامة «لم يتأكد الاستلام» تختفي.</li>
   <li><b>بعد الجلب أو اللصق</b>: نافذة «عمليات جديدة» تعرض كل عملية انضافت (اللي بدون تصنيف بلون برتقالي) وأي بطاقة جديدة تسألك عن مالكها.</li>
-  <li><b>الأوقات</b> (آخر جلب، وقت وصول الرسالة، سجل التعديلات) تنعرض بوقت جهازك.</li></ul>
+  <li><b>الأوقات</b> (آخر جلب، وقت وصول الرسالة، سجل التعديلات) تنعرض بوقت جهازك.</li>
+  <li><b>من أي بنك؟ (1.6.2)</b> عند اللصق: «ما أدري» = مثل قبل (الأشكال العامة وكل الصيغ). إذا اخترت بنك، الرسائل تنقرأ بصيغه وأشكال تواريخه. الملصوقة ما تنتظر اعتماد «بنك جديد» لأنك تشوف نتيجتها قدامك.</li></ul>
+  <h3>البنوك وأول رسالة من بنك جديد (1.6.2)</h3><p>البنك = اسم المرسل اللي يرسله الاختصار (رسالة توصل بدون اسم مرسل ما تنحسب على بنك وتمشي مثل قبل، وصفحة «البنوك» تنبهك). صفحة «البنوك» في «المزيد» فيها كل مرسل وصلت منه رسائل: تسميه (الإنماء، الراجحي…)، وتشوف الأنواع اللي اعتمدتها منه وأشكال تواريخه والصيغ اللي علّمتها له (وتحذف صيغة)، وتدمج مرسلين في بنك واحد لو البنك غيّر اسم المرسل (نفس الاعتماد والأشكال والصيغ؛ وتقدر تفك الدمج).</p>
+  <p><b>أول رسالة</b> من الصندوق من بنك (أو نوع) ما اعتمدته، قراها القارئ العام، ما تنحفظ مباشرة: تنتظر في «المراجعة» باسم «بنك جديد: تأكد من القراءة» وتعرض وش قرأ (النوع، المبلغ، الاسم، البطاقة أو الحساب، وسيلة الدفع، الرصيد، الرسوم، التاريخ). وإذا التاريخ يحتاج سؤال (شكل جديد من هالبنك، أو قديم، أو في المستقبل) ينسأل في نفس البطاقة. «صحيح، اعتمد القراءة لهالبنك» = يعتمد النوع لهالبنك وتنحفظ العملية (في «ما راجعتها» بدون اعتماد مدينة تلقائي)، ومعها أي رسالة ثانية تنتظر نفس الاعتماد، ورسائل هالنوع الجاية منه تنحفظ مباشرة. «علّم الصيغة» تحدد الحقول بنفسك. رسائل الإنماء المقروءة بقارئه الخاص والصيغ اللي علّمتها تعتمد نوعها تلقائيًا. الترقية لـ 1.6.2 اعتمدت كل بنك ونوع عندك منه عمليات محفوظة. تلغي اعتماد نوع من صفحة البنك (العمليات ما تتغير).</p>
+  <p><b>رسالة فيها مبلغ بدون كلمة حركة</b> من بنك جديد (ما اعتمدت منه أي نوع) ما تنحفظ «معلومات» بصمت: تطلع «بنك جديد: رسالة فيها مبلغ» وتختار «مالية: علّم الصيغة» أو «معلومات فقط». المرفوضة والتذكيرات والعروض تبقى معلومات. وصيغة علّمتها لبنك تخلي رسائله بنفس الشكل مالية حتى لو ما فيها كلمة حركة.</p>
+  <p><b>مرسل متجاهل</b> («مو بنك: تجاهل رسائله»، من البطاقة في المراجعة أو من صفحة البنك)، مثل STC لما يرسل تأكيد شراء بعد رسالة البنك: رسائله تنحفظ «من مرسل متجاهل» بنصها بدون عمليات، والمعلّقة منه في المراجعة تنقفل بنفس الطريقة، والعمليات المحفوظة ما تتغير. رسائل الرمز منه تنحذف بدون نص مثل دايم. «إلغاء التجاهل» يسألك إذا تعيد قراءة رسائله المحفوظة (تمر بنفس الخطوات).</p>
+  <h3>التحديثات (1.6.2)</h3><p>كل ما ترجع للتطبيق (وكل نص ساعة وهو مفتوح) يسأل الموقع عن نسخة جديدة. «فحص التحديثات» في الإعدادات يعرض نسختك وآخر نسخة على الموقع، وإذا فيه جديد ينزّله ويطلع «حدّث الحين». «تحديث إجباري» لو علق: ينزّل كل ملفات التطبيق من الموقع مباشرة، وإذا وصلت كلها يحطها مكان المحفوظة في الجوال ويعيد الفتح؛ وإذا انقطع الاتصال في النص ما يتغير شي ويبقى التطبيق يشتغل بدون إنترنت. البيانات المالية (IndexedDB) ما تنلمس.</p>
   <h3>التصنيفات</h3><p>كل تصنيف له رقم ثابت، والعمليات والمحلات والمستفيدون والقواعد والحدود والأغراض مربوطة بالرقم مو بالاسم؛ فتغيير الاسم أو الإيموجي أو اللون ما يغيّر أي رقم. التكرار والضرورة: العملية ← التاجر ← الفرعي ← الرئيسي («يتبع الرئيسي» في الفرعي = يأخذ قيمة الرئيسي). «التزام» يدخل رقم الالتزامات المعروفة إذا العملية متكررة. الحذف ما يحذف أي عملية: تنتقل لتصنيف تختاره، أو تبقى بدون تصنيف (وفي الفرعي تبقى تحت الرئيسي)، والتجار والمستفيدون والقواعد المرتبطة تتبع نفس الاختيار؛ القاعدة اللي ما يبقى لها عمل تتوقف. حد الصرف على تصنيف رئيسي محذوف ينتقل مع العمليات، إلا إذا التصنيف الجديد عليه حد من قبل أو اخترت «بدون تصنيف» فينحذف. «رسوم» وفرعياتها و«تبرعات» و«سحب نقدي» ما تنحذف لأن الحساب يستخدمها. <b>الاختيار (1.6.0)</b>: التصنيف الرئيسي يفتح دايمًا حتى لو ما له فرعي: تختار فرعي، أو تضيف فرعي، أو «اختره بدون فرعي». تنقل فرعي لرئيسي ثاني من تعديل التصنيف («المكان»)، وعملياته وأغراضه تنتقل معه.</p>
   <h3>القواعد</h3><p>الأولوية: تعديلك لعملية وحدة ← القاعدة ← التاجر أو المستفيد ← التصنيف الفرعي ← الرئيسي. القاعدة تحتاج شرط حقيقي واحد على الأقل (نص، تاجر، مستفيد، حساب، أو مبلغ). إذا انطبقت أكثر من قاعدة، الأعلى في القائمة تكسب. تنطبق على العمليات الجديدة من الكشوف والرسائل، وعلى السابقة فقط إذا اخترت «طبّقها على السابق».</p>
   <h3>حدود الصرف</h3><p>على الدورة الحالية. الحد الكلي = الإنفاق الحقيقي كله. حد التصنيف نوعين: <b>حسب الفواتير</b> (الافتراضي، على التصنيف الرئيسي) = نفس رقمه في «صرفياتك»؛ و<b>حسب المنتجات</b> (رئيسي أو فرعي) = الأغراض المصنفة فيه + «غير مفصّل» من فواتيره، نفس رقم تحليل المنتجات. حدود تصنيفات المنتجات القديمة صارت «حسب المنتجات» على الفرعي الجديد. حذف تصنيف عليه حد «حسب المنتجات»: ينتقل الحد مع الأغراض، وإذا الهدف عليه حد يبقى حده وينحذف الثاني (ما يصير حدين). النسبة = المصروف ÷ الحد. تنبيه عند نسبة الإعداد (80% افتراضيًا) وعند 100%.</p>
@@ -1502,9 +1512,9 @@ function sheetRoundUp() {
 }
 /* ================= MVP1.1 + 1.1.1: الرسائل، المراجعة، التعديل الجماعي، السجل، الحدود، القواعد ================= */
 const SR = () => window.SmsReader;
-const REVIEW_L = { sms_deleted_again: 'عملية حذفتها قبل', sms_duplicate: 'تكرار محتمل مع عملية موجودة', sms_no_account: 'الحساب غير معروف', sms_unparsed: 'ما قدرت أقرأ الرسالة', sms_unknown: 'رسالة غير معروفة النوع', sms_same_content: 'نفس نص رسالة سابقة', sms_partial: 'عملية ناقصة الحقول', sms_no_date: 'رسالة بدون تاريخ', sms_date_shape: 'ترتيب التاريخ' };
-const SHAPE_TITLE = { new: 'شكل تاريخ جديد', legacy: 'تاريخ رسائل سابقة', future: 'تاريخ في المستقبل', order_invalid: 'التاريخ ما ينطبق على الترتيب المحفوظ' };
-const MSG_STATUS_L = { tx: 'عملية', merged: 'اندمجت', duplicate: 'مكررة', review: 'مراجعة', informational: 'معلومات', discarded: 'رمز تحقق', ignored: 'متجاهلة', manual: 'أدخلت يدويًا', deleted: 'محذوفة' };
+const REVIEW_L = { sms_deleted_again: 'عملية حذفتها قبل', sms_duplicate: 'تكرار محتمل مع عملية موجودة', sms_no_account: 'الحساب غير معروف', sms_unparsed: 'ما قدرت أقرأ الرسالة', sms_unknown: 'رسالة غير معروفة النوع', sms_same_content: 'نفس نص رسالة سابقة', sms_partial: 'عملية ناقصة الحقول', sms_no_date: 'رسالة بدون تاريخ', sms_date_shape: 'ترتيب التاريخ', sms_new_bank: 'بنك جديد: تأكد من القراءة', sms_new_bank_info: 'بنك جديد: رسالة فيها مبلغ' };
+const SHAPE_TITLE = { old: 'تاريخ أقدم من وصول الرسالة', new: 'شكل تاريخ جديد', legacy: 'تاريخ رسائل سابقة', future: 'تاريخ في المستقبل', order_invalid: 'التاريخ ما ينطبق على الترتيب المحفوظ' };
+const MSG_STATUS_L = { sender_ignored: 'من مرسل متجاهل', tx: 'عملية', merged: 'اندمجت', duplicate: 'مكررة', review: 'مراجعة', informational: 'معلومات', discarded: 'رمز تحقق', ignored: 'متجاهلة', manual: 'أدخلت يدويًا', deleted: 'محذوفة' };
 const CLS_L = { financial: 'مالية', otp: 'رمز تحقق', informational: 'معلومات', unknown: 'غير معروفة' };
 const FIELD_L = { amount: 'المبلغ', merchant: 'التاجر', beneficiary: 'المستفيد', counterparty: 'المرسل', cardLast4: 'آخر 4 للبطاقة', accountLast4: 'آخر 4 للحساب', balance: 'الرصيد', fee: 'الرسوم', direction: 'الاتجاه', date: 'التاريخ', time: 'الوقت', method: 'وسيلة الدفع' };
 const FAMILY_DIR = { sms_purchase: 'out', sms_refund: 'in', sms_transfer_out: 'out', sms_transfer_in: 'in', salary: 'in', sms_cash_withdrawal: 'out', sms_cash_deposit: 'in', bill_payment: 'out', card_payment: 'out', sms_debit: 'out', sms_credit: 'in' };
@@ -1636,7 +1646,8 @@ function shapeSampleHtml(sample, token) {
 }
 function msgBox(m) {
   if (!m) return '';
-  return `<div class="small muted" style="margin:6px 0 4px">${esc(m.sender || (m.source === 'paste' ? 'لصق' : 'صندوق'))} · ${m.receivedAt ? fdt(m.receivedAt, true) : ''}</div><div class="raw">${rawHtml(m.text || '')}</div>`;
+  const who = m.sender ? (E.bankLabel(store(), m.sender) || m.sender) + (m.source === 'paste' ? ' · لصق' : '') : (m.source === 'paste' ? 'لصق' : 'صندوق'); // 1.6.2: اسم البنك اللي سميته
+  return `<div class="small muted" style="margin:6px 0 4px">${esc(who)} · ${m.receivedAt ? fdt(m.receivedAt, true) : ''}</div><div class="raw">${rawHtml(m.text || '')}</div>`;
 }
 function txMini(t) {
   if (!t) return '<div class="muted small">—</div>';
@@ -1663,6 +1674,9 @@ function reviewCard(r) {
       btns = `<button class="btn p" data-action="teachSms" data-id="${r.id}">علّم الصيغة</button><button class="btn" data-action="rvManual" data-id="${r.id}">أدخلها يدويًا</button><button class="btn" data-action="rvMsg" data-id="${r.id}" data-v="informational">معلومات فقط</button>`; break;
     case 'sms_unknown': body = `<div class="small">${esc(r.reason || 'ما تعرفت على نوعها')}. وش نوعها؟</div>`;
       btns = `<button class="btn p" data-action="teachSms" data-id="${r.id}">مالية: علّم الصيغة</button><button class="btn" data-action="rvMsg" data-id="${r.id}" data-v="informational">معلومات فقط</button><button class="btn r" data-action="rvMsg" data-id="${r.id}" data-v="otp">رسالة رمز (احذف نصها)</button>`; break;
+    case 'sms_new_bank': { const x = newBankCard(r, m); body = x.body; btns = x.btns; break; }
+    case 'sms_new_bank_info': body = `<div class="small">رسالة من <b>${esc(E.bankLabel(st, m && m.sender) || '—')}</b> (بنك جديد ما اعتمدت منه شي) فيها مبلغ${SR().extractAmount(m && m.text || '') ? ` ${num(SR().extractAmount(m.text).value)}` : ''}، بس ما عرفت نوعها. لو هي عملية علّمني صيغتها، وإلا خلها معلومات.</div>`;
+      btns = `<button class="btn p" data-action="teachSms" data-id="${r.id}">مالية: علّم الصيغة</button><button class="btn" data-action="rvMsg" data-id="${r.id}" data-v="informational">معلومات فقط</button>`; break;
     case 'sms_same_content': { const o = st.get('messages', r.otherMessageId); body = `<div class="small">نفس نص رسالة سابقة${o && o.receivedAt ? ` (${fdate(ldate(o.receivedAt), true)})` : ''}. ممكن تكون نفس الرسالة وصلت مرتين، أو عمليتين متطابقتين.</div>`;
       btns = `<button class="btn p" data-action="rvSame" data-id="${r.id}">عمليتان مختلفتان: عالجها</button><button class="btn" data-action="rvMsg" data-id="${r.id}" data-v="ignore">مكررة: تجاهلها</button>`; break; }
     case 'sms_no_date': body = `<div class="small">الرسالة ما فيها تاريخ واضح، وما أعتمد وقت اللصق لأنها ممكن تكون رسالة قديمة. المبلغ ${num(r.info ? r.info.grossAmount : 0)}.</div>
@@ -1670,13 +1684,15 @@ function reviewCard(r) {
       btns = `<button class="btn p" data-action="rvDate" data-id="${r.id}">احفظها بهذا التاريخ</button><button class="btn" data-action="rvMsg" data-id="${r.id}" data-v="ignore">تجاهل</button>`; break;
     case 'sms_date_shape': {
       const OL = SR().ORDER_L, n = st.all('messages').filter(m => m.dateShape === r.sig && !m.userDate && m.txId).length;
-      const why = r.reason === 'new' ? `أول مرة يجي هذا الشكل من التاريخ: <b>${shapeSampleHtml(r.sample, r.token)}</b>. اختر التاريخ الصحيح لهذي الرسالة، والتطبيق يعتمد ترتيبه لكل رسالة بنفس الشكل.`
+      const bk = String(r.sig || '').includes('§') ? E.bankLabel(st, String(r.sig).split('§')[0]) : null; // 1.6.2: الشكل لبنك محدد
+      const why = r.reason === 'new' ? `أول مرة يجي هذا الشكل من التاريخ${bk ? ` من <b>${esc(bk)}</b>` : ''}: <b>${shapeSampleHtml(r.sample, r.token)}</b>. اختر التاريخ الصحيح لهذي الرسالة، والتطبيق يعتمد ترتيبه لكل رسالة بنفس الشكل${bk ? ' من نفس البنك' : ''}.`
+        : r.reason === 'old' ? `التاريخ اللي طلع من هذي الرسالة أقدم من وقت وصولها بأكثر من يومين، وغالبًا القراءة غلط. اختر التاريخ الصحيح لها هي بس، والترتيب المحفوظ ما يتغير.`
         : r.reason === 'legacy' ? `رسائل انحفظت قبل هذا التحديث بهذا الشكل من التاريخ: <b>${shapeSampleHtml(r.sample, r.token)}</b>${n ? ` (${cnt(n, 'msg')})` : ''}. اختر التاريخ الصحيح لهذي الرسالة، والتطبيق يصحح تاريخ عملياتها بنفس الترتيب (ما عدا اللي حددت تاريخها بنفسك).`
         : r.reason === 'future' ? `التاريخ اللي طلع من هذي الرسالة بعد وقت وصولها. اختر التاريخ الصحيح لها هي بس، والترتيب المحفوظ ما يتغير.`
         : `الترتيب المحفوظ لهذا الشكل ما يعطي تاريخ صحيح لهذي الرسالة. اختر تاريخها هي بس، والترتيب المحفوظ ما يتغير.`;
       body = `<div class="small">${why}${r.info && r.info.grossAmount ? ` المبلغ ${num(r.info.grossAmount)}.` : ''}</div>
         <div class="kvbox" style="margin-top:8px">${(r.candidates || []).map((c, i) => `<label class="f" style="margin:6px 0"><input type="radio" name="shp_${r.id}" value="${c.order}" ${i === 0 && (r.candidates || []).length === 1 ? 'checked' : ''}> <b>${fdate(c.date, true)}</b> <span class="small muted">· ${OL[c.order]}</span></label>`).join('')}</div>
-        ${r.reason === 'future' || r.reason === 'order_invalid' ? `<label class="f">أو حدد التاريخ بنفسك</label><input type="date" id="rvdate_${r.id}" max="${E.todayISO()}">` : ''}`;
+        ${r.reason === 'future' || r.reason === 'order_invalid' || r.reason === 'old' ? `<label class="f">أو حدد التاريخ بنفسك</label><input type="date" id="rvdate_${r.id}" max="${E.todayISO()}">` : ''}`;
       btns = `<button class="btn p" data-action="rvShape" data-id="${r.id}">اعتمد</button>${r.reason !== 'legacy' ? `<button class="btn" data-action="rvMsg" data-id="${r.id}" data-v="ignore">تجاهل</button>` : ''}`;
       break;
     }
@@ -1685,6 +1701,7 @@ function reviewCard(r) {
     case 'sms_partial': { const t = st.get('transactions', r.txId); body = `<div class="small">انحفظت العملية، لكن ناقص: ${(r.missing || []).map(k => FIELD_L[k] || k).join('، ')}.</div><div class="kvbox" style="margin-top:6px;font-size:12.5px">${txMini(t)}</div>`;
       btns = `<button class="btn p" data-action="teachSms" data-id="${r.id}">علّم الصيغة وأكملها</button>${t ? `<button class="btn" data-action="openTx" data-id="${t.id}">افتح العملية</button>` : ''}<button class="btn" data-action="rvMsg" data-id="${r.id}" data-v="ignore">تم</button>`; break; }
   }
+  if (m && m.sender && IGN_SENDER_KINDS.has(r.kind)) btns += `<button class="btn" data-action="rvIgnoreSender" data-id="${r.id}">مو بنك: تجاهل رسائل ${esc(E.bankLabel(st, m.sender))}</button>`;
   const title = r.kind === 'sms_date_shape' ? (SHAPE_TITLE[r.reason] || REVIEW_L[r.kind]) : (REVIEW_L[r.kind] || r.kind);
   return `<div class="rv"><div class="rvh"><b>${title}</b><span class="sp"></span><span class="small muted">${fdate(ldate(r.createdAt))}</span></div>${msgBox(m)}${body}<div class="btns" style="margin-top:10px">${btns}</div></div>`;
 }
@@ -2177,7 +2194,7 @@ Object.assign(A, {
   pasteSms: async () => {
     const d = SR().splitDetails($('smsPaste').value || '');
     if (!d.parts.length) return toast('الصق رسالة أو أكثر، وكل رسالة في فقرة');
-    S.pasteSplit = { parts: d.parts, sender: ($('smsSender').value || '').trim() || null };
+    S.pasteSplit = { parts: d.parts, sender: pasteSender() };
     if (!d.confirm) return A.pasteGo();
     // الفصل مشكوك فيه: نعرض الرسائل كما فهمناها ونطلب تأكيد العدد قبل المعالجة
     const n = d.parts.length;
@@ -2347,7 +2364,7 @@ Object.assign(A, {
   teachSms: (el) => {
     const r = store().get('reviews', el.dataset.id), m = r && store().get('messages', r.messageId);
     if (!m || !m.text) return toast('نص الرسالة غير متاح');
-    const text = SR().norm(m.text), tpl = m.templateId ? store().get('templates', m.templateId) : null, g = SR().parseGeneric(text, E.smsWordsFor(store(), text, m.receivedAt).W);
+    const text = SR().norm(m.text), tpl = m.templateId ? store().get('templates', m.templateId) : null, g = SR().parseGeneric(text, E.smsWordsFor(store(), text, m.receivedAt, null, E.bankOf(store(), m.sender)).W);
     const T = { reviewId: r.id, messageId: m.id, text, tokens: tokenize(text), ranges: {}, active: 'amount', family: (tpl && tpl.family) || g.family || 'sms_purchase', bank: (tpl && tpl.bank) || m.sender || '', sender: m.sender || null, replaceId: tpl ? tpl.id : null };
     // اقتراح أولي من القارئ العام (تقدر تغيره)
     const findTok = (pred) => T.tokens.findIndex(tk => pred(text.slice(tk.s, tk.e)));
@@ -2574,7 +2591,7 @@ async function restoreFrom(file) {
   S.store.replaceAll(data); S.store.takeChanges();
   S.store.addAudit({ id: E.uid(), at: new Date().toISOString(), label: 'استعادة نسخة احتياطية', source: 'user', changes: [] });
   await persist(null, { noStep: true });
-  E.migrateDateShapes(S.store); await persist(null, { noStep: true }); // نسخة من إصدار قديم: أشكال تواريخ رسائلها
+  E.migrateDateShapes(S.store); E.migrate162(S.store); await persist(null, { noStep: true }); // نسخة من إصدار قديم: أشكال تواريخ رسائلها، والبنوك (1.6.2)
   const m141 = E.migrate141(S.store); // نسخة من قبل 1.4.1
   if (m141.reprocess.length) { const plan = await E.reprocessMessages(S.store, m141.reprocess); if (plan) E.commitSms(S.store, plan); }
   E.migrate150(S.store); await E.migrate152(S.store); await E.splitSmsMerges(S.store); const m160 = E.migrate160(S.store); E.detectRecurring(S.store); // نسخة من قبل 1.5.0 / 1.5.2 / 1.6.0
@@ -3950,7 +3967,7 @@ function sheetSwPreview(from) {
     <div class="small" style="margin-bottom:8px">${swChanges().join('<br>')}</div>
     ${swRangeNote(from)}<div class="small muted">من ${fdate(from, true)} وبعده. التصحيح يمس اللي انقرأ من الرسالة بس (النوع، المبلغ، الاسم، وسيلة الدفع، الرصيد، الرسوم)، وأي شي سويته بيدك يبقى.</div>`;
   if (!read.length && !pv.changes.length && !pv.unreadable.length) h += `<div class="banner i" style="margin-top:10px"><div>ما فيه رسائل سابقة تتأثر. الكلمات الجديدة للرسائل الجاية.</div></div>`;
-  if (read.length) h += `<h3 style="margin-top:14px;font-size:15px">رسائل صارت تنقرأ (${read.length})</h3><p class="small muted">كانت تنتظر في «المراجعة» أو انحسبت «معلومات». تصير عمليات وتطلع في «ما راجعتها».</p>
+  if (read.length) h += `<h3 style="margin-top:14px;font-size:15px">رسائل صارت تنقرأ (${read.length})</h3><p class="small muted">كانت تنتظر في «المراجعة» أو انحسبت «معلومات». تصير عمليات وتطلع في «ما راجعتها» (ورسائل البنك الجديد تنتظر اعتمادك في «المراجعة» أول).</p>
     <div class="list">${read.map(x => `<label class="it" style="cursor:pointer">${ck(pv.readable.includes(x) ? 'readable' : 'infoToTx', x.messageId)}<div class="m"><div class="t small">${swSummaryLine(x.after)}</div><div class="s">${fdate(x.date, true)}</div></div></label>`).join('')}</div>`;
   if (pv.changes.length) h += `<h3 style="margin-top:14px;font-size:15px">عمليات بتتغير قراءتها (${pv.changes.length})</h3>
     <div class="list">${pv.changes.map(c => { const t = st.get('transactions', c.txId); return `<label class="it" style="cursor:pointer;align-items:flex-start">${ck('changes', c.txId)}<div class="m"><div class="t small"><bdi>${esc(t ? txTitle(t) : '—')}</bdi> · <bdi class="num">${fmt(t ? t.grossAmount : 0)}</bdi> · <bdi>${fdate(c.date, true)}</bdi></div>
@@ -4024,6 +4041,215 @@ Object.assign(A, {
   },
 });
 document.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' && ev.target.id && ev.target.id.startsWith('sw_in_')) { ev.preventDefault(); A.swAdd({ dataset: { g: ev.target.id.slice(6) } }); } });
+
+/* ================= 1.6.2: التحديثات، البنوك، أول رسالة من بنك جديد، المرسل المتجاهل ================= */
+// ---------- فحص التحديثات ----------
+const verCmp = (a, b) => { const x = String(a || '').split('.').map(Number), y = String(b || '').split('.').map(Number); for (let i = 0; i < Math.max(x.length, y.length); i++) { const d = (x[i] || 0) - (y[i] || 0); if (d) return d > 0 ? 1 : -1; } return 0; };
+// يقرأ رقم آخر نسخة من الموقع (sw.js) بدون أي نسخة محفوظة، ويطلب من الجوال يدوّر على التحديث
+async function swCheck(manual) {
+  if (!manual && S.updLast && Date.now() - S.updLast < 60000) return;
+  S.updLast = Date.now();
+  if (manual) { S.upd = { state: 'checking' }; render(); }
+  let remote = null;
+  try { const r = await fetch('sw.js?check=' + Date.now(), { cache: 'no-store' }); if (r.ok) { const m = (await r.text()).match(/VERSION\s*=\s*'fm-([\d.]+)'/); remote = m ? m[1] : null; } } catch (e) { remote = null; }
+  try { if (S.swReg) await S.swReg.update(); } catch (e) { /* بدون إنترنت */ }
+  if (!manual) return;
+  S.upd = !remote ? { state: 'error' } : verCmp(remote, E.version) > 0 ? { state: 'found', remote } : { state: 'latest', remote };
+  if (S.upd.state === 'found') setTimeout(() => { if (S.upd && S.upd.state === 'found' && !S.swWaiting && S.view === 'settings') render(); }, 15000);
+  if (S.view === 'settings') render();
+}
+function updateCard() {
+  const U = S.upd || {}, ready = !!S.swWaiting;
+  const line = ready ? `<b>النسخة الجديدة${U.remote ? ' ' + esc(U.remote) : ''} جاهزة.</b> اضغط «حدّث الحين».`
+    : U.state === 'checking' ? 'جاري الفحص…'
+    : U.state === 'latest' ? `✓ عندك آخر نسخة (الموقع: ${esc(U.remote)}).`
+    : U.state === 'found' ? `فيه نسخة جديدة <b>${esc(U.remote)}</b>، جاري تنزيلها… خلك في التطبيق ثواني. إذا طوّلت، جرّب «تحديث إجباري».`
+    : U.state === 'error' ? 'ما قدرت أوصل للموقع. تأكد من الإنترنت وجرب مرة ثانية.'
+    : 'يدوّر على التحديث تلقائيًا كل ما ترجع للتطبيق. وتقدر تفحص الحين.';
+  return `<div class="card"><h2>التحديثات <span class="sp"></span><span class="muted small">نسختك: ${esc(E.version)}</span></h2>
+    <p class="small">${line}</p>
+    <div class="btns">${ready ? `<button class="btn p" data-action="applyUpdate">حدّث الحين</button>` : `<button class="btn p" data-action="updCheck" ${U.state === 'checking' ? 'disabled' : ''}>فحص التحديثات</button>`}<button class="btn" data-action="updForce">تحديث إجباري</button></div>
+    <p class="small muted" style="margin-top:6px">«تحديث إجباري» لو التحديث علق: ينزّل ملفات التطبيق من الموقع ويحطها مكان المحفوظة في الجوال. بياناتك المالية ما تنلمس.</p></div>`;
+}
+const APP_FILES = ['./', 'index.html', 'app.js', 'engine.js', 'analytics.js', 'db.js', 'sms.js', 'inbox.js', 'sw.js', 'manifest.webmanifest'];
+async function forceUpdate() {
+  const ok = await confirmBox('تحديث إجباري', 'ينزّل ملفات التطبيق من جديد من الموقع ويحطها مكان المحفوظة في الجوال، ويعيد فتح التطبيق. <b>بياناتك المالية ما تنلمس</b> (محفوظة في مكان منفصل). يحتاج إنترنت.', 'حدّث', false);
+  if (!ok) return;
+  toast('جاري التحديث…', 8000);
+  // ننزّل كل الملفات من الموقع مباشرة (?fresh يتخطى المحفوظ في الجوال والمتصفح). ما نمسح شي قبل ما توصل كلها،
+  // فلو انقطع الاتصال في النص يبقى التطبيق شغال بنسخته الحالية وبدون إنترنت
+  const got = [];
+  try {
+    for (const f of APP_FILES.filter(x => x !== 'sw.js')) {
+      const r = await fetch(f + (f.includes('?') ? '&' : '?') + 'fresh=' + Date.now(), { cache: 'reload' });
+      if (!r.ok) throw new Error(f);
+      got.push([f, r]);
+    }
+  } catch (e) { return toast('ما قدرت أنزّل كل الملفات. التطبيق باقي على نسخته، جرب لما يكون الإنترنت أقوى', 7000); }
+  try {
+    if (window.caches) { const ks = (await caches.keys()).filter(k => /^fm-/.test(k)); for (const k of ks) { const c = await caches.open(k); for (const [f, r] of got) await c.put(new Request(f), r.clone()); } }
+  } catch (e) { return toast('ما قدرت أحفظ الملفات الجديدة. جرب مرة ثانية', 6000); }
+  try { if (S.swReg) await S.swReg.update(); } catch (e) { /* عامل الخدمة الجديد ينزل مع أول فتح */ }
+  location.reload();
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') swCheck(false); });
+setInterval(() => { if (document.visibilityState === 'visible') swCheck(false); }, 30 * 60 * 1000);
+setTimeout(() => swCheck(false), 4000);
+
+// ---------- البنوك ----------
+const FAM_L = () => E.SMS_FAMILY_L;
+function bankRows() {
+  const st = store(), all = E.sendersOf(st), counts = new Map();
+  st.all('messages').forEach(m => { const k = E.bankOf(st, m.sender); if (!k) return; const c = counts.get(k) || { n: 0, last: '' }; c.n++; if (String(m.receivedAt || '') > c.last) c.last = String(m.receivedAt || ''); counts.set(k, c); });
+  return Object.values(all).filter(r => !r.mergedInto).map(r => ({ r, n: (counts.get(r.key) || {}).n || 0, last: (counts.get(r.key) || {}).last || '', aliases: Object.values(all).filter(x => x.mergedInto && E.bankOf(st, x.key) === r.key) }))
+    .sort((a, b) => (a.r.ignored - b.r.ignored) || b.last.localeCompare(a.last));
+}
+function bankSub(x) {
+  const fams = Object.keys(x.r.trusted || {}).map(f => FAM_L()[f] || f);
+  return [[x.r.raw].concat(x.aliases.map(a => a.raw)).map(esc).join('، '), cnt(x.n, 'msg'),
+    x.r.ignored ? '<span class="warn-t">متجاهل: رسائله ما تنحسب</span>' : fams.length ? 'معتمد: ' + esc(fams.join('، ')) : '<span class="warn-t">جديد: أول رسالة من كل نوع تنتظرك</span>'].join(' · ');
+}
+function vBanks() {
+  const rows = bankRows();
+  let h = `<div class="card"><h2>البنوك</h2><p class="small muted">كل مرسل وصلت منه رسائل. سمّ البنك، وشوف الأنواع اللي اعتمدتها منه وأشكال تواريخه والصيغ اللي علّمتها. أول رسالة من كل نوع من بنك (أو نوع) ما اعتمدته تنتظرك في «المراجعة» تشوف وش قرأ منها. «مو بنك» يتجاهل رسائل المرسل (مثل STC لما يرسل تأكيد شراء بعد رسالة البنك).</p></div>`;
+  // الاختصار لازم يرسل اسم المرسل: بدونه الرسالة ما تنحسب على بنك وتمشي مثل قبل
+  const recent = store().all('messages').filter(m => (m.source || 'paste') !== 'paste').sort((a, b) => String(b.receivedAt || '').localeCompare(String(a.receivedAt || ''))).slice(0, 20);
+  const noSender = recent.filter(m => !m.sender).length;
+  if (noSender) h += `<div class="banner w" style="display:block"><div><b>${cnt(noSender, 'msg')} من آخر رسائل الصندوق وصلت بدون اسم المرسل.</b> هذي ما تنحسب على بنك وتمشي مثل قبل (بدون «بنك جديد» ولا أشكال تاريخ لكل بنك). عشان تشتغل هالميزة، لازم الاختصار يرسل اسم المرسل مع الرسالة.</div></div>`;
+  h += rows.length ? `<div class="card"><div class="list">${rows.map(x => `<div class="it" data-action="bankOpen" data-k="${esc(x.r.key)}">${icCircle({ color: x.r.ignored ? PAL.gray : PAL.aqua, icon: 'bank' }, 's')}<div class="m"><div class="t">${esc(x.r.name || x.r.raw)}</div><div class="s">${bankSub(x)}</div></div>${ico('chevL', 'chev')}</div>`).join('')}</div></div>`
+    : `<div class="card empty"><p>ما وصلت رسائل من الاختصار للحين.</p></div>`;
+  return h;
+}
+function sheetBank(key) {
+  const st = store(), k = E.bankOf(st, key), r = E.bankRec(st, k); if (!r) return;
+  const x = bankRows().find(y => y.r.key === k) || { n: 0, aliases: [] }, others = bankRows().filter(y => y.r.key !== k);
+  const fams = Object.keys(r.trusted || {});
+  const shapes = Object.entries(settings().smsDateShapes || {}).filter(([sk]) => sk.startsWith(k + '§'));
+  const tpls = st.all('templates').filter(t => t.kind === 'sms' && t.sender && E.bankOf(st, t.sender) === k);
+  const OL = SR().ORDER_L;
+  openSheet(`<h3>${esc(r.name || r.raw)}<span class="sp"></span><button class="close" data-action="closeSheet">×</button></h3>
+    <label class="f">اسم البنك</label><div class="btns" style="flex-wrap:nowrap"><input type="text" id="bk_name" value="${esc(r.name || '')}" placeholder="مثل: الإنماء، الراجحي، الأهلي" style="flex:1" maxlength="40"><button class="btn" data-action="bankNameSave" data-k="${esc(k)}">حفظ</button></div>
+    <h3 style="margin-top:14px;font-size:15px">اسم المرسل في الرسائل</h3>
+    <div class="list"><div class="it" style="cursor:default"><div class="m"><div class="t">${esc(r.raw)}</div><div class="s">${cnt(x.n, 'msg')}</div></div></div>
+    ${x.aliases.map(a => `<div class="it" style="cursor:default"><div class="m"><div class="t">${esc(a.raw)}</div><div class="s">مدموج في هذا البنك</div></div><button class="btn" data-action="bankUnmerge" data-k="${esc(a.key)}">فك الدمج</button></div>`).join('')}</div>
+    ${others.length ? `<p class="small muted" style="margin-top:8px">لو نفس البنك يرسل باسم ثاني (مثلًا غيّر اسم المرسل)، ادمجهم: هذا يصير اسم ثاني للبنك اللي تختاره، بنفس الاعتماد وأشكال التاريخ والصيغ.</p>
+      <div class="btns" style="flex-wrap:nowrap"><select id="bk_merge" style="flex:1">${others.map(y => `<option value="${esc(y.r.key)}">${esc(y.r.name || y.r.raw)}</option>`).join('')}</select><button class="btn" data-action="bankMerge" data-k="${esc(k)}">ادمجه فيه</button></div>` : ''}
+    <h3 style="margin-top:14px;font-size:15px">الأنواع المعتمدة</h3>
+    <p class="small muted">رسائل هالأنواع تنحفظ مباشرة. أي نوع ثاني، أول رسالة منه تنتظرك.</p>
+    <div class="swchips">${fams.length ? fams.map(f => `<span class="swc">${esc(FAM_L()[f] || f)}<button type="button" data-action="bankUntrust" data-k="${esc(k)}" data-f="${esc(f)}" aria-label="إلغاء الاعتماد">×</button></span>`).join('') : '<span class="small warn-t">ما اعتمدت منه شي للحين</span>'}</div>
+    <h3 style="margin-top:14px;font-size:15px">أشكال التاريخ</h3>
+    ${shapes.length ? `<div class="list">${shapes.map(([sk, v]) => `<div class="it" data-action="shapeEdit" data-sig="${esc(sk)}"><div class="m"><div class="t">${shapeSampleHtml(v.sample || '', (SR().findDateToken(v.sample || '') || {}).raw)}</div><div class="s">${OL[v.order] || v.order}</div></div>${ico('chevL', 'chev')}</div>`).join('')}</div>` : '<p class="small muted">ما فيه للحين. أول رسالة بشكل تاريخ جديد يسألك عنه.</p>'}
+    <h3 style="margin-top:14px;font-size:15px">الصيغ اللي علّمتها</h3>
+    ${tpls.length ? `<div class="list">${tpls.map(t => `<div class="it" style="cursor:default"><div class="m"><div class="t">${esc(t.name || (FAM_L()[t.family] || ''))}</div><div class="s">${esc(FAM_L()[t.family] || t.family || '')} · ${Object.keys(t.fields || {}).map(f => FIELD_L[f] || f).map(esc).join('، ')}</div></div><button class="btn r" data-action="tplDel" data-id="${t.id}" data-k="${esc(k)}">${ico('trash')}</button></div>`).join('')}</div>` : '<p class="small muted">ما فيه. تعلّمه صيغة من «المراجعة» لما ما يعرف يقرأ رسالة.</p>'}
+    <div class="btns" style="margin-top:14px">${r.ignored ? `<button class="btn p" data-action="bankIgnore" data-k="${esc(k)}" data-v="0">إلغاء التجاهل</button>` : `<button class="btn r" data-action="bankIgnore" data-k="${esc(k)}" data-v="1">مو بنك: تجاهل رسائله</button>`}</div>
+    ${r.ignored ? `<p class="small muted">رسائله تنحفظ «من مرسل متجاهل» بنصها وبدون عمليات. رسائل الرمز تنحذف بدون نص مثل دايم.</p>` : ''}`);
+}
+// بطاقة «بنك جديد» في المراجعة: وش قرأ من الرسالة، وسؤال التاريخ لو يحتاج
+function newBankCard(r, m) {
+  const st = store(), i = r.info || {}, fam = FAM_L()[r.family] || r.family, bank = E.bankLabel(st, m && m.sender) || '—';
+  const name = i.merchantRaw || i.beneficiaryRaw || i.counterpartyName || i.billerRaw || null, last4 = i.instrumentLast4 || i.accountLast4 || null;
+  const row = (l, v) => `<div style="display:flex;gap:8px;margin:3px 0"><span class="muted" style="min-width:92px">${l}</span><b style="flex:1;min-width:0;overflow-wrap:anywhere"><bdi>${v}</bdi></b></div>`;
+  let dateHtml = '';
+  const A = r.dateAsk, OL = SR().ORDER_L;
+  if (A) {
+    const why = A.reason === 'new' ? `شكل تاريخ جديد من هالبنك: <b>${shapeSampleHtml(A.sample, A.token)}</b>. اختر التاريخ الصحيح، والترتيب ينحفظ لرسائل هالبنك.`
+      : A.reason === 'old' ? 'التاريخ اللي طلع أقدم من وقت وصول الرسالة بأكثر من يومين. اختر التاريخ الصحيح لها هي بس.'
+      : A.reason === 'future' ? 'التاريخ اللي طلع بعد وقت وصول الرسالة. اختر التاريخ الصحيح لها هي بس.'
+      : 'الترتيب المحفوظ ما يعطي تاريخ صحيح لهذي الرسالة. اختر تاريخها هي بس.';
+    dateHtml = `<div class="small" style="margin-top:8px">${why}</div><div class="kvbox" style="margin-top:6px">${(A.candidates || []).map((c, n) => `<label class="f" style="margin:6px 0"><input type="radio" name="nb_${r.id}" value="${c.order}" ${n === 0 && (A.candidates || []).length === 1 ? 'checked' : ''}> <b>${fdate(c.date, true)}</b> <span class="small muted">· ${OL[c.order]}</span></label>`).join('')}</div>
+      ${A.reason !== 'new' ? `<label class="f">أو حدد التاريخ بنفسك</label><input type="date" id="nbdate_${r.id}" max="${E.todayISO()}">` : ''}`;
+  }
+  const body = `<div class="small">أول رسالة «${esc(fam)}» من <b>${esc(bank)}</b>. هذا اللي قريته منها، تأكد قبل ما أحفظها:</div>
+    <div class="kvbox small" style="margin-top:6px">${row('النوع', esc(fam))}${row('المبلغ', i.grossAmount != null ? esc(fmt(i.grossAmount)) + (i.foreignAmount ? ` (${esc(fmt(i.foreignAmount))} ${esc(i.foreignCurrency || '')})` : '') : '—')}${row('الاسم', name ? esc(name) : '—')}${row('البطاقة أو الحساب', last4 ? '…' + esc(last4) : '—')}${/purchase|refund/.test(r.family || '') ? row('وسيلة الدفع', esc(METHOD_TXT[i.paymentMethod || 'POS'] || i.paymentMethod || 'نقاط بيع')) : ''}${i.balanceAfter != null ? row('الرصيد', esc(fmt(i.balanceAfter))) : ''}${i.feeAmount ? row('الرسوم', esc(fmt(i.feeAmount))) : ''}${r.date ? row('التاريخ', esc(fdate(r.date, true)) + (i.time ? ' ' + esc(ftime(i.time)) : '')) : ''}</div>${dateHtml}
+    <div class="small muted" style="margin-top:6px">«صحيح» يعتمد قراءة «${esc(fam)}» من هالبنك، ورسائله الجاية من نفس النوع تنحفظ مباشرة. إذا فيه شي غلط، «علّم الصيغة» وحدد الحقول بنفسك.</div>`;
+  const btns = `<button class="btn p" data-action="rvTrust" data-id="${r.id}">صحيح، اعتمد القراءة لهالبنك</button><button class="btn" data-action="teachSms" data-id="${r.id}">علّم الصيغة</button><button class="btn" data-action="rvMsg" data-id="${r.id}" data-v="ignore">تجاهل الرسالة</button>`;
+  return { body, btns };
+}
+const IGN_SENDER_KINDS = new Set(['sms_new_bank', 'sms_new_bank_info', 'sms_unknown', 'sms_unparsed', 'sms_no_account']);
+// اللصق: «من أي بنك؟»
+function pasteBankField() {
+  const rows = bankRows().filter(x => !x.r.ignored);
+  return `<label class="f">من أي بنك؟</label><select id="smsBank" data-change="pasteBankSel"><option value="">ما أدري</option>${rows.map(x => `<option value="${esc(x.r.key)}">${esc(x.r.name || x.r.raw)}</option>`).join('')}<option value="__other">بنك ثاني (اكتب اسم المرسل)</option></select>
+    <input type="text" id="smsSender" class="hide" placeholder="اسم المرسل، مثل alinma" style="margin-top:6px">
+    <div class="small muted" style="margin-top:4px">إذا اخترت البنك، الرسائل تنقرأ بصيغه وأشكال تواريخه. «ما أدري» = مثل قبل.</div>`;
+}
+function pasteSender() {
+  const v = $('smsBank') ? $('smsBank').value : '';
+  if (v === '__other') return ($('smsSender').value || '').trim() || null;
+  if (v) { const r = E.bankRec(store(), v); return r ? r.raw : null; }
+  return null;
+}
+async function ignoreSender(key) {
+  const st = store(), label = E.bankLabel(st, key);
+  const ok = await confirmBox('تجاهل ' + label, `رسائل <b>${esc(label)}</b> الجاية تنحفظ «من مرسل متجاهل» بنصها، بدون عمليات. المعلّقة منه في المراجعة تنقفل بنفس الطريقة. العمليات المحفوظة منه ما تتغير، ورسائل الرمز تنحذف بدون نص مثل دايم. تقدر تلغي التجاهل من «البنوك».`, 'تجاهل', true);
+  if (!ok) return false;
+  const r = E.setSenderIgnored(st, key, true); let plan = null;
+  if (r && r.reprocess.length) { plan = await E.reprocessMessages(st, r.reprocess); if (plan) E.commitSms(st, plan); }
+  await persist('تجاهل مرسل: ' + label); render(); toast(`تمام، رسائل ${label} تتجاهل${r && r.reprocess.length ? ` (وانقفلت ${cnt(r.reprocess.length, 'msg')} معلّقة)` : ''}`);
+  return true;
+}
+const CSS162 = `.it .btn.r{padding:6px 10px}`;
+try { document.head.insertAdjacentHTML('beforeend', `<style id="css162">${CSS162}</style>`); } catch (e) { /* بدون DOM */ }
+Object.assign(TITLES, { banks: 'البنوك' });
+Object.assign(NAV_OF, { banks: 'more' });
+Object.assign(V150, { banks: vBanks });
+Object.assign(A, {
+  updCheck: () => swCheck(true),
+  updForce: () => forceUpdate(),
+  bankOpen: (el) => sheetBank(el.dataset.k),
+  bankNameSave: async (el) => { E.setBankName(store(), el.dataset.k, $('bk_name').value); await persist('اسم بنك'); render(); sheetBank(el.dataset.k); toast('انحفظ'); },
+  bankMerge: async (el) => {
+    const st = store(), from = el.dataset.k, into = $('bk_merge') && $('bk_merge').value; if (!into) return;
+    const ok = await confirmBox('دمج', `<b>${esc(E.bankLabel(st, from))}</b> يصير اسم ثاني لـ <b>${esc(E.bankLabel(st, into))}</b>: نفس الاسم والأنواع المعتمدة وأشكال التاريخ والصيغ. تقدر تفك الدمج بعدين.`, 'ادمج', false);
+    if (!ok) return;
+    const res = E.mergeBanks(st, from, into); let plan = null;
+    if (res && res.reprocess.length) { plan = await E.reprocessMessages(st, res.reprocess); if (plan) E.commitSms(st, plan, { markReview: true }); }
+    await persist('دمج بنكين'); render(); sheetBank(into); toast('اندمجوا' + (plan ? '، ' + smsSummaryText(plan.smsSummary) : ''));
+  },
+  bankUnmerge: async (el) => {
+    const st = store(), r = E.unmergeBank(st, el.dataset.k); if (!r) return; let plan = null;
+    if (r.reprocess && r.reprocess.length) { plan = await E.reprocessMessages(st, r.reprocess); if (plan) E.commitSms(st, plan, { markReview: true }); }
+    await persist('فك دمج بنك'); render(); sheetBank(r.from); toast('انفك الدمج' + (plan ? '، ' + smsSummaryText(plan.smsSummary) : ''));
+  },
+  bankUntrust: async (el) => {
+    const st = store(), f = el.dataset.f, label = E.bankLabel(st, el.dataset.k);
+    const ok = await confirmBox('إلغاء الاعتماد', `أول رسالة «${esc(FAM_L()[f] || f)}» جاية من ${esc(label)} بتنتظرك في «المراجعة» تتأكد من قراءتها. العمليات المحفوظة ما تتغير.`, 'إلغاء الاعتماد', true);
+    if (!ok) return;
+    E.untrustFamily(st, el.dataset.k, f); await persist('إلغاء اعتماد نوع'); render(); sheetBank(el.dataset.k);
+  },
+  bankIgnore: async (el) => {
+    const st = store(), k = el.dataset.k;
+    if (el.dataset.v === '1') { closeSheet(null); if (await ignoreSender(k)) sheetBank(k); return; }
+    const r = E.setSenderIgnored(st, k, false); let plan = null;
+    if (r && r.reprocess.length && await confirmBox('إعادة قراءة رسائله', `عندك ${cnt(r.reprocess.length, 'msg')} منه انحفظت «من مرسل متجاهل». تعيد قراءتها الحين؟ تمر بنفس الخطوات: أول رسالة من كل نوع ما اعتمدته تنتظرك في «المراجعة».`, 'أعد قراءتها', false)) {
+      plan = await E.reprocessMessages(st, r.reprocess); if (plan) E.commitSms(st, plan, { markReview: true });
+    }
+    await persist('إلغاء تجاهل مرسل'); render(); sheetBank(k); toast(plan ? smsSummaryText(plan.smsSummary) : 'انلغى التجاهل');
+  },
+  tplDel: async (el) => {
+    const st = store(), t = st.get('templates', el.dataset.id); if (!t) return;
+    if (!await confirmBox('حذف الصيغة', 'الرسائل الجاية بهالشكل تنقرأ بالقارئ العام (أو تطلب تعليم من جديد). العمليات المحفوظة ما تتغير.', 'حذف', true)) return;
+    st.remove('templates', t.id); await persist('حذف صيغة رسالة'); render(); sheetBank(el.dataset.k);
+  },
+  rvTrust: async (el) => {
+    const st = store(), r = st.get('reviews', el.dataset.id); if (!r) return;
+    const pick = document.querySelector(`input[name="nb_${r.id}"]:checked`), own = $('nbdate_' + r.id);
+    let sel = null;
+    if (r.dateAsk) {
+      if (pick) sel = { order: pick.value };
+      else if (own && own.value) { if (own.value > E.todayISO()) return toast('التاريخ في المستقبل'); sel = { date: own.value }; }
+      else return toast('اختر التاريخ الصحيح');
+    }
+    const res = E.approveBankReading(st, r.id, sel);
+    if (!res || res.error) return toast(res && res.error === 'date' ? 'اختر التاريخ الصحيح' : 'ما انحفظ');
+    const plan = await E.reprocessMessages(st, res.reprocess, res.forceDate ? { forceDate: res.forceDate } : {});
+    if (plan) E.commitSms(st, plan, { markReview: true });
+    await persist('اعتماد قراءة بنك'); render();
+    toast(`اعتمدت «${FAM_L()[res.family] || res.family}» من ${E.bankLabel(st, res.bank)}${plan ? '، ' + smsSummaryText(plan.smsSummary) : ''}`, 6000);
+  },
+  rvIgnoreSender: async (el) => { const st = store(), r = st.get('reviews', el.dataset.id), m = r && st.get('messages', r.messageId); if (!m || !m.sender) return; await ignoreSender(E.bankOf(st, m.sender)); },
+  pasteBankSel: (el) => { if ($('smsSender')) $('smsSender').classList.toggle('hide', el.value !== '__other'); },
+});
 
 boot();
 })();

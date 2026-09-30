@@ -259,6 +259,8 @@ const DEFAULT_SETTINGS = {
   smsDateShapes: {}, dateShapesMigrated: false, migrated141: false,
   // 1.5.0: المدينة الحالية اقتراح احتياطي فقط، واستثناءات معدل الصرف تبدأ فاضية
   currentCityId: null, cityPromptSnoozeUntil: null, rateExclusions: [], migrated150: false, migrated152: false, migrated160: false, placeCategories: [], ignorePeriods: [],
+  // 1.6.2: البنوك (المرسلين): الاسم، الأنواع المعتمدة، التجاهل، الدمج. وأشكال التاريخ لكل بنك
+  smsSenders: {}, migrated162: false,
 };
 
 class Store {
@@ -1392,6 +1394,167 @@ function parseAlinmaSms(t, receivedDate) {
   return info;
 }
 function sameSender(a, b) { return normAr(a) === normAr(b); }
+/* ---------- 1.6.2: البنوك (المرسلين) ----------
+   settings.smsSenders[key] = {key, raw, name, ignored, trusted: {family: وقت الاعتماد}, mergedInto, createdAt}.
+   key = اسم المرسل بعد توحيد الحروف. «دمج» مرسل في ثاني = نفس البنك (نفس الاعتماد وأشكال التاريخ والصيغ). */
+const senderKey = (s) => (s ? normAr(String(s)).replace(/[|§]/g, '') || null : null);
+function sendersOf(store) { return store.settings.smsSenders || {}; }
+const own = (o, k) => !!(o && k != null && Object.prototype.hasOwnProperty.call(o, k)); // مرسل اسمه «constructor» ما يلخبط شي
+const ownGet = (o, k) => (own(o, k) ? o[k] : null);
+function bankOf(store, sender) {
+  let k = senderKey(sender); if (!k) return null;
+  const S = sendersOf(store); let n = 0;
+  while (ownGet(S, k) && S[k].mergedInto && ownGet(S, S[k].mergedInto) && n++ < 8) k = S[k].mergedInto;
+  return k;
+}
+function bankRec(store, key) { return key ? ownGet(sendersOf(store), key) : null; }
+function bankLabel(store, senderOrKey) { const k = bankOf(store, senderOrKey), r = bankRec(store, k); return (r && (r.name || r.raw)) || (senderOrKey ? String(senderOrKey) : null); }
+function isIgnoredBank(store, key) { const r = bankRec(store, key); return !!(r && r.ignored); }
+function isTrusted(store, key, family) { const r = bankRec(store, key); return !!(r && ownGet(r.trusted, family)); }
+function isNewBank(store, key) { const r = bankRec(store, key); return !r || !r.trusted || !Object.keys(r.trusted).length; }
+// تعديل السجل بنسخة جديدة (عشان التراجع يرجع القديم كما هو)
+function putSenders(store, fn) { const s = store.settings; const map = {}; Object.entries(s.smsSenders || {}).forEach(([k, v]) => { map[k] = Object.assign({}, v, { trusted: Object.assign({}, v.trusted || {}) }); }); fn(map); s.smsSenders = map; store.put('settings', s); store.touch(); }
+function ensureKey(map, key, now, raw) {
+  if (!key) return null;
+  if (!own(map, key)) map[key] = { key, raw: String(raw || key).slice(0, 60), name: null, ignored: false, trusted: {}, mergedInto: null, createdAt: now || new Date().toISOString() };
+  return map[key];
+}
+// رسالة معلّقة ما لها عملية محفوظة (إعادة قراءتها ما تكرر عملية)
+function pendingNoTx(store, id) { const m = store.get('messages', id); return !!(m && m.text && !m.txId && m.status === 'review'); }
+const READ_RV = new Set(['sms_new_bank', 'sms_new_bank_info', 'sms_date_shape', 'sms_unknown', 'sms_unparsed']);
+function ensureSender(map, sender, now) { const k = senderKey(sender); if (!k) return null; const r = ensureKey(map, k, now, sender); return r; }
+function setBankName(store, key, name) {
+  const k = bankOf(store, key); if (!k) return null;
+  const v = String(name || '').replace(/\s+/g, ' ').trim().slice(0, 40) || null;
+  putSenders(store, (map) => { ensureKey(map, k).name = v; });
+  return true;
+}
+function untrustFamily(store, key, family) {
+  const k = bankOf(store, key); if (!k || !isTrusted(store, k, family)) return false;
+  putSenders(store, (map) => { const r = map[k]; r.trusted = Object.assign({}, r.trusted); delete r.trusted[family]; });
+  return true;
+}
+// تجاهل مرسل (أو إلغاؤه). يرجّع الرسائل اللي تحتاج إعادة معالجة: وقت التجاهل = المعلّقة في المراجعة، ووقت الإلغاء = رسائله المتجاهلة
+function setSenderIgnored(store, key, on) {
+  const k = bankOf(store, key); if (!k) return null;
+  putSenders(store, (map) => { ensureKey(map, k).ignored = !!on; });
+  const mine = (m) => m && m.text && bankOf(store, m.sender) === k;
+  // وقت التجاهل: المعلّقة اللي ما لها عملية بس (عملية محفوظة تبقى مع رسالتها ومراجعتها)
+  const ids = on
+    ? Array.from(new Set(store.all('reviews').filter(r => r.status === 'open' && r.messageId).map(r => r.messageId))).filter(id => mine(store.get('messages', id)) && pendingNoTx(store, id))
+    : store.all('messages').filter(m => m.status === 'sender_ignored' && mine(m) && !m.txId).map(m => m.id);
+  return { reprocess: ids };
+}
+// دمج بنك في ثاني: الاعتماد يتجمع، وأشكال التاريخ تنتقل (الموجود في الهدف يبقى)، والاسم من الهدف (أو من المدموج لو الهدف بدون اسم)
+function mergeBanks(store, fromKey, intoKey) {
+  const a = bankOf(store, fromKey), b = bankOf(store, intoKey); if (!a || !b || a === b) return null;
+  const now = new Date().toISOString();
+  putSenders(store, (map) => {
+    const A = ensureKey(map, a, now), B = ensureKey(map, b, now);
+    B.trusted = Object.assign({}, A.trusted || {}, B.trusted || {});
+    if (!B.name && A.name) B.name = A.name;
+    A.mergedInto = b;
+    Object.values(map).forEach(r => { if (r.mergedInto === a) r.mergedInto = b; });
+  });
+  // كل مفاتيح أشكال التاريخ للبنك المدموج تصير للبنك الهدف: المحفوظة، ورسائله، ومراجعاته (حتى اللي ما انجاوبت)
+  const rk = (k) => (k && String(k).startsWith(a + '§') ? b + '§' + rawSig(k) : k);
+  const s = store.settings, shapes = Object.assign({}, s.smsDateShapes || {}); let shCh = false;
+  Object.keys(shapes).forEach(k => { const nk = rk(k); if (nk !== k) { if (!own(shapes, nk)) shapes[nk] = shapes[k]; delete shapes[k]; shCh = true; } });
+  if (shCh) { s.smsDateShapes = shapes; store.put('settings', s); }
+  store.all('messages').forEach(m => { const nk = rk(m.dateShape); if (nk !== m.dateShape) { m.dateShape = nk; store.put('messages', m); } });
+  store.all('reviews').forEach(r => { let ch = false; if (rk(r.sig) !== r.sig) { r.sig = rk(r.sig); ch = true; } if (r.dateAsk && rk(r.dateAsk.sig) !== r.dateAsk.sig) { r.dateAsk = Object.assign({}, r.dateAsk, { sig: rk(r.dateAsk.sig) }); ch = true; } if (ch) store.put('reviews', r); });
+  // سؤالين «تاريخ رسائل سابقة» لنفس الشكل بعد الدمج: يكفي واحد (جوابه يصحح رسائل الاثنين)
+  const seenLegacy = new Set();
+  store.all('reviews').filter(r => r.status === 'open' && r.kind === 'sms_date_shape' && r.reason === 'legacy').forEach(r => { if (seenLegacy.has(r.sig)) closeReview(store, r, 'merged'); else seenLegacy.add(r.sig); });
+  // رسائله المعلّقة للقراءة (بنك جديد، شكل تاريخ، ما انقرأت) تنعاد بعد الدمج باعتماد وأشكال البنك
+  const reprocess = Array.from(new Set(store.all('reviews').filter(r => r.status === 'open' && READ_RV.has(r.kind) && r.reason !== 'legacy' && r.messageId).map(r => r.messageId)))
+    .filter(id => { const m = store.get('messages', id); return pendingNoTx(store, id) && bankOf(store, m.sender) === b && senderKey(m.sender) !== b; });
+  store.touch();
+  return { from: a, into: b, reprocess };
+}
+// فك الدمج: المرسل يرجع بنك لحاله ومعه نسخة من اعتماد البنك وأشكال تاريخه (عشان ما ينسألك من جديد)
+function unmergeBank(store, key) {
+  const k = senderKey(key), r = bankRec(store, k); if (!r || !r.mergedInto) return null;
+  const into = bankOf(store, k); const now = new Date().toISOString();
+  putSenders(store, (map) => { const R0 = map[k], B = map[into]; R0.mergedInto = null; R0.trusted = Object.assign({}, (B && B.trusted) || {}, R0.trusted || {}); if (!R0.name && B && B.name) R0.name = B.name; void now; });
+  const s = store.settings, shapes = Object.assign({}, s.smsDateShapes || {}); let ch = false;
+  Object.keys(shapes).forEach(x => { if (x.startsWith(into + '§')) { const nk = k + '§' + rawSig(x); if (!shapes[nk]) { shapes[nk] = shapes[x]; ch = true; } } });
+  if (ch) { s.smsDateShapes = shapes; store.put('settings', s); }
+  const reprocess = Array.from(new Set(store.all('reviews').filter(r => r.status === 'open' && READ_RV.has(r.kind) && r.reason !== 'legacy' && r.messageId).map(r => r.messageId)))
+    .filter(id => { const m = store.get('messages', id); return pendingNoTx(store, id) && senderKey(m.sender) === k; });
+  store.touch();
+  return { key: k, from: into, reprocess };
+}
+// «صحيح، اعتمد القراءة لهذا البنك»: يعتمد النوع للبنك، ويحفظ ترتيب التاريخ لو انسأل، ويرجّع الرسائل اللي تنتظر نفس الاعتماد
+// pick = {order} (ترتيب التاريخ للشكل الجديد أو تاريخ هذي الرسالة) أو {date} (تاريخ حددته بنفسك)
+// تاريخ أقدم من وصول رسالة الصندوق بأكثر من يومين
+function isOldFor(m, d) { return !!(m && (m.source || 'paste') !== 'paste' && d && d < addDays(String(m.receivedAt || new Date().toISOString()).slice(0, 10), -OLD_DAYS)); }
+function approveBankReading(store, reviewId, pick) {
+  const r = store.get('reviews', reviewId); if (!r || r.kind !== 'sms_new_bank' || r.status !== 'open') return null;
+  const m = store.get('messages', r.messageId), bank = (m && bankOf(store, m.sender)) || r.bank; if (!bank || !r.family) return null;
+  const now = new Date().toISOString(), A = r.dateAsk || null;
+  const out = { reprocess: [r.messageId], forceDate: null, saved: false, fixed: 0, bank, family: r.family };
+  if (A) {
+    if (pick && pick.date) out.forceDate = { [r.messageId]: pick.date };
+    else {
+      const cand = (A.candidates || []).find(c => c.order === (pick && pick.order)); if (!cand) return { error: 'date' };
+      if (A.reason === 'new' || A.reason === 'legacy') {
+        setDateShape(store, A.sig, cand.order, A.sample, A.pat); out.saved = true; out.fixed = retroDateFix(store, A.sig);
+        if (isOldFor(m, cand.date)) out.forceDate = { [r.messageId]: cand.date }; // اخترت تاريخها وهو قديم: ما ينسألك مرة ثانية
+      } else out.forceDate = { [r.messageId]: cand.date };
+    }
+  }
+  putSenders(store, (map) => { const R0 = ensureKey(map, bank, now, m && m.sender); R0.trusted = Object.assign({}, R0.trusted, { [r.family]: now }); });
+  store.all('reviews').filter(x => x.status === 'open' && x.id !== r.id && x.messageId).forEach(x => {
+    const mm = store.get('messages', x.messageId); if (!mm || bankOf(store, mm.sender) !== bank) return;
+    if (x.kind === 'sms_new_bank' && (x.family === r.family || (out.saved && x.dateAsk && x.dateAsk.sig === A.sig))) out.reprocess.push(x.messageId);
+    else if (out.saved && x.kind === 'sms_date_shape' && x.sig === A.sig && x.reason === 'new') out.reprocess.push(x.messageId);
+    else if (out.saved && x.kind === 'sms_date_shape' && x.sig === A.sig && x.reason === 'legacy') closeReview(store, x, 'answered'); // عملياتها تصححت بالترتيب
+  });
+  out.reprocess = Array.from(new Set(out.reprocess)).filter(id => id === r.messageId || pendingNoTx(store, id));
+  store.touch();
+  return out;
+}
+// ترقية 1.6.2: كل مرسل وصلت منه رسائل ينضاف لـ«البنوك»، وكل نوع له عمليات محفوظة منه يعتبر معتمد،
+// وأشكال التاريخ العامة تنسخ لكل بنك استخدمها (والعامة تبقى للرسائل الملصوقة بدون بنك)
+function migrate162(store) {
+  const s = store.settings; if (s.migrated162) return { changed: false };
+  const now = new Date().toISOString(), shapes = Object.assign({}, s.smsDateShapes || {});
+  const map = {}; Object.entries(s.smsSenders || {}).forEach(([k, v]) => { map[k] = Object.assign({}, v, { trusted: Object.assign({}, v.trusted || {}) }); });
+  const moved = new Map(), legacyTargets = new Map(); let trusted = 0;
+  store.all('messages').forEach(m => {
+    const r = m.sender ? ensureSender(map, m.sender, now) : null;
+    if (!r) { if (m.dateShape && m.dateSource === 'legacy' && m.txId && !m.userDate && !legacyTargets.has(m.dateShape)) legacyTargets.set(m.dateShape, m.id); return; } // ملصوقة بدون مرسل: الشكل العام
+    if ((m.status === 'tx' || m.status === 'merged') && m.text) {
+      let fam = m.readAs && m.readAs.family;
+      if (!fam) { try { fam = readInfo(store, m, smsWordsFor(store, m.text, m.receivedAt).W).info.family; } catch (e) { fam = null; } }
+      if (fam && !r.trusted[fam]) { r.trusted[fam] = now; trusted++; }
+    }
+    if (m.dateShape && !String(m.dateShape).includes('§')) {
+      const old = m.dateShape, nk = shapeKey(r.key, old);
+      if (shapes[old] && !shapes[nk]) shapes[nk] = Object.assign({}, shapes[old]);
+      m.dateShape = nk; store.put('messages', m); moved.set(m.id, [old, nk]); // (dateShape على العملية للعرض بس، ما تتغير)
+      if (m.dateSource === 'legacy' && m.txId && !m.userDate && !legacyTargets.has(nk)) legacyTargets.set(nk, m.id); // عمليات تاريخها من قبل 1.4.0 وتنتظر سؤال الشكل
+    }
+  });
+  const R = SR();
+  store.all('reviews').forEach(x => {
+    if (x.status !== 'open' || !x.sig || String(x.sig).includes('§')) return;
+    const raw = x.sig, mm = store.get('messages', x.messageId), k = mm && senderKey(mm.sender);
+    if (k) { x.sig = shapeKey(k, raw); store.put('reviews', x); }
+    // سؤال «تاريخ رسائل سابقة» كان واحد لكل شكل؛ الحين الشكل لكل بنك، فكل بنك عنده رسائل بهالشكل ينسأل لحاله
+    if (x.kind === 'sms_date_shape' && x.reason === 'legacy') {
+      legacyTargets.forEach((mid, key) => {
+        if (rawSig(key) !== raw || key === x.sig) return;
+        if (store.all('reviews').some(y => y.status === 'open' && y.kind === 'sms_date_shape' && y.reason === 'legacy' && y.sig === key)) return;
+        const tm = store.get('messages', mid), tok = tm && R.findDateToken(tm.text || ''); if (!tok) return;
+        store.put('reviews', { id: uid(), kind: 'sms_date_shape', status: 'open', createdAt: now, messageId: mid, importId: tm.importId || null, reason: 'legacy', sig: key, pat: tok.pat, token: tok.raw, sample: sanitizeText(tok.sample), candidates: tok.candidates });
+      });
+    }
+  });
+  s.smsSenders = map; s.smsDateShapes = shapes; s.migrated162 = now; store.put('settings', s); // (ترقية، مو تعديل منك: ما تغيّر «آخر تعديل»)
+  return { changed: true, senders: Object.keys(map).length, trusted, moved: moved.size };
+}
 function parseSmsText(store, text, sender, receivedDate, W) {
   const R = SR(), t = R.norm(text);
   const done = (o) => {
@@ -1402,7 +1565,7 @@ function parseSmsText(store, text, sender, receivedDate, W) {
   const tpls = store.all('templates').filter(x => x.kind === 'sms' && x.active !== false).sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
   let partial = null;
   for (const tp of tpls) {
-    if (tp.sender && sender && !sameSender(tp.sender, sender)) continue;
+    if (tp.sender && sender && bankOf(store, tp.sender) !== bankOf(store, sender)) continue; // 1.6.2: نفس البنك (حتى لو المرسل مدموج)
     const sc = R.templateScore(tp, t); if (sc < 0.6) continue;
     const r = R.applyTemplate(tp, t, W); r.templateId = tp.id; r.score = sc;
     if (r.ok && !r.missing.length) return done(r);
@@ -1473,7 +1636,8 @@ async function prepareSms(store, msgs, opts) {
   opts = opts || {};
   const R = SR(), now = new Date().toISOString();
   const plan = { id: uid(), kind: 'sms', sourceType: 'sms', filename: 'رسائل بنكية', hash: null, header: { bank: null }, account: null, balanceCheck: { status: 'unavailable', ok: null },
-    newAccounts: new Map(), newInstruments: new Map(), newBeneficiaries: new Map(), newMerchants: new Map(), newCities: new Map(), txs: [], msgRecords: [], reviews: [], held: new Map(), alreadyStored: [], warnings: [] };
+    newAccounts: new Map(), newInstruments: new Map(), newBeneficiaries: new Map(), newMerchants: new Map(), newCities: new Map(), txs: [], msgRecords: [], reviews: [], held: new Map(), alreadyStored: [], warnings: [],
+    senderSeen: new Map(), trustAdd: [] };
   const H = planHelpers(store, plan);
   const batchHashes = new Map();
   let row = 0;
@@ -1493,20 +1657,32 @@ async function prepareSms(store, msgs, opts) {
     const cityRaw = validCityRaw(m.suggestedCity);
     if (cityRaw) { rec.suggestedCity = cityRaw; rec.citySource = m.citySource === 'device_gps' ? 'device_gps' : 'shortcut_gps'; rec.cityCapturedAt = typeof m.cityCapturedAt === 'string' ? m.cityCapturedAt.slice(0, 40) : null; }
     plan.msgRecords.push(rec);
+    // 1.6.2: البنك = المرسل (أو البنك اللي دمجته فيه). الرسائل الملصوقة بدون بنك: bank = null
+    const bank = bankOf(store, m.sender), inbox = (m.source || 'paste') !== 'paste';
+    if (m.sender && senderKey(m.sender)) plan.senderSeen.set(senderKey(m.sender), String(m.sender));
     // 1.6.1: كلمات القراءة حسب تاريخ الرسالة (المكتوب فيها، وإلا تاريخ وصولها)
-    rec.wordsDate = wordsDate(store, text, received);
-    const WV = smsWordsFor(store, text, received), W = WV.W; rec.wordsVersion = WV.version ? WV.version.id : null;
+    rec.wordsDate = wordsDate(store, text, received, bank);
+    const WV = smsWordsFor(store, text, received, null, bank), W = WV.W; rec.wordsVersion = WV.version ? WV.version.id : null;
     let c = R.classify(text, W);
-    // صيغة متعلّمة تنطبق على الرسالة = رسالة مالية حتى لو الفرز العام ما عرفها
-    if (c.cls === 'unknown' && store.all('templates').some(tp => tp.kind === 'sms' && tp.active !== false && R.templateScore(tp, text) >= 0.6 && R.applyTemplate(tp, text, W).ok)) c = { cls: 'financial', reason: 'صيغة متعلّمة' };
+    // صيغة متعلّمة (لنفس البنك) تنطبق على الرسالة = رسالة مالية حتى لو الفرز العام ما عرفها
+    if ((c.cls === 'unknown' || c.code === 'amount_no_verb') && store.all('templates').some(tp => tp.kind === 'sms' && tp.active !== false && !(tp.sender && m.sender && bankOf(store, tp.sender) !== bank) && R.templateScore(tp, text) >= 0.6 && R.applyTemplate(tp, text, W).ok)) c = { cls: 'financial', code: 'financial', reason: 'صيغة متعلّمة' };
     rec.cls = c.cls; rec.clsReason = c.reason;
-    if (c.cls === 'otp') { rec.status = 'discarded'; continue; } // رسالة رمز: ما نحفظ نصها أبدًا
+    if (c.cls === 'otp') { rec.status = 'discarded'; continue; } // رسالة رمز: ما نحفظ نصها أبدًا (حتى من مرسل متجاهل)
     rec.text = sanitizeText(text);
-    if (c.cls === 'informational') { rec.status = 'informational'; continue; }
+    // 1.6.2: مرسل اخترت تتجاهله (مثل STC): تنحفظ بنصها «من مرسل متجاهل» بدون عملية
+    if (bank && isIgnoredBank(store, bank)) {
+      if (c.code === 'otp_weak') { rec.text = null; rec.status = 'discarded'; continue; } // فيها رمز محتمل: ما نحفظ نصها
+      rec.status = 'sender_ignored'; continue;
+    }
+    if (c.cls === 'informational') {
+      // 1.6.2: بنك جديد (ما اعتمدت منه شي) ورسالته فيها مبلغ بكلمات ما يعرفها: تنعرض عليك بدل ما تضيع
+      if (c.code === 'amount_no_verb' && bank && inbox && isNewBank(store, bank)) { newReview(plan, rec, 'sms_new_bank_info', { reason: c.reason, bank }); continue; }
+      rec.status = 'informational'; continue;
+    }
     if (c.cls === 'unknown') { newReview(plan, rec, 'sms_unknown', { reason: c.reason }); continue; }
     // بصمة النص للمقارنة فقط: رسالة بنفس النص تروح المراجعة، ما تنحذف.
     // الرسائل اللي تجاهلتها (أو معلومات فقط) ما سوّت عملية، فما تُعتبر تكرار. قرارك «عالجها» ينحفظ على الرسالة
-    const NO_TX = new Set(['ignored', 'informational', 'discarded', 'duplicate']);
+    const NO_TX = new Set(['ignored', 'informational', 'discarded', 'duplicate', 'sender_ignored']);
     const sameOk = !!(m.sameContentOk || (opts.allowSameContent && opts.allowSameContent.has(m.id)));
     if (sameOk) rec.sameContentOk = true;
     // نفس النص بالضبط: البصمة، أو النص المحفوظ نفسه بغض النظر عن المرسل (نسخة ملصوقة من رسالة واصلة من الصندوق)
@@ -1528,8 +1704,14 @@ async function prepareSms(store, msgs, opts) {
     // التاريخ اللي حدده المستخدم ينحفظ مع الرسالة، عشان ما ينطلب مرة ثانية لو احتاجت مراجعة ثانية (مثل الحساب)
     rec.userDate = (opts.forceDate && opts.forceDate[m.id]) || m.userDate || null;
     // التاريخ: من ترتيب شكل التاريخ المحفوظ. شكل جديد أو تاريخ في المستقبل = مراجعة قبل الحفظ
-    const dr = resolveSmsDate(store, text, info, rec, received);
+    const dr = resolveSmsDate(store, text, info, rec, received, bank);
     rec.dateShape = dr.sig || null;
+    // 1.6.2: أول رسالة من بنك (أو نوع) ما اعتمدته، قراها القارئ العام: تنتظر تشوف وش فهم منها قبل ما تنحفظ.
+    // رسائل الإنماء والصيغ اللي علّمتها والملصوقة تمشي مثل قبل. وإذا التاريخ يحتاج سؤال، ينسأل في نفس البطاقة
+    if (bank && inbox && info.parser === 'generic' && info.family && !isTrusted(store, bank, info.family) && !(opts.trusted && opts.trusted.has(m.id))) {
+      newReview(plan, rec, 'sms_new_bank', { info: stripInfo(info), bank, family: info.family, date: dr.review ? null : (dr.date || receivedDate || null), dateAsk: dr.review || null });
+      continue;
+    }
     if (dr.review) { newReview(plan, rec, 'sms_date_shape', Object.assign({ info: stripInfo(info) }, dr.review)); continue; }
     info.transactionDate = dr.date; info.dateSource = dr.source; info.dateShape = dr.sig || null;
     if (!info.transactionDate && receivedDate) { info.transactionDate = receivedDate; info.dateSource = 'received'; }
@@ -1551,6 +1733,7 @@ async function prepareSms(store, msgs, opts) {
     if (rec.suggestedCity) { const cc = ensureCity(store, rec.suggestedCity, plan.newCities); if (cc) Object.assign(tx, { suggestedCityId: cc.id, suggestedCityRaw: rec.suggestedCity, citySuggestionSource: rec.citySource, citySuggestedAt: rec.cityCapturedAt || rec.receivedAt || null }); }
     tx._msgId = m.id;
     plan.txs.push(tx); rec.status = 'tx'; rec.txId = tx.id;
+    if (bank && info.family && info.parser !== 'generic') plan.trustAdd.push({ bank, family: info.family }); // قراءة الإنماء أو صيغة علّمتها = معروفة
     const missing = (info.missing || []).filter(k => k !== 'amount');
     if (missing.length || ((tx.transactionType === 'Payment' || tx.transactionType === 'Refund') && !tx.merchantRaw)) {
       newReview(plan, rec, 'sms_partial', { txId: tx.id, missing: missing.length ? missing : ['merchant'] });
@@ -1606,13 +1789,20 @@ async function prepareSms(store, msgs, opts) {
 /* ---------- أشكال التاريخ في الرسائل ----------
    كل شكل (Signature من sms.js) له ترتيب يختاره المستخدم مرة: سنة-شهر-يوم أو غيره. مستقل عن اسم البنك.
    dateSource على العملية والرسالة: shape (من الشكل المحفوظ) · template (صيغة متعلّمة) · user (حدده المستخدم) · received (تاريخ الاستلام) */
-function resolveSmsDate(store, text, info, rec, received) {
-  const R = SR(), tok = R.findDateToken(text), sig = tok ? tok.sig : null;
-  const limit = addDays(String(received || new Date().toISOString()).slice(0, 10), 1);
-  const ask = (reason) => ({ review: { reason, sig, pat: tok.pat, token: tok.raw, sample: sanitizeText(tok.sample), candidates: tok.candidates } });
+// 1.6.2: رسالة من الصندوق تاريخها أقدم من وصولها بأكثر من يومين = غالبًا قراءة غلط، تروح المراجعة
+const OLD_DAYS = 2;
+// مفتاح شكل التاريخ: لكل بنك أشكاله (bank§sig). الملصوقة بدون بنك: الأشكال العامة (sig)
+const shapeKey = (bank, sig) => (bank ? bank + '§' + sig : sig);
+const rawSig = (key) => (String(key || '').includes('§') ? String(key).split('§')[1] : key);
+function resolveSmsDate(store, text, info, rec, received, bank) {
+  const R = SR(), tok = R.findDateToken(text), sig = tok ? shapeKey(bank, tok.sig) : null;
+  const recvDay = String(received || new Date().toISOString()).slice(0, 10), limit = addDays(recvDay, 1);
+  const tooOld = (d) => (rec.source || 'paste') !== 'paste' && d < addDays(recvDay, -OLD_DAYS);
+  const ask = (reason) => ({ review: { reason, sig, pat: tok ? tok.pat : null, token: tok ? tok.raw : null, sample: tok ? sanitizeText(tok.sample) : null, candidates: tok ? tok.candidates : [] } });
   if (rec.userDate) return { date: rec.userDate, source: 'user', sig };
   if (info.parser === 'template' && info.via && info.via.date && info.transactionDate) {
     if (info.transactionDate > limit && tok) return ask('future');
+    if (tooOld(info.transactionDate)) return ask('old');
     return { date: info.transactionDate, source: 'template', sig: null };
   }
   if (!tok) return { date: null, source: null, sig: null };
@@ -1621,6 +1811,7 @@ function resolveSmsDate(store, text, info, rec, received) {
   const d = R.readDateOrder(tok, known.order);
   if (!d) return ask('order_invalid');
   if (d > limit) return ask('future');
+  if (tooOld(d)) return ask('old');
   return { date: d, source: 'shape', sig };
 }
 function setDateShape(store, sig, order, sample, pat) {
@@ -1644,7 +1835,7 @@ function retroDateFix(store, sig) {
     const own = (tx.sourceLinks || [])[0];
     if (!own || own.sourceType !== 'sms' || own.messageId !== m.id) return; // عملية أصلها كشف: تاريخها من الكشف
     if (tx.dateSource && tx.dateSource !== 'shape' && tx.dateSource !== 'legacy') return;
-    const tok = R.findDateToken(m.text); if (!tok || tok.sig !== sig) return;
+    const tok = R.findDateToken(m.text); if (!tok || tok.sig !== rawSig(sig)) return;
     const d = R.readDateOrder(tok, shape.order);
     if (m.dateSource !== 'shape') { m.dateSource = 'shape'; store.put('messages', m); }
     if (!d || d === tx.transactionDate) { if (tx.dateSource !== 'shape') { tx.dateSource = 'shape'; tx.dateShape = sig; store.put('transactions', tx); } return; }
@@ -1662,9 +1853,12 @@ function answerDateShape(store, reviewId, order) {
   if (r.reason === 'new' || r.reason === 'legacy') {
     setDateShape(store, r.sig, order, r.sample, r.pat); out.saved = true;
     out.fixed = retroDateFix(store, r.sig);
+    if (r.reason === 'new' && isOldFor(store.get('messages', r.messageId), cand.date)) out.forceDate = { [r.messageId]: cand.date }; // 1.6.2: اخترت تاريخها وهو قديم
     store.all('reviews').filter(x => x.status === 'open' && x.kind === 'sms_date_shape' && x.sig === r.sig && (x.reason === 'new' || x.reason === 'legacy')).forEach(x => {
       if (x.reason === 'legacy') closeReview(store, x, 'answered'); else out.reprocess.push(x.messageId);
     });
+    // 1.6.2: بطاقات «بنك جديد» اللي كانت تسأل عن نفس الشكل تنعاد بالترتيب المحفوظ
+    store.all('reviews').filter(x => x.status === 'open' && x.kind === 'sms_new_bank' && x.dateAsk && x.dateAsk.sig === r.sig).forEach(x => out.reprocess.push(x.messageId));
     // رسائل من قبل هذا التحديث بنفس الشكل ولها مراجعة مفتوحة (حساب غير معروف أو تكرار محتمل): تنعاد بالتاريخ الصحيح
     store.all('reviews').filter(x => x.status === 'open' && (x.kind === 'sms_no_account' || x.kind === 'sms_duplicate')).forEach(x => {
       const msg = store.get('messages', x.messageId); if (msg && msg.dateShape === r.sig && !msg.userDate) out.reprocess.push(x.messageId);
@@ -1722,6 +1916,16 @@ function commitSms(store, plan, opts) {
     const t = store.get('transactions', r.txId); if (t && !t.needsReview && !t.reviewedAt) { t.needsReview = true; if (opts.markNew) autoApproveCity(store, t); store.put('transactions', t); }
   });
   plan.reviews.forEach(r => store.put('reviews', r));
+  // 1.6.2: المرسلين الجدد ينضافون لصفحة «البنوك»، وقراءة الإنماء والصيغ المتعلّمة تعتمد نوعها للبنك
+  if ((plan.senderSeen && plan.senderSeen.size) || (plan.trustAdd && plan.trustAdd.length)) {
+    const now = new Date().toISOString(), S = sendersOf(store);
+    const needSeen = Array.from((plan.senderSeen || new Map()).keys()).some(k => !own(S, k));
+    const needTrust = (plan.trustAdd || []).some(x => !isTrusted(store, x.bank, x.family));
+    if (needSeen || needTrust) putSenders(store, (map) => {
+      (plan.senderSeen || new Map()).forEach((raw) => ensureSender(map, raw, now));
+      (plan.trustAdd || []).forEach(x => { const r = ensureKey(map, x.bank, now); if (r && !r.trusted[x.family]) r.trusted = Object.assign({}, r.trusted, { [x.family]: now }); });
+    });
+  }
   // 1.5.0: رصيد رسالة الحساب الجاري (بالشروط في smsBalanceSnapshot). رسالة لها مراجعة مفتوحة ما تعتبر موثوقة
   const rv = new Set(plan.reviews.map(x => x.messageId));
   plan.msgRecords.forEach(r => {
@@ -1827,7 +2031,7 @@ function saveSmsTemplate(store, tpl, meta) {
   store.put('templates', t); store.touch();
   // الرسائل المعلّقة للمراجعة أو الناقصة واللي تطابق الصيغة الجديدة
   const R = SR(), affected = [];
-  store.all('reviews').filter(r => r.status === 'open' && ['sms_unparsed', 'sms_unknown', 'sms_partial'].includes(r.kind)).forEach(r => {
+  store.all('reviews').filter(r => r.status === 'open' && ['sms_unparsed', 'sms_unknown', 'sms_partial', 'sms_new_bank', 'sms_new_bank_info'].includes(r.kind)).forEach(r => {
     const m = store.get('messages', r.messageId); if (!m || !m.text) return;
     if (R.templateScore(t, m.text) >= 0.6) affected.push({ review: r, message: m });
   });
@@ -3646,21 +3850,21 @@ function compiledWordsOf(v) {
   return WORDS_C.get(k);
 }
 // تاريخ الرسالة لاختيار نسخة الكلمات: المكتوب فيها (بترتيب الشكل المحفوظ أو إذا له قراءة وحدة)، وإلا تاريخ الوصول
-function wordsDate(store, text, receivedISO) {
+function wordsDate(store, text, receivedISO, bank) {
   const R = SR(), tok = R.findDateToken(text);
   if (tok) {
-    const known = (store.settings.smsDateShapes || {})[tok.sig];
+    const known = (store.settings.smsDateShapes || {})[shapeKey(bank, tok.sig)];
     const d = known ? R.readDateOrder(tok, known.order) : ((tok.candidates || []).length === 1 ? tok.candidates[0].date : null);
     if (d) return d;
   }
   return String(receivedISO || new Date().toISOString()).slice(0, 10);
 }
-function smsWordsFor(store, text, receivedISO, versions) {
-  const v = wordVersionAt(versions || smsWordVersions(store), wordsDate(store, text, receivedISO));
+function smsWordsFor(store, text, receivedISO, versions, bank) {
+  const v = wordVersionAt(versions || smsWordVersions(store), wordsDate(store, text, receivedISO, bank));
   return { version: v, W: compiledWordsOf(v) };
 }
 // نفس التاريخ اللي انقرأت فيه الرسالة (محفوظ عليها من 1.6.1، وللأقدم نحسبه بنفس الطريقة)
-function msgWordsDate(store, m) { return m.wordsDate || wordsDate(store, m.text || '', m.receivedAt); }
+function msgWordsDate(store, m) { return m.wordsDate || wordsDate(store, m.text || '', m.receivedAt, bankOf(store, m.sender)); }
 // تنظيف الكلمات: كلمة من حرفين أو أكثر، بدون تكرار (بعد تجاهل الفروق المتشابهة)، وبدون أرقام طويلة (بطاقة، حساب، آيبان)
 const LONG_DIGITS = /\d[\d\s-]{4,}\d/;
 function cleanSmsWords(words) {
@@ -3679,7 +3883,7 @@ function withVersion(store, words, from) {
   const v = { id: prev ? prev.id : 'sw-' + uid().replace(/[^a-z0-9]/gi, '').slice(0, 10), from, words: cleanSmsWords(words), createdAt: prev ? prev.createdAt : now, updatedAt: now };
   return { v, versions: vs.concat(v).sort((a, b) => a.from.localeCompare(b.from)) };
 }
-const READ_KINDS = new Set(['sms_unparsed', 'sms_unknown']);
+const READ_KINDS = new Set(['sms_unparsed', 'sms_unknown', 'sms_new_bank_info']);
 // وش انقرأ من الرسالة (بدون النص): يتخزن على الرسالة وقت القراءة والتصحيح
 function readKey(info) { const x = infoSummary(info); if (!x) return null; delete x.type; return x; }
 const readSummary = (k) => k ? Object.assign({ type: SMS_FAMILY_L[k.family] || k.family || '—' }, k) : null;
@@ -4168,7 +4372,7 @@ function validateBackup(obj) {
 }
 
 const Engine = {
-  version: '1.6.1', round2, parseNum, cellToISO, cleanText, sha256Hex, uid, todayISO, addDays, daysBetween, isoDate,
+  version: '1.6.2', round2, parseNum, cellToISO, cleanText, sha256Hex, uid, todayISO, addDays, daysBetween, isoDate,
   CATEGORY_SEED, buildCategoryRecords, Store, STORE_NAMES, DEFAULT_SETTINGS,
   sanitizeText, sanitizeFilename, fingerprintIban, fingerprintAccountNo, fingerprintNum, matchesOwner, normMerchant,
   detectTemplate, signatureOf, parseAlinmaAccount, interpretAlinmaLine, parseAlinmaCard, cardBalanceCheck,
@@ -4185,6 +4389,7 @@ const Engine = {
   refundIndex, refundedOf, refundCandidates, linkRefund, unlinkRefund, addCashPart, removeCashPart, recentWithdrawals, cashExpenseToPart, cashRemaining,
   transferKindOf, setTransferKind, absorbAutoAccounts, migrate141,
   // 1.5.0
+  senderKey, sendersOf, bankOf, bankRec, bankLabel, isIgnoredBank, isTrusted, isNewBank, setBankName, untrustFamily, setSenderIgnored, mergeBanks, unmergeBank, approveBankReading, migrate162, shapeKey, rawSig, OLD_DAYS,
   PRODUCT_CATEGORY_SEED, CITY_SEED, TX150, normTx150, migrate150, carry150, migrate152, splitSmsMerges, sameSmsMessage, migrate160, ensureSeedSubs, PC_MAP, itemCatPair, itemNetInfo, unitemizedParts,
   smsWordVersions, wordVersionAt, smsWordsFor, wordsDate, msgWordsDate, cleanSmsWords, previewSmsWords, applySmsWords, correctTxFromMessage, deleteSmsWordsVersion,
   saveItems, merchantName, invoiceAliasOf, shopsForAlias, defaultShopFor, shopChoices, checkShopName, shopNameIdeas, prettyInvoiceName, setShopName, txShopOnce, addShopForInvoice, setShopDefault, chooseShop, shopChoiceTxs, mergeCatConflict, mergeMerchants, refreshShopChoices,

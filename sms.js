@@ -122,14 +122,15 @@ function normCur(c) {
 
 function classify(text, W) {
   const t = norm(text);
-  if (OTP_STRONG.some(r => r.test(t))) return { cls: 'otp', reason: 'عبارة رمز تحقق أو دخول' };
+  if (OTP_STRONG.some(r => r.test(t))) return { cls: 'otp', code: 'otp', reason: 'عبارة رمز تحقق أو دخول' };
   const amt = extractAmount(t), verb = FIN_VERB.test(t) || !!(W && W.extraVerb && W.extraVerb.test(t)); // 1.6.1: الكلمات اللي أضفتها لنوع العملية تكفي
-  if (amt && DECLINED.test(t)) return { cls: 'informational', reason: 'عملية مرفوضة أو غير مكتملة' };
-  if (amt && REMINDER.test(t) && !DONE.test(t)) return { cls: 'informational', reason: 'تذكير بمبلغ مستحق' };
-  if (amt && verb) return { cls: 'financial', reason: '' };
-  if (OTP_WEAK.test(t) && /\b\d{4,8}\b/.test(t)) return { cls: 'unknown', reason: 'فيها رمز أو رقم قصير؛ تحتاج تأكيدك' };
-  if (INFO.test(t) || (amt && !verb)) return { cls: 'informational', reason: amt ? 'فيها مبلغ بدون حركة' : 'رسالة معلومات' };
-  return { cls: 'unknown', reason: 'ما تعرفت على نوعها' };
+  if (amt && DECLINED.test(t)) return { cls: 'informational', code: 'declined', reason: 'عملية مرفوضة أو غير مكتملة' };
+  if (amt && REMINDER.test(t) && !DONE.test(t)) return { cls: 'informational', code: 'reminder', reason: 'تذكير بمبلغ مستحق' };
+  if (amt && verb) return { cls: 'financial', code: 'financial', reason: '' };
+  if (OTP_WEAK.test(t) && /\b\d{4,8}\b/.test(t)) return { cls: 'unknown', code: 'otp_weak', reason: 'فيها رمز أو رقم قصير؛ تحتاج تأكيدك' };
+  // 1.6.2: «فيها مبلغ بدون حركة» منفصلة عن «رسالة معلومات» عشان رسائل البنك الجديد من هالنوع تنعرض عليك
+  if (INFO.test(t) || (amt && !verb)) return { cls: 'informational', code: INFO.test(t) ? 'info' : 'amount_no_verb', reason: amt ? 'فيها مبلغ بدون حركة' : 'رسالة معلومات' };
+  return { cls: 'unknown', code: 'unknown', reason: 'ما تعرفت على نوعها' };
 }
 
 /* ---------- 1.6.1: كلمات قراءة الرسائل ----------
