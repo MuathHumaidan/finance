@@ -170,6 +170,8 @@ const settings = () => S.store.settings;
 async function persist(label, opts) {
   opts = opts || {};
   let step = null;
+  // 1.7.1: أي جهة صارت «التزام دائم» في هالخطوة تنحفظ خطتها معها (تنتظر جوابك، أو معتمدة إذا آخر 3 دفعات متساوية)
+  if (!opts.noStep) { try { E.syncCommitPlans(S.store); } catch (e) { console.error(e); } }
   if (opts.noStep) S.store.absorb(); else step = S.store.commitStep(label || S.opLabel || 'تعديل', opts.source || 'user');
   if (step && step.source === 'user') S.undoHint = Date.now();
   const ch = S.store.takeChanges();
@@ -225,7 +227,7 @@ function catLabel(tx) {
 }
 function bucketName(key) {
   if (key === '__none' || key == null) return 'بدون تصنيف';
-  if (key === '__person') return 'تحويلات لأشخاص (مؤقت)';
+  if (key === '__person') return 'تحويلات لأشخاص ما صنفتها';
   if (key === '__roundup') return 'تقريب (وجهته غير محددة)';
   return E.catName(store(), key);
 }
@@ -237,17 +239,31 @@ function amountCell(tx) {
   if (['InternalTransfer', 'CreditCardPayment', 'CashDeposit', 'LoanToPerson', 'LoanRepayment'].includes(t)) return `<span class="num neu">⇄ ${fmt(tx.grossAmount)}</span>`;
   return `<span class="num">−${fmt(tx.grossAmount)}</span>`;
 }
+// 1.7.0: شارات المجموعة والمدينة أول شي: «🏷️ المجموعة» لكل مجموعة، و«📍 المدينة» للمعتمدة (يدوي أو موقع أو فترة)،
+// و«📍 المدينة؟» بلون تنبيه لاقتراح موقع ما اعتمدته (بدل «بدون مدينة»). الموقع المتجاهل أو المدينة الحالية كاحتمال: ما يطلع شي
+function placeBadges(tx) {
+  const st = store(), b = [];
+  (tx.groupIds || []).forEach(g => { const G = st.get('groups', g); if (G) b.push(`<span class="b grp">🏷️ ${esc(G.name)}</span>`); });
+  const cityOn = (id) => { const c = id ? st.get('cities', id) : null; return c ? c.name : null; };
+  const ig = E.isIgnored(st, tx, 'city');
+  if (tx.cityId) { const n = cityOn(tx.cityId); if (n) b.push(`<span class="b city">📍 ${esc(n)}</span>`); }
+  else if (E.needsCity(st, tx)) {
+    if (ig) { if (ignoredFilterOn('city')) b.push(`<span class="b n">متجاهلة (المدينة)</span>`); }
+    else if (tx.suggestedCityId && cityOn(tx.suggestedCityId)) b.push(`<span class="b w city">📍 ${esc(cityOn(tx.suggestedCityId))}؟</span>`);
+    else b.push(`<span class="b w">بدون مدينة</span>`);
+  }
+  return b;
+}
 function badges(tx) {
-  const b = [];
+  const b = placeBadges(tx);
   const ins = insOf(tx);
   if (tx.transferSubtype === 'round_up') b.push(`<span class="b n">تقريب</span>`);
   // 1.6.0: فترات التجاهل تخفي علامات التصنيف والمدينة (الأرقام ما تتغير)، والفلتر يعرضها ومعها «متجاهلة»
   const igC = E.isIgnored(store(), tx, 'category'), catMarks = [];
-  if (tx.classificationStatus === 'temporary') catMarks.push(`<span class="b w">تصنيف مؤقت</span>`);
-  if (tx.classificationStatus === 'unclassified') catMarks.push(`<span class="b w">${tx.transferSubtype === 'round_up' ? 'الوجهة غير معروفة' : 'غير مصنف'}</span>`);
+  if (tx.classificationStatus === 'temporary') catMarks.push(`<span class="b w">تحويل لشخص ما صنفته</span>`);
+  if (tx.classificationStatus === 'unclassified') catMarks.push(`<span class="b w">${tx.transferSubtype === 'round_up' ? 'الوجهة غير معروفة' : 'نوعها غير معروف'}</span>`);
   if ((tx.transactionType === 'Payment' || tx.transactionType === 'CashExpense') && !tx.categoryId) catMarks.push(`<span class="b n">بدون تصنيف</span>`);
   if (!igC || tx.transferSubtype === 'round_up') catMarks.forEach(x => b.push(x)); else if (catMarks.length && ignoredFilterOn('category')) b.push(`<span class="b n">متجاهلة</span>`);
-  if (E.needsCity(store(), tx)) { if (!E.isIgnored(store(), tx, 'city')) b.push(`<span class="b w">بدون مدينة</span>`); else if (ignoredFilterOn('city')) b.push(`<span class="b n">متجاهلة (المدينة)</span>`); }
   if (tx.needsReview) b.push(`<span class="b">ما راجعتها</span>`);
   if (tx.shopChoicePending) b.push(`<span class="b w">أي محل؟</span>`);
   if (ins && ins.instrumentOwner === 'unknown' && E.spendEffect(tx) !== 0) b.push(`<span class="b w">مالك الأداة غير محدد</span>`);
@@ -274,10 +290,13 @@ function subLine(tx, withDate) {
   }
   return parts.filter(Boolean).join(' · ');
 }
+let ROWPART = null;
 function txRow(tx, withDate) {
   const sm = S.sel && S.view === 'txs', on = sm && S.sel.has(tx.id);
   const why = S.view === 'txs' && S.q.trim() && S.searchWhy ? S.searchWhy.get(tx.id) : null;
-  return `<div class="tx ${on ? 'sel' : ''}" data-action="${sm ? 'toggleSel' : 'openTx'}" data-id="${tx.id}">${sm ? `<span class="ck">${on ? '✓' : ''}</span>` : ''}${icCircle(txUi(tx))}<div class="m"><div class="t">${esc(txTitle(tx))}</div><div class="s">${subLine(tx, withDate)}</div>${why && why.length ? `<div class="why">${esc(why.slice(0, 2).join(' · '))}</div>` : ''}${badges(tx)}</div><div class="a"><span class="num">${fmt(tx.grossAmount)}</span>${dirBadge(tx)}</div></div>`;
+  const part = ROWPART ? ROWPART.get(tx.id) : null, showPart = part != null && part > 0 && Math.abs(part - tx.grossAmount) > 0.004;
+  const amt = showPart ? `<span class="pamt"><span class="num">${fmt(part)}</span><span class="of">من ${fmt(tx.grossAmount)}</span></span>` : `<span class="num">${fmt(tx.grossAmount)}</span>`;
+  return `<div class="tx ${on ? 'sel' : ''}" data-action="${sm ? 'toggleSel' : 'openTx'}" data-id="${tx.id}">${sm ? `<span class="ck">${on ? '✓' : ''}</span>` : ''}${icCircle(txUi(tx))}<div class="m"><div class="t">${esc(txTitle(tx))}</div><div class="s">${subLine(tx, withDate)}</div>${why && why.length ? `<div class="why">${esc(why.slice(0, 2).join(' · '))}</div>` : ''}${badges(tx)}</div><div class="a">${amt}${dirBadge(tx)}</div></div>`;
 }
 const sortTx = (a, b) => ((b.transactionDate || '') + (b.time || '')).localeCompare((a.transactionDate || '') + (a.time || ''));
 const isCardUnmatched = (t) => t.transactionType === 'CreditCardPayment' && !t.cardPaymentByUser && t.cardPaymentStatus !== 'matched' && !(t.transferLinkStatus === 'linked');
@@ -356,9 +375,19 @@ async function boot() {
     const sp = await E.splitSmsMerges(S.store); if (m152.split + sp.split) S.notice152 = m152.split + sp.split;
     // ترقية 1.6.0: تصنيفات المنتجات صارت فرعية في القائمة الموحدة (أغراضها ومنتجاتها وحدودها معها)
     const m160 = E.migrate160(S.store); if (m160.changed && (m160.placed || []).length) S.askPlace = true;
+    // ترقية 1.7.0: الافتراضي «غير محدد»، «التزام دائم» على الجهة، والأغراض تتبع فاتورتها
+    const m170 = E.migrate170(S.store); if (m170.itemsNowCategorized) S.notice170items = m170.itemsNowCategorized;
+    // ترقية 1.7.1: المجموعات، سؤال اعتماد الالتزامات، والصيغ الثابتة (أشكال رسائلك السابقة تنتظر اعتمادك)
+    let m171 = { changed: false }; try { m171 = E.migrate171(S.store); } catch (e) { console.error(e); } // لو تعثرت ما توقف فتح التطبيق (تنعاد المرة الجاية)
+    try { const w = E.waitingForFormats(S.store); if (w.length) { const p = await E.reprocessMessages(S.store, w, {}); if (p) E.commitSms(S.store, p, { markReview: true }); } } catch (e) { console.error(e); }
+    if (m171.changed && (m171.shapes || (m171.commit && m171.commit.asked) || m171.groupsDropped || S.store.all('messages').length)) S.notice171 = { shapes: m171.shapes, asked: m171.commit ? m171.commit.asked : 0, auto: m171.commit ? m171.commit.auto : 0, groups: m171.groupsDropped };
+    const needDates = !S.store.settings.migrated170dates; if (needDates) { S.store.settings.migrated170dates = true; S.store.put('settings', S.store.settings); }
+    E.sweepPeriods(S.store); // الفترات: اللي وصل وما أخذ مدينته أو مجموعته
     E.detectRecurring(S.store);
     const c2 = S.store.takeChanges(); if (Object.keys(c2.puts).length || Object.keys(c2.removes).length) await DB.apply(c2);
     S.store.startHistory();
+    // 1.7.0: رسائل الليل اللي البنك كتب فيها تاريخ اليوم الجاي: تتصحح بخطوة في «سجل التعديلات» (تقدر تتراجع عنها)
+    if (needDates) { const fx = E.fixNextDayDates(S.store); if (fx.fixed) { S.store.commitStep(`تصحيح تاريخ ${fx.fixed === 1 ? 'عملية' : fx.fixed + ' عمليات'} (رسائل آخر الليل) — تحديث 1.7.0`, 'system'); await DB.apply(S.store.takeChanges()); S.notice170dates = fx.fixed; } }
   } catch (e) {
     $('main').innerHTML = `<div class="card"><h2>تعذر فتح قاعدة البيانات</h2><p>${esc(e && e.message ? e.message : e)}</p><p class="muted">إذا كنت في وضع التصفح الخاص، افتح التطبيق في وضع عادي.</p></div>`;
     return;
@@ -369,6 +398,8 @@ async function boot() {
   if (['home', 'spend', 'txs', 'add', 'accounts', 'more', 'reviewc', 'messages'].includes(initial)) S.view = initial;
   render();
   if (S.askPlace) { S.askPlace = false; setTimeout(() => { if (!$('sheet').innerHTML) sheetPlaceCats(); }, 400); }
+  if (S.notice171) { const n = S.notice171; S.notice171 = null; const show = (left) => setTimeout(() => { if (!$('sheet').innerHTML) sheetNotice171(n); else if (left > 0) show(left - 1); }, left === 6 ? 700 : 5000); show(6); }
+  if (S.notice170dates || S.notice170items) { const a = S.notice170dates, b = S.notice170items; S.notice170dates = S.notice170items = 0; setTimeout(() => toast([a ? `تصحح تاريخ ${a === 1 ? 'عملية وحدة' : a + ' عمليات'} كان البنك كاتب فيها تاريخ اليوم الجاي (تلقاها في سجل التعديلات)` : '', b ? `${b === 1 ? 'غرض واحد' : b + ' أغراض'} صار له تصنيف فاتورته` : ''].filter(Boolean).join('. '), 9000), 900); }
   if (S.notice152) { const n = S.notice152; toast(n === 1 ? 'انفصلت رسالة كانت مدموجة بالغلط مع رسالة ثانية' : `انفصلت ${n === 2 ? 'رسالتين' : n + (n <= 10 ? ' رسائل' : ' رسالة')} كانت مدموجة بالغلط مع رسائل ثانية`, 7000); S.notice152 = 0; }
   // جلب الرسائل تلقائيًا عند الفتح وعند الرجوع للتطبيق (إذا الصندوق معدّ)
   setTimeout(autoFetch, 700);
@@ -397,11 +428,12 @@ const NAV_OF = { income: 'more', deleted: 'txs', categories: 'more', reviewc: 'm
 function render() {
   ensurePeriod();
   const v = S.view;
-  document.body.className = 'v-' + v + (S.sel && v === 'txs' ? ' selmode' : '');
+  document.body.className = 'v-' + v + (S.sel && v === 'txs' ? ' selmode' : '') + (document.body.classList.contains('lock170') ? ' lock170' : ''); // 1.7.0: قفل الخلفية يبقى والنافذة مفتوحة
   $('title').textContent = TITLES[v] || 'المدير المالي';
   $('backBtn').classList.toggle('hide', !(S.navStack.length || NAV_OF[v]));
   S.refunds = E.refundIndex(S.store);
   $('undoBtn').classList.toggle('hide', !S.store.undoStack.length);
+  { const rb = $('redoBtn'); if (rb) rb.classList.toggle('hide', !S.store.redoStack.length); } // 1.7.0: «إعادة» بعد التراجع
   $('fab').classList.toggle('hide', ['add', 'review', 'teach', 'imports', 'teachsms'].includes(v) || !!S.sel);
   const showPeriod = ['txs', 'report'].includes(v);
   const pb = $('periodBtn'); pb.classList.toggle('hide', !showPeriod);
@@ -424,8 +456,10 @@ function go(view, opts) {
   if (opts.filters) { S.filters = Object.assign({ kind: 'all', allTime: false }, opts.filters); S.q = ''; }
   else if (opts.nav && view === 'txs') { S.filters = { kind: 'all', allTime: true }; S.q = ''; }
   if (history.replaceState) history.replaceState(null, '', '#' + view);
-  render(); window.scrollTo(0, 0);
+  render(); window.scrollTo(0, 0); unlockScrollTo(0);
 }
+// 1.7.0: الخلفية مقفولة والنافذة مفتوحة: الانتقال لصفحة ثانية يرجع لأولها لما تتسكّر النافذة
+function unlockScrollTo(y) { try { if (document.body.classList.contains('lock170')) G.scrollY = y || 0; } catch (e) { /* قبل التحميل */ } }
 // نهاية مسار (حفظ أو إلغاء): نرجع للصفحة اللي بدأ منها بدل ما نكدسها مرة ثانية
 function goUp(view) { const top = S.navStack[S.navStack.length - 1]; if (top && top.view === view) return goBack(); go(view, { noPush: true }); }
 function goBack() {
@@ -434,7 +468,7 @@ function goBack() {
   if (p.view !== 'txs') S.sel = null;
   Object.assign(S, { view: p.view, filters: p.filters, q: p.q, period: p.period, selDay: p.selDay, spendBy: p.spendBy, cardOpen: p.cardOpen }); if (p.itemsF) S.itemsF = p.itemsF;
   if (history.replaceState) history.replaceState(null, '', '#' + p.view);
-  render(); window.scrollTo(0, p.y || 0);
+  render(); window.scrollTo(0, p.y || 0); unlockScrollTo(p.y || 0);
 }
 
 /* ---------- الرئيسية ---------- */
@@ -449,7 +483,7 @@ function accCard(a) {
 }
 function vHome() {
   const st = store();
-  const tools = `<div class="tools">${store().undoStack.length ? `<button data-action="undo" aria-label="تراجع">↶</button>` : ''}<button data-action="go" data-view="alerts" aria-label="التنبيهات" style="position:relative">${ico('bell')}${alertsBadge()}</button><button data-action="go" data-view="reviewc" aria-label="المراجعة" style="position:relative">${ico('question')}${reviewBadge()}</button><button data-action="go" data-view="settings" aria-label="الإعدادات">${ico('gear')}</button></div>`;
+  const tools = `<div class="tools">${store().undoStack.length ? `<button class="txtb" data-action="undo" aria-label="تراجع">تراجع</button>` : ''}${store().redoStack.length ? `<button class="txtb" data-action="redo" aria-label="إعادة">إعادة</button>` : ''}<button data-action="go" data-view="alerts" aria-label="التنبيهات" style="position:relative">${ico('bell')}${alertsBadge()}</button><button data-action="go" data-view="reviewc" aria-label="المراجعة" style="position:relative">${ico('question')}${reviewBadge()}</button><button data-action="go" data-view="settings" aria-label="الإعدادات">${ico('gear')}</button></div>`;
   if (!st.all('transactions').length) {
     return `<div class="hero" style="padding-bottom:34px">${tools}<div class="hi">المدير المالي</div><div class="big" style="font-size:28px">ابدأ برفع أول كشف</div><div class="sub">كل شي يُقرأ ويُحفظ على جهازك فقط</div></div>${banners()}
       <div class="card empty">${icCircle({ color: PAL.blue, icon: 'upload' })}<p>ارفع كشف حساب الإنماء أو كشف البطاقة الائتمانية بصيغة Excel.</p><button class="btn p" data-action="pickFile">رفع كشف</button></div>`;
@@ -459,7 +493,7 @@ function vHome() {
   // الرئيسية للصرف فقط: كم صرفت في الدورة. الدخل والأرصدة في صفحة «الدخل» المستقلة
   let h = `<div class="hero" style="padding-bottom:26px">${tools}<div class="hi">صرفك هذي الدورة</div><div class="big">${money(R.spend)}</div><div class="sub">${fperiod(cur)}${R.coverage.periodOpen ? ' · حتى اليوم' : ''}</div>
     <div class="gl">
-      <div class="g" data-action="kpi" data-kind="commitments" data-p="cur">${ico('repeat')}<div><div class="l">الالتزامات المعروفة</div><div class="v">${money(R.commitments)}</div></div></div>
+      <div class="g" data-action="kpi" data-kind="commitments" data-p="cur">${ico('repeat')}<div><div class="l">الالتزامات الدائمة</div><div class="v">${money(R.commitments)}</div></div></div>
       ${homeForecastTile()}
     </div></div>`;
   h += banners();
@@ -486,7 +520,7 @@ function alertCard(R, cur) {
   const st = store(), items = [];
   const unk = st.all('transactions').filter(t => t.transactionType === 'Unknown');
   if (unk.length) items.push(`${cnt(unk.length, 'op')} نوعها غير معروف (${fmt(E.round2(unk.reduce((s, t) => s + t.grossAmount, 0)))})، والخارجة منها داخلة في صرفك. <a data-action="issueTxs" data-kind="unclassified_all">صنّفها</a>`);
-  if (R.temporaryCount) items.push(`${cnt(R.temporaryCount, 'tr')} لأشخاص بتصنيف مؤقت هذي الدورة (${fmt(R.temporarySpend)}). <a data-action="kpi" data-kind="temporary" data-p="cur">حدد تصنيفها</a>`);
+  if (R.temporaryCount) items.push(`${cnt(R.temporaryCount, 'tr')} لأشخاص ما صنفتها هذي الدورة (${fmt(R.temporarySpend)}). <a data-action="kpi" data-kind="temporary" data-p="cur">حدد تصنيفها</a>`);
   const unc = R.categories.find(c => !c.categoryId);
   if (unc && unc.amount) items.push(`صرف بدون تصنيف هذي الدورة (${fmt(unc.amount)}). <a data-action="kpi" data-kind="uncategorized" data-p="cur">صنّفها</a>`);
   const ru = st.all('transactions').filter(isRoundUpUnknown).length;
@@ -509,7 +543,7 @@ function vIncome() {
   const row = (dir, label, val, kind, sub) => `<div class="r" ${kind ? `data-action="kpi" data-kind="${kind}"` : ''}>${dir}<div class="l">${label}${sub ? `<div class="s">${sub}</div>` : ''}</div><div class="v">${val}</div></div>`;
   h += `<div class="card rows">
     ${row(`<span class="dir n">${ico('inn')}</span>`, 'الدخل المؤكد', money(R.income), 'income', cnt(R.incomeItems.length, 'op'))}
-    ${row(`<span class="dir w">${ico('inn')}</span>`, 'داخل غير مصنف', money(R.unclassifiedIn), 'unclassified_in', R.unclassifiedInCount ? cnt(R.unclassifiedInCount, 'op') + ' (تحويلات لك من أشخاص وغيرها)' : 'لا يوجد')}
+    ${row(`<span class="dir w">${ico('inn')}</span>`, 'داخل نوعه غير معروف', money(R.unclassifiedIn), 'unclassified_in', R.unclassifiedInCount ? cnt(R.unclassifiedInCount, 'op') + ' (تحويلات لك من أشخاص وغيرها)' : 'لا يوجد')}
     ${row(`<span class="dir x">${ico('wallet')}</span>`, 'الفائض', money(R.surplus, R.surplus < 0 ? 'neg' : ''), null, `الدخل المؤكد − الإنفاق (${fmt(R.spend)})`)}</div>`;
   h += `<div class="card"><h2 class="soft">دخل الفترة</h2>${R.incomeItems.length ? R.incomeItems.map(id => st.get('transactions', id)).filter(Boolean).sort(sortTx).map(t => txRow(t, true)).join('') : '<div class="muted">ما فيه دخل مسجل في هذي الفترة.</div>'}</div>`;
   const ORD = { checking: 0, savings: 1, credit_card: 2, wallet: 3, unknown: 4, other: 5, cash: 6 };
@@ -656,24 +690,24 @@ function vSpend() {
   if (!sel) {
     if (R.coverage.periodOpen) h += `<div class="banner i">الفترة ما انتهت: الأرقام حتى اليوم.</div>`;
     R.coverage.notes.forEach(n => { h += `<div class="banner w">بيانات «${esc(n.name)}» ناقصة من ${fdate(n.from)} إلى ${fdate(n.to)}، فالأرقام المرتبطة بها ناقصة.</div>`; });
-    const spendSub = [R.temporaryCount ? `منه ${fmt(R.temporarySpend)} تحويلات بتصنيف مؤقت` : '', R.unownedCount ? `و${fmt(R.unownedSpend)} بأدوات مالكها غير محدد` : ''].filter(Boolean).join(' ');
+    const spendSub = [R.temporaryCount ? `منه ${fmt(R.temporarySpend)} تحويلات لأشخاص ما صنفتها` : '', R.unownedCount ? `و${fmt(R.unownedSpend)} بأدوات مالكها غير محدد` : ''].filter(Boolean).join(' ');
     const row = (dir, label, val, kind, sub, cls) => `<div class="r ${cls || ''}" ${kind ? `data-action="kpi" data-kind="${kind}"` : ''}>${dir}<div class="l">${label}${sub ? `<div class="s">${sub}</div>` : ''}</div><div class="v">${val}</div></div>`;
     h += `<div class="card rows">
       ${row(`<span class="dir o">${ico('out')}</span>`, 'الإنفاق الحقيقي', money(R.spend), 'spend', spendSub)}
-      ${row(`<span class="dir x">${ico('repeat')}</span>`, 'الالتزامات المعروفة', money(R.commitments), 'commitments', cnt(R.commitmentItems.length, 'op'))}
+      ${row(`<span class="dir x">${ico('repeat')}</span>`, 'الالتزامات الدائمة', money(R.commitments), 'commitments', cnt(R.commitmentItems.length, 'op'))}
       <details class="more"><summary>أرقام أكثر</summary>
       ${row(`<span class="dir w">${ico('out')}</span>`, 'منه عمليات ما عُرف نوعها', money(R.unclassifiedOut), 'unclassified_out', R.unclassifiedOutCount ? `${cnt(R.unclassifiedOutCount, 'op')}${R.roundUpUnknownCount ? `، منها تقريب ${fmt(R.roundUpUnknown)}` : ''}` : 'لا يوجد', 'sub')}
       ${row(`<span class="dir o">${ico('cash')}</span>`, 'منه سحب نقدي', money(R.cashWithdrawals), 'cash', R.cashWithdrawalsCount ? cnt(R.cashWithdrawalsCount, 'op') : 'لا يوجد', 'sub')}
       ${row(`<span class="dir x">${ico('out')}</span>`, 'ما تنحسب في الصرف', money(R.excludedSpend), 'excluded', R.excludedCount ? cnt(R.excludedCount, 'op') : 'لا يوجد', 'sub')}
       ${row(`<span class="dir x">${ico('swap')}</span>`, 'التحويلات الداخلية', money(R.internal), 'internal', `${cnt(R.internalCount, 'tr')}${R.internalOneSided ? `، ${R.internalOneSided === R.internalCount ? 'كلها' : R.internalOneSided} غير مكتمل الربط` : ''}`, 'sub')}
       ${row(`<span class="dir x">${ico('card')}</span>`, 'سداد البطاقات', money(R.cardPayments), 'card', `${cnt(R.cardPaymentsCount, 'op')}${R.cardPaymentsUnmatched ? `، ${R.cardPaymentsUnmatched === R.cardPaymentsCount ? 'كلها' : R.cardPaymentsUnmatched} غير مطابقة` : ''}`, 'sub')}
-      ${row(`<span class="dir x">${ico('receipt')}</span>`, 'الرسوم', money(R.fees), 'fees', null, 'sub')}
+      ${row(`<span class="dir x">${ico('receipt')}</span>`, 'دفعت رسوم', money(R.fees), 'fees', 'معلومة بس: كل رسوم محسوبة مع عمليتها وتصنيفها', 'sub')}
       </details></div>`;
   }
   h += `<div class="card"><h2 class="soft">وين راحت الدراهم؟</h2>`;
   if (sel && bucket === 'day') {
     const list = st.all('transactions').filter(t => (t.transactionDate || t.postingDate) === sel).sort(sortTx);
-    h += list.length ? list.map(t => txRow(t)).join('') : `<div class="muted">ما فيه عمليات في هذا اليوم.</div>`;
+    h += list.length ? list.map(t => txRow(t)).join('') : `<div class="muted empty-day">ما صرفت شي</div>`;
   } else {
     h += `<div class="seg" style="margin-bottom:12px"><button class="${S.spendBy !== 'card' ? 'on' : ''}" data-action="spendBy" data-v="cat">حسب التصنيف</button><button class="${S.spendBy === 'card' ? 'on' : ''}" data-action="spendBy" data-v="card">حسب البطاقة</button></div>`;
     h += S.spendBy === 'card' ? cardList(R) : whereList(R);
@@ -690,15 +724,18 @@ function vSpend() {
 }
 
 /* ---------- العمليات ---------- */
-const KIND_L = { all: 'الكل', spend: 'إنفاق', income: 'دخل', internal: 'تحويلات داخلية', card: 'سداد بطاقات', card_unmatched: 'سداد بطاقة غير مطابق', unclassified_out: 'خارج ما عُرف نوعه', unclassified_in: 'داخل غير مصنف', unclassified_all: 'غير معروف', temporary: 'تصنيف مؤقت', uncategorized: 'بدون تصنيف', commitments: 'التزامات', roundup: 'تقريب', unowned: 'مالك الأداة غير محدد', fees: 'رسوم', excluded: 'ما تنحسب في الصرف', cash: 'سحب نقدي', refunds: 'استردادات' };
+// 1.7.0: أسماء أوضح («تصنيف مؤقت» ← «تحويلات لأشخاص ما صنفتها»، «خارج ما عُرف نوعه» ← «نوعها غير معروف»)
+const KIND_L = { all: 'الكل', spend: 'إنفاق', income: 'دخل', internal: 'تحويلات داخلية', card: 'سداد بطاقات', card_unmatched: 'سداد بطاقة غير مطابق', unclassified_out: 'نوعها غير معروف (طالعة)', unclassified_in: 'نوعها غير معروف (داخلة)', unclassified_all: 'نوعها غير معروف', temporary: 'تحويلات لأشخاص ما صنفتها', uncategorized: 'بدون تصنيف', commitments: 'الالتزامات الدائمة', roundup: 'تقريب', unowned: 'مالك الأداة غير محدد', fees: 'فيها رسوم', excluded: 'ما تنحسب في الصرف', cash: 'سحب نقدي', refunds: 'استردادات', transfers: 'تحويلات', loans: 'سلف' };
 function matchKind(t, kind) {
   const st = store();
   switch (kind) {
-    case 'all': return true;
+    case 'all': case undefined: case null: return true;
     case 'spend': return !E.isExcluded(st, t) && (E.spendEffect(t) !== 0 || E.feeOf(t) > 0);
     case 'income': return t.transactionType === 'Income';
     case 'internal': return t.transactionType === 'InternalTransfer' && !isRoundUpUnknown(t);
     case 'card': return t.transactionType === 'CreditCardPayment';
+    case 'transfers': return ['InternalTransfer', 'CreditCardPayment', 'CashDeposit'].includes(t.transactionType); // 1.7.0: التحويل بين حساباتك وسداد البطاقات والإيداع النقدي
+    case 'loans': return t.transactionType === 'LoanToPerson' || t.transactionType === 'LoanRepayment'; // 1.7.0: السلف (عطيتها أو رجعت لك)
     case 'card_unmatched': return isCardUnmatched(t);
     case 'unclassified_out': return (t.transactionType === 'Unknown' && t.direction === 'out') || isRoundUpUnknown(t);
     case 'excluded': return E.isExcluded(st, t) && (E.spendEffect(t) !== 0 || E.feeOf(t) > 0);
@@ -716,15 +753,57 @@ function matchKind(t, kind) {
   }
   return true;
 }
-function filteredTxs() {
+// 1.7.0: صف النوع (أزرار ثابتة بدون سحب)
+const TGROUPS = [['all', 'الكل'], ['spend', 'إنفاق'], ['income', 'دخل'], ['transfers', 'تحويلات'], ['loans', 'سلف']];
+// 1.7.0: «يحتاج منك»: كل اللي ينتظر منك قرار، بعدده (المتجاهل بفترة ما ينحسب)
+const NEED_L = { uncategorized: 'بدون تصنيف', noCity: 'بدون مدينة', temporary: 'تحويلات لأشخاص ما صنفتها', unknownType: 'نوعها غير معروف', review: 'ما راجعتها', shop: 'أي محل؟', owner: 'مالك البطاقة غير محدد', cardUnmatched: 'سداد بطاقة غير مطابق' };
+function needsOf(t) {
+  const st = store(), out = [], igC = E.isIgnored(st, t, 'category');
+  if (!igC && t.transactionType !== 'Refund' && matchKind(t, 'uncategorized')) out.push('uncategorized'); // الاسترداد يتبع شراءه
+  if (E.needsCity(st, t) && !E.isIgnored(st, t, 'city')) out.push('noCity');
+  if (!igC && t.classificationStatus === 'temporary') out.push('temporary');
+  if (isRoundUpUnknown(t) || (!igC && t.transactionType === 'Unknown')) out.push('unknownType');
+  if (t.needsReview) out.push('review');
+  if (t.shopChoicePending) out.push('shop');
+  { const i = insOf(t); if (i && i.instrumentOwner === 'unknown' && E.spendEffect(t) !== 0) out.push('owner'); }
+  if (isCardUnmatched(t)) out.push('cardUnmatched');
+  return out;
+}
+// 1.7.0: أنواع العملية في الفلاتر (أكثر من نوع مع بعض) + خاصة
+const FX_TYPES = [['Payment', 'شراء'], ['PersonTransfer', 'تحويل لشخص'], ['CashWithdrawal', 'سحب نقدي'], ['CashExpense', 'مصروف نقدي'], ['Refund', 'استرداد'], ['Income', 'دخل'],
+  ['InternalTransfer', 'تحويل بين حساباتك'], ['CreditCardPayment', 'سداد بطاقة'], ['CashDeposit', 'إيداع نقدي'], ['LoanToPerson', 'سلفة'], ['LoanRepayment', 'سداد سلفة'], ['Unknown', 'نوعها غير معروف'],
+  ['roundup', 'تقريب'], ['excluded', 'ما تنحسب في الصرف']];
+const FX_TYPE_L = Object.fromEntries(FX_TYPES);
+function typeMatch(t, k) { if (k === 'roundup') return t.transferSubtype === 'round_up'; if (k === 'excluded') return matchKind(t, 'excluded'); return t.transactionType === k; }
+// التصنيف المختار (رئيسي أو فرعي أو «بدون تصنيف») على جزء من الإنفاق
+function partMatchCat(p, catId) { if (catId === '__none') return p.cat === '__none'; const c = store().get('categories', catId); return c && c.parentId ? p.sub === catId : p.cat === catId; }
+// «حسب المنتجات»: لكل فاتورة مجموع أغراضها (والغير مفصّل) في التصنيف، مثل صفحة «المنتجات»
+function productNets(f) {
+  const per = f.allTime ? null : S.period, m = new Map();
+  E.itemRows(store(), per, { productCategoryId: f.categoryId === '__none' ? null : f.categoryId }).forEach(r => { if (r.net > 0.004) m.set(r.tx.id, E.round2((m.get(r.tx.id) || 0) + r.net)); });
+  return m;
+}
+function filteredTxs(opts) {
+  opts = opts || {};
   const f = S.filters, q = S.q.trim().toLowerCase(), st = store(), SQ = q ? E.searchQuery(S.q) : null;
   S.searchWhy = new Map();
   // قوائم الصرف (تصنيف أو نوع صرف) تمشي على نفس تاريخ الأرقام: الاسترداد المربوط على تاريخ شرائه
-  const bySpend = !!f.categoryId || !!f.nec || !!f.rate || !!f.savings || !!f.cityId || ['spend', 'uncategorized', 'excluded', 'cash'].includes(f.kind);
-  if (f.txIds) { const ids = new Set(f.txIds); return st.all('transactions').filter(t => ids.has(t.id)).sort(sortTx); }
-  let list = f.allTime ? st.all('transactions') : st.all('transactions').filter(t => { const d = bySpend ? E.spendDate(st, t) : (t.transactionDate || t.postingDate); return d >= S.period.start && d <= S.period.end; });
+  const bySpend = !!f.categoryId || !!f.nec || !!f.rate || !!f.savings || !!f.cityId || ['spend', 'uncategorized', 'excluded', 'cash'].includes(f.kind) || f.group === 'spend';
+  const prod = !f.txIds && f.categoryId && f.catBasis === 'products' ? productNets(f) : null; S.prodNet = prod;
+  let list;
+  if (f.txIds) { const ids = new Set(f.txIds); list = st.all('transactions').filter(t => ids.has(t.id)); } // قائمة محددة (من رقم): صف النوع و«يحتاج منك» والبحث تشتغل عليها
+  else list = f.allTime ? st.all('transactions') : st.all('transactions').filter(t => { const d = bySpend ? E.spendDate(st, t) : (t.transactionDate || t.postingDate); return d >= S.period.start && d <= S.period.end; });
+  if (f.txIds) return list.filter(t => {
+    if (f.group && f.group !== 'all' && !matchKind(t, f.group)) return false;
+    if (f.types && f.types.length && !f.types.some(k => typeMatch(t, k))) return false;
+    if (!opts.noNeed && f.need) { const ns = needsOf(t); if (f.need === 'any' ? !ns.length : !ns.includes(f.need)) return false; }
+    if (q) { const why = E.searchTx(st, t, SQ) || (txTitle(t).toLowerCase().includes(q) || catLabel(t).toLowerCase().includes(q) ? [] : null); if (!why) return false; S.searchWhy.set(t.id, why); }
+    return true;
+  }).sort(sortTx);
   list = list.filter(t => {
     if (!matchKind(t, f.kind)) return false;
+    if (f.group && f.group !== 'all' && !matchKind(t, f.group)) return false;
+    if (f.types && f.types.length && !f.types.some(k => typeMatch(t, k))) return false;
     if (f.accountId && t.accountId !== f.accountId) return false;
     if (f.instrumentId && t.instrumentId !== f.instrumentId) return false;
     if (f.noIns && t.instrumentId) return false;
@@ -733,10 +812,12 @@ function filteredTxs() {
     if (f.merchantId && t.merchantId !== f.merchantId) return false;
     if (f.beneficiaryId && t.beneficiaryId !== f.beneficiaryId) return false;
     if (f.categoryId) {
-      // نفس توزيع الأرقام: السحب النقدي المقسّم يطلع تحت تصنيف كل جزء، والرسوم تحت «رسوم»
-      if (!E.spendParts(store(), t).some(p => p.cat === f.categoryId)) return false;
+      // نفس توزيع الأرقام: السحب النقدي المقسّم يطلع تحت تصنيف كل جزء، والرسوم (1.7.0) مع عمليتها
+      if (prod) { if (!prod.has(t.id)) return false; }
+      else if (!E.spendParts(store(), t).some(p => partMatchCat(p, f.categoryId))) return false;
     }
     if (!match150(t, f)) return false;
+    if (!opts.noNeed && f.need) { const ns = needsOf(t); if (f.need === 'any' ? !ns.length : !ns.includes(f.need)) return false; }
     if (q) {
       // 1.6.0: البحث في كل شي (الأغراض، الملاحظات، التصنيفات، المدينة، المجموعات، المبالغ) مع سبب الظهور
       const why = E.searchTx(st, t, SQ) || (txTitle(t).toLowerCase().includes(q) || catLabel(t).toLowerCase().includes(q) ? [] : null);
@@ -747,45 +828,77 @@ function filteredTxs() {
   });
   return list.sort(sortTx);
 }
-// سطر الفلاتر (ومعه كلمة البحث)؛ يتحدث مع الكتابة في البحث
+function needCounts() {
+  const c = { total: 0 }; Object.keys(NEED_L).forEach(k => { c[k] = 0; });
+  filteredTxs({ noNeed: true }).forEach(t => { const ns = needsOf(t); if (ns.length) c.total++; ns.forEach(k => { c[k]++; }); });
+  return c;
+}
+// الفلاتر الشغالة: كل وحدة فقاعة عليها ×
+function activeFilterChips(f) {
+  const st = store(), out = [], add = (k, l) => out.push({ k, l });
+  if (f.kind && f.kind !== 'all') add('kind', KIND_L[f.kind] || f.kind);
+  (f.types || []).forEach(k => add('type:' + k, FX_TYPE_L[k] || k));
+  if (f.categoryId) add('categoryId', (f.categoryId === '__none' ? 'بدون تصنيف' : String(f.categoryId).startsWith('__') ? bucketName(f.categoryId) : pcName(f.categoryId)) + (f.catBasis === 'products' ? ' (حسب المنتجات)' : ''));
+  if (f.accountId) { const a = accOf(f.accountId); add('accountId', a ? a.name : 'حساب'); }
+  if (f.instrumentId) { const i = st.get('instruments', f.instrumentId); add('instrumentId', i ? i.label : 'أداة'); }
+  if (f.noIns) add('noIns', 'بدون أداة دفع');
+  if (f.method) add('method', METHOD_L[f.method] || f.method);
+  if (f.source) add('source', SRC_L[f.source] || f.source);
+  if (f.merchantId) { const m = st.get('merchants', f.merchantId); add('merchantId', m ? E.merchantName(m) : 'تاجر'); }
+  if (f.beneficiaryId) { const b = st.get('beneficiaries', f.beneficiaryId); add('beneficiaryId', b ? b.name : 'مستفيد'); }
+  if (f.nec) add('nec', NEC_L[f.nec]);
+  if (f.cityId) add('cityId', 'المدينة: ' + cityName(f.cityId) + (f.cityMode === 'withGps' ? ' (مع اقتراحات الموقع)' : ''));
+  if (f.noCity) add('noCity', 'بدون مدينة');
+  if (f.groupId) { const g = st.get('groups', f.groupId); add('groupId', 'المجموعة: ' + (g ? g.name : '—')); }
+  if (f.rate) add('rate', f.label || 'الإنفاق المتغير');
+  if (f.savings) add('savings', 'مؤهل للتوفير' + (f.savingsCat ? ': ' + bucketName(f.savingsCat) : ''));
+  if (f.txIds) add('txIds', f.label || 'عمليات محددة');
+  if (S.q.trim()) add('q', `بحث: «${S.q.trim()}»`);
+  if (!f.allTime && !f.txIds) add('period', fperiod(S.period));
+  return out;
+}
 function filtersLine() {
-  const f = S.filters, active = [];
-  if (f.kind !== 'all') active.push(KIND_L[f.kind]);
-  if (f.categoryId) active.push(bucketName(f.categoryId === '__none' ? null : f.categoryId));
-  if (f.accountId) { const a = accOf(f.accountId); active.push(a ? a.name : 'حساب'); }
-  if (f.instrumentId) { const i = store().get('instruments', f.instrumentId); active.push(i ? i.label : 'أداة'); }
-  if (f.method) active.push(METHOD_L[f.method] || f.method);
-  if (f.source) active.push(SRC_L[f.source] || f.source);
-  if (f.merchantId) { const m = store().get('merchants', f.merchantId); active.push(m ? E.merchantName(m) : 'تاجر'); }
-  if (f.beneficiaryId) { const b = store().get('beneficiaries', f.beneficiaryId); active.push(b ? b.name : 'مستفيد'); }
-  filtersLine150(f).forEach(x => active.push(x));
-  if (S.q.trim()) active.push(`بحث: «${S.q.trim()}»`);
-  if (!f.allTime && !f.txIds) active.push(fperiod(S.period));
-  return active.length ? `<div class="small muted" style="margin-top:6px">الفلاتر: ${esc(active.join(' + '))} — <a href="#" data-action="clearFilters">مسح</a></div>` : '';
+  const chips = activeFilterChips(S.filters);
+  if (!chips.length) return '';
+  return `<div class="fca-w">${chips.map(c => `<span class="fca"><span>${esc(c.l)}</span><button type="button" data-action="fxClear" data-k="${esc(c.k)}" aria-label="شيل الفلتر">×</button></span>`).join('')}${chips.length > 1 ? `<a class="fca-all" data-action="clearFilters">مسح الكل</a>` : ''}</div>`;
+}
+function needRow(f) {
+  const c = needCounts(); if (!c.total && !f.need) return '';
+  let h = `<div class="needs"><button class="chip need ${f.need ? 'on' : ''}" data-action="needToggle">${ico('alert')}<span>يحتاج منك</span><b class="num">${c.total}</b></button>`;
+  if (f.need) h += Object.keys(NEED_L).filter(k => c[k] || f.need === k).map(k => `<button class="chip nsub ${f.need === k ? 'on' : ''}" data-action="needPick" data-k="${k}">${NEED_L[k]} <b class="num">${c[k]}</b></button>`).join('');
+  return h + '</div>';
 }
 function vTxs() {
   const f = S.filters, list = filteredTxs();
-  let h = `<div class="card noprint" style="padding:10px"><input type="search" id="q" placeholder="ابحث في كل شي: محل، غرض، مبلغ، ملاحظة، مدينة، مجموعة…" value="${esc(S.q)}" data-input="search">
-    <div class="chips" style="margin-top:8px">${['all', 'spend', 'income', 'uncategorized', 'temporary', 'unclassified_out', 'internal', 'card'].map(k => `<button class="chip ${f.kind === k ? 'on' : ''}" data-action="setKind" data-kind="${k}">${KIND_L[k]}</button>`).join('')}<button class="chip" data-action="filterSheet">فلاتر أكثر…</button><button class="chip ${S.sel ? 'on' : ''}" data-action="${S.sel ? 'selEnd' : 'selStart'}">${S.sel ? 'إنهاء التحديد' : 'تحديد'}</button></div>
+  const nfc = activeFilterChips(f).filter(x => !['q', 'period'].includes(x.k)).length;
+  let h = `<div class="card noprint" style="padding:10px"><div class="srch"><input type="search" id="q" placeholder="ابحث في كل شي: محل، غرض، مبلغ، ملاحظة، مدينة، مجموعة…" value="${esc(S.q)}" data-input="search"><button type="button" class="fbtn ${nfc ? 'on' : ''}" data-action="filterSheet" aria-label="الفلاتر">${ico('filter')}${nfc ? `<span class="fcnt">${nfc}</span>` : ''}</button></div>
+    <div class="tseg">${TGROUPS.map(([k, l]) => `<button class="${(f.group || 'all') === k ? 'on' : ''}" data-action="setGroup" data-g="${k}">${l}</button>`).join('')}</div>
+    <div id="needrow">${needRow(f)}</div>
     <div id="fline">${filtersLine()}</div></div>`;
   const nDel = store().all('deletedTxs').length;
   return h + `<div id="txlist">${txListHtml(list)}</div>` + (nDel && !S.sel ? `<div class="card"><div class="linkrow" data-action="go" data-view="deleted">${ico('trash')}<span>المحذوفة (${nDel})</span><span class="sp"></span>${ico('chevL', 'chev')}</div></div>` : '') + selBar();
 }
 function txListHtml(list) {
   list = list || filteredTxs();
-  const st = store();
-  // أثرها على الإنفاق: نفس توزيع الأرقام (المستثنى صفر، والتصنيف المختار بحصته بس)
-  const total = E.round2(list.reduce((s, t) => s + txImpact(t, S.filters), 0));
-  let h = `<div class="muted small" style="margin:0 2px 6px">${cnt(list.length, 'op')}${total ? ` · أثرها على الإنفاق ${fmt(total)}` : ''}</div>`;
-  void st;
+  const f = S.filters, prod = f.categoryId && f.catBasis === 'products' ? S.prodNet : null;
+  // أثرها على الإنفاق: نفس توزيع الأرقام (المستثنى صفر، والتصنيف المختار بحصته بس). «حسب المنتجات»: مجموع الأغراض
+  const imp = new Map(list.map(t => [t.id, prod ? (prod.get(t.id) || 0) : txImpact(t, f)]));
+  const total = E.round2(Array.from(imp.values()).reduce((s, v) => s + v, 0));
+  const partial = !!(prod || f.categoryId || f.nec || f.rate || f.savings || f.groupId);
+  const selk = S.view === 'txs' && !S.sel ? ` <a class="selk" data-action="selStart">تحديد</a>` : '';
+  let h = `<div class="cntline muted small"><span>${cnt(list.length, 'op')}${total ? ` · ${prod ? 'مجموع الأغراض' : 'أثرها على الإنفاق'} ${fmt(total)}` : ''}</span>${selk}</div>`;
   if (!list.length) return h + `<div class="card empty">لا توجد عمليات بهذه الفلاتر.</div>`;
   let day = null, open = false;
   const limit = S.txLimit || 300;
-  list.slice(0, limit).forEach(t => {
-    const d = t.transactionDate || t.postingDate;
-    if (d !== day) { if (open) h += `</div>`; h += `<div class="day">${fday(d)}</div><div class="txs">`; day = d; open = true; }
-    h += txRow(t);
-  });
+  // 1.7.0: الجزء اللي يخص الفلتر من العملية (مثل جزء السحب أو الغرض): «200 من 500»
+  ROWPART = partial ? imp : null;
+  try {
+    list.slice(0, limit).forEach(t => {
+      const d = t.transactionDate || t.postingDate;
+      if (d !== day) { if (open) h += `</div>`; h += `<div class="day">${fday(d)}</div><div class="txs">`; day = d; open = true; }
+      h += txRow(t);
+    });
+  } finally { ROWPART = null; }
   if (open) h += `</div>`;
   if (list.length > limit) h += `<div style="text-align:center;margin:14px"><button class="btn" data-action="moreTx">عرض المزيد (${list.length - limit})</button></div>`;
   return h;
@@ -848,10 +961,14 @@ function vReview() {
   const tile = (l, v, sub) => `<div class="kpi" style="cursor:default"><div class="l">${l}</div><div class="v num">${v}</div>${sub ? `<div class="s">${sub}</div>` : ''}</div>`;
   h += `<div class="kpis k5">${tile('عمليات جديدة', s.newTx)}${tile('تندمج تلقائيًا', s.autoMerged, 'موجودة من مصدر سابق')}${tile('تكرار محتمل', s.possible, s.possible ? 'تحتاج قرارك تحت' : '')}${tile('تحويلات داخلية', s.internal)}${tile('سداد بطاقات', s.cardPayments)}</div>`;
   if (s.deletedAgain) h += `<div class="banner w">${cnt(s.deletedAgain, 'op')} في هذا الملف حذفتها قبل. تبقى محذوفة إلا إذا اخترت «رجّعها» تحت.</div>`;
-  h += `<div class="kpis k5">${tile('تقريب', s.roundUps, 'ينحسب صرف لين تحدد وجهته')}${tile('تحويلات لأشخاص', s.personTransfers, s.temporary ? (s.temporary === s.personTransfers ? 'كلها بتصنيف مؤقت' : `${s.temporary} بتصنيف مؤقت`) : '')}${tile('غير مصنفة', s.unclassified)}${tile('مشتريات بدون تصنيف', s.uncategorized)}${tile('تجار جدد بدون تصنيف', s.unknownMerchants)}</div>`;
+  h += `<div class="kpis k5">${tile('تقريب', s.roundUps, 'ينحسب صرف لين تحدد وجهته')}${tile('تحويلات لأشخاص', s.personTransfers, s.temporary ? (s.temporary === s.personTransfers ? 'كلها ما تصنفت' : `${s.temporary} ما تصنفت`) : '')}${tile('غير مصنفة', s.unclassified)}${tile('مشتريات بدون تصنيف', s.uncategorized)}${tile('تجار جدد بدون تصنيف', s.unknownMerchants)}</div>`;
   const newAccs = Array.from(p.newAccounts.values()).filter(a => a.id !== p.account.id);
   const newIns = Array.from(p.newInstruments.values());
   if (newAccs.length || newIns.length) h += `<div class="card"><h2>بيضاف</h2>${newAccs.map(a => `<div class="small">• حساب «${esc(a.name)}» (لك، نوعه ${ACC_L[a.type]})</div>`).join('')}${newIns.map(i => `<div class="small">• أداة «${esc(i.label)}» (المالك: ${OWNER_L[i.instrumentOwner]})</div>`).join('')}</div>`;
+  // 1.7.0: سطور تاريخها بعد اليوم: ما تنحفظ إلا إذا أكدتها
+  const fut = p.msgRecords ? [] : p.txs.filter(t => E.futureTx(t, E.todayISO()));
+  if (fut.length) h += `<div class="card"><h2>تاريخ في المستقبل (${fut.length})</h2><p class="small muted">هذي السطور تاريخها بعد اليوم (غالبًا خطأ في الملف). ما تنحفظ إلا إذا أكدت إن التاريخ صحيح.</p>${fut.map(a => { const on = S.decisions['future:' + a.id] === 'ok';
+    return `<div class="pair"><div><span class="b w">تاريخ في المستقبل</span> <b>${esc(a.merchantRaw || a.beneficiaryRaw || '')}</b> · ${fdate(a.transactionDate || a.postingDate, true)} · ${num(a.grossAmount)}</div><div class="seg"><button class="${!on ? 'on' : ''}" data-action="decide" data-id="future:${a.id}" data-val="">لا تحفظها</button><button class="${on ? 'on' : ''}" data-action="decide" data-id="future:${a.id}" data-val="ok">التاريخ صحيح، احفظها</button></div></div>`; }).join('')}</div>`;
   // التكرار المحتمل
   if (p.matches.review.length) {
     const txById = new Map(p.txs.map(t => [t.id, t]));
@@ -941,10 +1058,11 @@ function vMore() {
   </div></div><div class="card"><div class="list">
     ${item('categories', 'التصنيفات', 'أضف وعدّل واحذف التصنيفات الرئيسية والفرعية', 'grid', PAL.orange)}
     ${item('rules', 'القواعد', 'صنّف تلقائيًا حسب التاجر أو المستفيد أو النص أو المبلغ', 'repeat', PAL.violet)}
-    ${item('banks', 'البنوك', 'سمّ كل بنك، والأنواع اللي اعتمدتها منه، وتجاهل مرسل مو بنك', 'bank', PAL.aqua)}
-    ${item('smswords', 'كلمات قراءة الرسائل', 'الكلمات اللي يعرف منها نوع الرسالة ووسيلة الدفع واسم المحل', 'msg', PAL.blue)}
+    ${item('formats', 'الصيغ' + (pendingFormats().length ? ` <span class="cnt">${pendingFormats().length}</span>` : ''), 'صيغ الرسائل المعتمدة: الرسالة تنقرأ بس إذا طابقت صيغة', 'msg', PAL.green)}
+    ${item('banks', 'البنوك', 'سمّ كل بنك، وشوف صيغه وأشكال تواريخه، وتجاهل مرسل مو بنك', 'bank', PAL.aqua)}
+    ${item('smswords', 'كلمات قراءة الرسائل', 'كلمات الاقتراح (نوع الرسالة واسم المحل) ووسيلة الدفع', 'msg', PAL.blue)}
     ${item('limits', 'حدود الصرف', 'حد لكل تصنيف (حسب الفواتير أو المنتجات) أو للإنفاق الكلي', 'wallet', PAL.green)}
-    ${item('ignore', 'فترات التجاهل', 'فترة ما تبي فيها علامات المدينة أو التصنيف', 'cal', PAL.gray)}
+    ${item('ignore', 'الفترات', 'مدينة أو مجموعة أو تجاهل علامات، من تاريخ لتاريخ', 'cal', PAL.gray)}
     ${item('audit', 'سجل التعديلات', 'كل تعديل مع التراجع والإعادة', 'list', PAL.gray)}
     ${item('settings', 'الإعدادات', 'الدورة، يوم الراتب، أسماؤك، وجهة التقريب', 'gear', PAL.gray)}
     ${item('backup', 'النسخ الاحتياطي', 'تصدير واستعادة', 'shield', PAL.green)}
@@ -974,6 +1092,7 @@ function vSettings() {
     <div class="card"><h2>أسماؤك كما تظهر في الكشوف</h2><p class="small muted">أي تحويل من أو إلى هذي الأسماء يُعتبر تحويلًا داخليًا. اسم في كل سطر.</p><textarea id="aliases" rows="4">${esc((s.ownerAliases || []).join('\n'))}</textarea></div>
     <div class="card"><h2>التصنيفات</h2><p class="small muted">أضف تصنيف رئيسي أو فرعي، وغيّر الاسم والإيموجي واللون والخصائص.</p><button class="btn" data-action="go" data-view="categories">إدارة التصنيفات</button></div>
     ${settingsCityCard()}
+    ${commitSettingsCard()}
     <div class="card"><h2>وجهة التقريب</h2><p class="small">الحالية: <b>${esc(destLabel)}</b></p><button class="btn" data-action="setRoundUp">تغيير</button></div>
     <div class="card"><h2>تذكير النسخة الاحتياطية</h2><label class="f">ذكّرني إذا مرّ (يوم)</label><input type="number" id="bkdays" min="1" max="60" value="${s.backupReminderDays || 7}"></div>
     <div class="card"><button class="btn p w100" data-action="saveSettings">حفظ الإعدادات</button></div>
@@ -1017,13 +1136,14 @@ function catFormHtml(c, parentId, full, keep) {
     <label class="f">اللون</label><input type="hidden" id="ce_color" value="${esc(col)}"><div class="colors"><button type="button" data-action="ceColor" data-c="" class="auto ${!col ? 'on' : ''}">تلقائي</button>${CAT_COLORS.map(x => `<button type="button" data-action="ceColor" data-c="${x}" class="${col === x ? 'on' : ''}" style="background:${PAL[x]}" aria-label="${x}"></button>`).join('')}</div>`;
   if (full) {
     const opt = (v, l, cur) => `<option value="${v}" ${String(cur) === String(v) ? 'selected' : ''}>${l}</option>`;
-    const inh = isMain ? '' : opt('', 'يتبع الرئيسي', '');
-    const cur = (key, dflt) => { const v = val(key, c ? c[key] : dflt); return v === null || v === undefined ? '' : String(v); };
-    h += `<div class="grid2"><div><label class="f">التكرار الافتراضي</label><select id="ce_rec">${inh}${opt('recurring', 'متكرر', cur('defaultRecurrenceType', isMain ? 'variable' : null))}${opt('variable', 'متغير', cur('defaultRecurrenceType', isMain ? 'variable' : null))}</select></div>
-      <div><label class="f">الضرورة الافتراضية</label><select id="ce_nec">${isMain ? opt('', 'غير محددة', cur('defaultNecessityType', null)) : inh}${opt('essential', 'ضروري', cur('defaultNecessityType', null))}${opt('discretionary', 'اختياري', cur('defaultNecessityType', null))}</select></div>
-      <div><label class="f">التزام</label><select id="ce_commit">${inh}${opt('false', 'لا', cur('isCommitment', isMain ? false : null))}${opt('true', 'نعم', cur('isCommitment', isMain ? false : null))}</select></div>
-      <div><label class="f">يدخل فرص التوفير</label><select id="ce_save">${inh}${opt('false', 'لا', cur('savingsEligible', isMain ? false : null))}${opt('true', 'نعم', cur('savingsEligible', isMain ? false : null))}</select></div></div>
-      <p class="small muted">«التزام» يدخل رقم «الالتزامات المعروفة» إذا كانت العملية متكررة.</p>`;
+    // 1.7.0: كل خاصية تبدأ «غير محدد» وانت تحددها. الفرعي «يتبع الرئيسي»
+    const inh = isMain ? opt('', 'غير محدد', '') : opt('', 'يتبع الرئيسي', '');
+    const cur = (key) => { const v = val(key, c ? c[key] : null); return v === null || v === undefined ? '' : String(v); };
+    h += `<div class="grid2"><div><label class="f">التكرار</label><select id="ce_rec">${inh.replace('selected', '')}${opt('recurring', 'متكرر', cur('defaultRecurrenceType'))}${opt('variable', 'متغير', cur('defaultRecurrenceType'))}</select></div>
+      <div><label class="f">الضرورة</label><select id="ce_nec">${inh}${opt('essential', 'ضروري', cur('defaultNecessityType'))}${opt('discretionary', 'كمالي', cur('defaultNecessityType'))}</select></div>
+      <div><label class="f">التزام دائم</label><select id="ce_commit">${inh}${opt('true', 'نعم', cur('isCommitment'))}${opt('false', 'لا', cur('isCommitment'))}</select></div>
+      <div><label class="f">يدخل فرص التوفير</label><select id="ce_save">${inh}${opt('true', 'نعم', cur('savingsEligible'))}${opt('false', 'لا', cur('savingsEligible'))}</select></div></div>
+      <p class="small muted">«التزام دائم» يدخل «الالتزامات الدائمة» (ما يحتاج تكون متكررة). المحل أو المستفيد أو العملية نفسها تقدر تغيّره لها.</p>`;
   }
   return h;
 }
@@ -1036,8 +1156,8 @@ function readCatForm(full) {
   const v = (id) => $(id) ? $(id).value : undefined;
   const d = { name: v('ce_name'), parentId: v('ce_parent') || null, emoji: oneEmoji(v('ce_emoji')), color: v('ce_color') || null };
   if (full) {
-    const main = !d.parentId, b = (x) => x === '' ? (main ? false : null) : x === 'true';
-    d.defaultRecurrenceType = v('ce_rec') || (main ? 'variable' : null);
+    const b = (x) => x === '' || x === undefined ? null : x === 'true';
+    d.defaultRecurrenceType = v('ce_rec') || null;
     d.defaultNecessityType = v('ce_nec') || null;
     d.isCommitment = b(v('ce_commit')); d.savingsEligible = b(v('ce_save'));
   }
@@ -1092,12 +1212,12 @@ function vReport() {
   if (R.coverage.periodOpen) h += `<p class="small"><b>ملاحظة:</b> الفترة ما انتهت؛ الأرقام حتى تاريخ إعداد التقرير.</p>`;
   R.coverage.notes.forEach(n => { h += `<p class="small"><b>بيانات ناقصة:</b> «${esc(n.name)}» لا يغطي الفترة من ${fdate(n.from)} إلى ${fdate(n.to)}.</p>`; });
   h += `<h2>الملخص</h2><div class="rk"><div><div class="l">الدخل المؤكد</div><div class="v">${num(R.income)}</div></div><div><div class="l">الإنفاق الحقيقي</div><div class="v">${num(R.spend)}</div></div><div><div class="l">الفائض</div><div class="v">${num(R.surplus)}</div></div>
-    <div><div class="l">منه ما عُرف نوعه</div><div class="v">${num(R.unclassifiedOut)}</div></div><div><div class="l">داخل غير مصنف</div><div class="v">${num(R.unclassifiedIn)}</div></div><div><div class="l">الالتزامات المعروفة</div><div class="v">${num(R.commitments)}</div></div>
+    <div><div class="l">منه ما عُرف نوعه</div><div class="v">${num(R.unclassifiedOut)}</div></div><div><div class="l">داخل غير مصنف</div><div class="v">${num(R.unclassifiedIn)}</div></div><div><div class="l">الالتزامات الدائمة</div><div class="v">${num(R.commitments)}</div></div>
     <div><div class="l">التحويلات الداخلية</div><div class="v">${num(R.internal)}</div></div><div><div class="l">سداد البطاقات</div><div class="v">${num(R.cardPayments)}</div></div><div><div class="l">الرسوم</div><div class="v">${num(R.fees)}</div></div></div>`;
-  if (R.temporaryCount || R.unownedCount) h += `<p class="small">منه ${fmt(R.temporarySpend)} تحويلات لأشخاص بتصنيف مؤقت${R.unownedCount ? `، و${fmt(R.unownedSpend)} بأدوات مالكها غير محدد` : ''}.</p>`;
+  if (R.temporaryCount || R.unownedCount) h += `<p class="small">منه ${fmt(R.temporarySpend)} تحويلات لأشخاص ما صنفتها${R.unownedCount ? `، و${fmt(R.unownedSpend)} بأدوات مالكها غير محدد` : ''}.</p>`;
   h += `<h2>الدخل</h2><table><thead><tr><th>التاريخ</th><th>البيان</th><th>النوع</th><th class="n">المبلغ</th></tr></thead><tbody>${rowsTx(R.incomeItems) || '<tr><td colspan="4">لا يوجد</td></tr>'}</tbody></table>`;
   h += `<h2>الإنفاق حسب التصنيف</h2><table><thead><tr><th>التصنيف</th><th class="n">المبلغ</th><th class="n">النسبة</th></tr></thead><tbody>${R.categories.filter(c => c.amount).map(c => `<tr><td><b>${esc(bucketName(c.categoryId))}</b></td><td class="n"><b>${num(c.amount)}</b></td><td class="n"><span class="num">${R.spend ? Math.round(c.amount / R.spend * 100) : 0}%</span></td></tr>${c.subs.length > 1 || (c.subs[0] && c.subs[0].subcategoryId) ? c.subs.map(s => `<tr><td class="small" style="padding-inline-start:18px">${esc(s.subcategoryId ? (st.get('categories', s.subcategoryId) || {}).name : 'بدون فرعي')}</td><td class="n small">${num(s.amount)}</td><td></td></tr>`).join('') : ''}`).join('')}</tbody></table>`;
-  h += `<h2>الالتزامات المعروفة</h2><table><thead><tr><th>التاريخ</th><th>الجهة</th><th>التصنيف</th><th class="n">المبلغ</th></tr></thead><tbody>${rowsTx(R.commitmentItems) || '<tr><td colspan="4">لا يوجد</td></tr>'}</tbody></table>`;
+  h += `<h2>الالتزامات الدائمة</h2><table><thead><tr><th>التاريخ</th><th>الجهة</th><th>التصنيف</th><th class="n">المبلغ</th></tr></thead><tbody>${rowsTx(R.commitmentItems) || '<tr><td colspan="4">لا يوجد</td></tr>'}</tbody></table>`;
   const itx = all.filter(t => t.transactionType === 'InternalTransfer' && !isRoundUpUnknown(t) && !(t.transferLinkStatus === 'linked' && t.direction === 'in'));
   h += `<h2>التحويلات الداخلية</h2><table><thead><tr><th>التاريخ</th><th>البيان</th><th>الحالة</th><th class="n">المبلغ</th></tr></thead><tbody>${itx.map(t => `<tr><td>${fdate(t.transactionDate)}</td><td>${esc(txTitle(t))} (${t.direction === 'out' ? 'خارج' : 'داخل'})</td><td>${t.transferLinkStatus === 'linked' ? 'مربوط بطرفيه' : 'غير مكتمل الربط'}</td><td class="n">${num(t.principalAmount)}</td></tr>`).join('') || '<tr><td colspan="4">لا يوجد</td></tr>'}</tbody></table>`;
   const ctx = all.filter(t => t.transactionType === 'CreditCardPayment' && !(t.transferLinkStatus === 'linked' && t.direction === 'in'));
@@ -1134,24 +1254,24 @@ function vMethods() {
   <table><thead><tr><th>النوع</th><th>الإنفاق</th><th>الدخل (صفحة «الدخل»)</th></tr></thead><tbody>
   <tr><td>دفع (شراء، فاتورة، قسط، تبرع، رسوم)</td><td>+ الأصل</td><td>0</td></tr>
   <tr><td>سحب نقدي</td><td>+ الأصل، تحت «سحب نقدي» أو الأجزاء اللي قسّمته عليها</td><td>0</td></tr>
-  <tr><td>تحويل لشخص</td><td>+ (تصنيف مؤقت لين تصنفه)</td><td>0</td></tr>
+  <tr><td>تحويل لشخص</td><td>+ (ينحسب صرف حتى لو ما صنفته)</td><td>0</td></tr>
   <tr><td>عملية خارجة ما عُرف نوعها</td><td>+ الإجمالي، تحت «بدون تصنيف»</td><td>0</td></tr>
   <tr><td>تقريب وجهته غير محددة</td><td>+ تحت «تقريب (وجهته غير محددة)» لين تحدد وجهته</td><td>0</td></tr>
   <tr><td>تحويل بين حساباتك، سداد بطاقة، إيداع نقدي، سلفة وسدادها</td><td>0</td><td>0</td></tr>
   <tr><td>استرداد</td><td>− من دورة الشراء وتصنيفه إذا ربطته بشرائه، وإلا من دورته هو ونفس تصنيف التاجر</td><td>0</td></tr>
   <tr><td>مصروف نقدي يدوي</td><td>+ إذا «صرف مباشر» (نقد من مصدر ثاني). 0 إذا من سحب: يصير جزء من السحب</td><td>0</td></tr>
   <tr><td>دخل</td><td>0</td><td>+ (المؤكد فقط)</td></tr><tr><td>داخل ما عُرف نوعه</td><td>0</td><td>يظهر «داخل غير مصنف»</td></tr></tbody></table>
-  <p><b>الرسوم</b>: كل عملية فيها أصل ورسوم وضريبة وإجمالي. الرسوم والضريبة تنحسب إنفاقًا تحت «رسوم» دائمًا، حتى لو الأصل ما ينحسب (مثل حوالة لحسابك: الـ200 ما تنحسب والـ0.29 تنحسب).</p>
+  <p><b>الرسوم (1.7.0)</b>: كل عملية فيها أصل ورسوم وضريبة وإجمالي. العملية تنحسب كاملة (مع رسومها) تحت تصنيفها هي بس، وما تنفصل الرسوم لتصنيف ثاني. السحب النقدي المقسّم: أجزاؤه على صافي السحب، ورسوم الصراف تبقى تحت تصنيف السحب («سحب نقدي» افتراضيًا). الرسوم تنحسب إنفاقًا حتى لو الأصل ما ينحسب (مثل حوالة لحسابك: الـ200 ما تنحسب والـ0.29 تنحسب)، وتكون تحت تصنيف الحوالة، و«بدون تصنيف» إذا ما لها تصنيف. العملية اللي هي رسوم بس (أو اسمها «رسوم») يطلع لها اقتراح «رسوم» وما تتصنف إلا إذا وافقت. «رسوم» صار تصنيف عادي (تغيّر اسمه أو تحذفه). «دفعت رسوم» في «صرفياتك» معلومة بس (مجموع الرسوم في الفترة)، والمجموع الكلي ما تغيّر عن قبل؛ اللي تغيّر التوزيع بس.</p>
   <h3>الأرقام الرئيسية</h3><ul>
   <li><b>الرئيسية</b> تعرض صرفك في الدورة الحالية والالتزامات بس. الدخل والفائض وأرصدة الحسابات في صفحة «الدخل» (داخل «المزيد»)، مستقلة عن الصرف. والسيولة في «التحليل والتخطيط ← السيولة» (1.6.1: انشالت من الرئيسية).</li>
-  <li><b>الإنفاق الحقيقي</b> = أثر الإنفاق لكل العمليات (الجدول فوق) + الرسوم − الاستردادات. يشمل التحويلات لأشخاص بتصنيف مؤقت، والبطاقات اللي مالكها غير محدد (معلّمة). لا يشمل: العمليات اللي اخترت لها «لا تحسبها في الصرف»، والأدوات اللي استبعدتها من مصروفك، والعمليات المحذوفة.</li>
+  <li><b>الإنفاق الحقيقي</b> = أثر الإنفاق لكل العمليات (الجدول فوق) + الرسوم − الاستردادات. يشمل التحويلات لأشخاص اللي ما صنفتها، والبطاقات اللي مالكها غير محدد (معلّمة). لا يشمل: العمليات اللي اخترت لها «لا تحسبها في الصرف»، والأدوات اللي استبعدتها من مصروفك، والعمليات المحذوفة.</li>
   <li>الصرف اللي ما له تصنيف يدخل الإنفاق تحت «بدون تصنيف».</li>
   <li><b>الدخل المؤكد</b> = مجموع عمليات الدخل المصنفة. <b>الفائض</b> = الدخل المؤكد − الإنفاق الحقيقي. الاثنين في صفحة «الدخل».</li>
   <li><b>منه ما عُرف نوعه</b> = العمليات الخارجة اللي نوعها غير معروف، والتقريب اللي وجهته غير محددة. داخلة في الإنفاق، ومعروضة لحالها عشان تصنفها.</li>
   <li><b>التحويلات الداخلية وسداد البطاقات</b>: كل تحويل ينحسب مرة وحدة. إذا توفر طرفاه (خارج من حساب وداخل لحساب ثاني) ينربطان ويُحسب الخارج فقط. الطرف الوحيد يُحسب ويُعلَّم «غير مكتمل الربط».</li>
   <li><b>تحويلك لنفسك</b> يُعرف من أسمائك المحفوظة في الإعدادات: التحويل الصادر لمستفيد باسمك يصير تحويلًا داخليًا ويُضاف حسابه لحساباتك، والوارد من اسمك يصير تحويلًا داخليًا. إذا أضفت اسمًا لاحقًا، يُطبَّق على العمليات السابقة أيضًا.</li>
-  <li><b>الالتزامات المعروفة</b> = عمليات دفع تكرارها الفعلي «متكرر» وتصنيفها أو تصنيفها الفرعي معلّم «التزام».</li>
-  <li>التكرار والضرورة يؤخذان من الأدق: العملية ← التاجر ← التصنيف الفرعي ← التصنيف الرئيسي.</li></ul>
+  <li><b>الالتزامات الدائمة</b> = عمليات الصرف (شراء، تحويل لشخص، مصروف نقدي) المعلّمة «التزام دائم»، مع رسومها. ما يشترط تكون متكررة. «التزام دائم» تحدده أنت على العملية أو المحل/المستفيد أو التصنيف الفرعي أو الرئيسي، والأدق يغلب. <b>(1.7.1)</b> المحل أو المستفيد المعلّم ما ينحسب التزام إلا بعد ما تجاوب على «سؤال الاعتماد» (أو إذا آخر 3 دفعات له متساوية)؛ قبلها مبالغه مع «غير محدد». العملية المعلّمة اللي ما لها محل ولا مستفيد تنحسب مباشرة. المتكرر اللي يكتشفه التطبيق اقتراح بس («تضيفه التزام دائم؟»)، و«نعم» تحفظه على المحل أو المستفيد نفسه.</li>
+  <li>التكرار والضرورة والالتزام وفرص التوفير تؤخذ من الأدق: العملية ← المحل أو المستفيد ← التصنيف الفرعي ← التصنيف الرئيسي. <b>(1.7.0)</b> كلها تبدأ «غير محدد» لين تحددها (ما نخمّن)، والصرف اللي ما تحددت خاصيته يطلع «X ريال غير محدد» في صفحته مع زر «حدّدها».</li></ul>
   <h3>الدورة المالية</h3><p>تبدأ من تاريخ عملية الراتب («إيداع راتب»)، وكل عمليات ذاك اليوم للدورة الجديدة، وتنتهي باليوم اللي قبل الراتب الجاي. أي شهر ما فيه راتب يُستخدم فيه يوم الراتب الافتراضي. التوزيع على الدورات بتاريخ العملية الفعلي (المكتوب في الوصف)، وتاريخ قيد البنك احتياطي.</p>
   <h3>صفحة «صرفياتك»</h3><ul>
   <li><b>أسبوعي</b>: من الأحد إلى السبت. <b>الدورة</b>: دورة الراتب، أو الشهر الميلادي إذا اخترته في الإعدادات. <b>سنوي</b>: من 1 يناير إلى 31 ديسمبر، والأعمدة لكل شهر.</li>
@@ -1181,11 +1301,18 @@ function vMethods() {
   <h3>التقريب</h3><p>سطر يكرر نص الشراء وينتهي بـ«####» ومبلغه يكمّل الشراء لأقرب ريال. يُربط بالشراء للتفسير فقط. وجهته غير المحددة: ينحسب صرف تحت بند «تقريب (وجهته غير محددة)»؛ إذا حددت حساب ادخار يصير تحويلًا داخليًا وما ينحسب، وإذا جهة خيرية ينحسب تحت «تبرعات».</p>
   <h3>الرسائل البنكية</h3><ul>
   <li><b>اللصق</b>: الرسائل تنفصل بالسطر الفاضي أولًا. إذا ما فيه سطر فاضي، رسالة جديدة تبدأ عند سطر أوله كلمة نوع (شراء، حوالة، سحب، إيداع، سداد…)، وأي جزء ما فيه مبلغ ولا تاريخ ولا وقت يلتصق بالرسالة اللي قبله. إذا الفصل بكلمات البداية أو فيه شك (أكثر من بداية أو تاريخ في رسالة، أو مبالغ كثيرة) يطلب التطبيق تأكيد عدد الرسائل قبل المعالجة.</li>
-  <li><b>المسار</b>: الرسالة (لصق أو من الصندوق) ← تحقق من رقم الطلب محليًا ← فرز ← قراءة ← الحساب والبطاقة ← التاجر أو المستفيد ← القواعد ← المطابقة ← حفظ أو مراجعة.</li>
-  <li><b>الفرز</b>: «رمز تحقق» فقط بعبارات قوية (رمز التحقق، كلمة مرور لمرة واحدة، OTP، verification code، لا تشارك هذا الرمز، login code…) وما ينحفظ نصها. كلمة مفردة مثل «رمز» ما تكفي، والرسالة المشكوك فيها تروح المراجعة كـ«غير معروفة». عملية مرفوضة أو تذكير بمبلغ مستحق = «معلومات» بدون عملية. مبلغ + حركة مالية = «مالية».</li>
-  <li><b>القراءة</b>: صيغة متعلّمة (السياق قبل القيمة وبعدها، وإذا ما انطبق فرقم السطر) ← صيغة الإنماء ← قارئ عام. الحقول الناقصة من صيغة متعلّمة تتكمل من القارئ العام، وتظهر للمراجعة. القارئ العام يعرف نوع العملية والكلمة اللي قبل الاسم أو الرصيد من «كلمات قراءة الرسائل»، ووسيلة الدفع لأي رسالة شراء أو استرداد ما حددتها صيغتها تنعرف من نفس الكلمات (وإذا ما انطبق شي: نقاط بيع).</li>
-  <li><b>التعليم</b>: المبلغ مطلوب. التاجر أو المستفيد، آخر 4 أرقام، الرصيد، الرسوم، والتاريخ والوقت ووسيلة الدفع اختيارية. اللي ما تحدده يكمله القارئ العام. التاريخ الملتبس (مثل 05/09/26) تختار ترتيبه مرة وحدة وينحفظ مع الصيغة.</li>
-  <li><b>تاريخ العملية</b>: أول تاريخ في نص الرسالة، ويُقرأ بترتيب «شكله» المحفوظ (سنة-شهر-يوم أو يوم-شهر-سنة أو شهر-يوم-سنة). الشكل = نوع أجزاء التاريخ والفاصل بينها، وموضع الوقت، والكلمة اللي قبله، مثل «في 19:03 26-09-28». <b>(1.6.2) الأشكال لكل بنك</b>: البنك الجديد ما ياخذ ترتيب بنك ثاني حتى لو شكل تاريخه نفسه (مثلًا «05-09-26» عند بنك يوم-شهر-سنة ما ينقرأ 2005)، والرسائل الملصوقة بدون بنك لها الأشكال العامة. أول مرة يجي شكل جديد يسألك التطبيق دائمًا ويعرض التواريخ المحتملة، والرسالة (ملصوقة أو من الصندوق) تنتظر في المراجعة ما تنحفظ لين تجاوب. إذا طلع التاريخ بعد وقت وصول الرسالة أو لصقها بأكثر من يوم: مراجعة لهذي الرسالة بس، والترتيب المحفوظ ما يتغير. <b>(1.6.2) التاريخ القديم</b>: رسالة من الصندوق تاريخها أقدم من وقت وصولها بأكثر من يومين (غالبًا قراءة غلط) تروح المراجعة «تاريخ أقدم من وصول الرسالة» وتختار تاريخها؛ الملصوقة ما ينطبق عليها. تغيير ترتيب شكل من «الإعدادات» يصحح تاريخ العمليات اللي جا تاريخها آليًا من نفس الشكل فقط، وما يغيّر تاريخ حددته بنفسك ولا عملية أصلها كشف. الصيغة المتعلّمة اللي فيها حقل تاريخ تستخدم ترتيبها هي. إذا الرسالة ما فيها تاريخ: رسالة الصندوق تاخذ تاريخ استلامها، والملصوقة تروح المراجعة لين تحدد تاريخها. وقت الاستلام ما يعتبر وقت العملية.</li>
+  <li><b>المسار (1.7.1)</b>: الرسالة (لصق أو من الصندوق) ← تحقق من رقم الطلب محليًا ← رمز تحقق؟ ← هل تطابق صيغة معتمدة؟ ← قراءة بالصيغة ← الحساب والبطاقة ← التاجر أو المستفيد ← القواعد ← المطابقة ← حفظ أو مراجعة.</li>
+  <li><b>رسائل الرمز</b>: «رمز تحقق» فقط بعبارات قوية (رمز التحقق، كلمة مرور لمرة واحدة، OTP، verification code، لا تشارك هذا الرمز، login code…): تنحذف تلقائي وما ينحفظ نصها. كلمة مفردة مثل «رمز» ما تكفي: الرسالة المشكوك فيها تروح المراجعة ومعها زر «رسالة رمز (احذف نصها)».</li>
+  <li><b>الصيغ الثابتة (1.7.1): بدون تخمين</b>. الرسالة تنقرأ بس إذا طابقت <b>صيغة معتمدة</b> بالضبط: نفس عدد السطور، ونفس الكلام الثابت بنفس الترتيب. سطر زايد أو كلمة ثابتة جديدة (مثل «رسوم» أو «المبلغ المستحق») = شكل جديد. المطابقة: الحروف الكبيرة والصغيرة سوا، أ/ا/إ/آ وة/ه وى/ي سوا، وعدد المسافات ما يفرق (بس المسافة بين الكلمة والمتغير لازم تكون موجودة: «من» ما تطابق «منتهية»). الأرقام اللي ما حددتها متغير تعتبر متغيرة من نفسها (أي رقم يطابق أي رقم)، وكذلك نجوم الإخفاء. الصيغة لبنكها (المرسل)، والرسالة الملصوقة بدون بنك تجرّب صيغ كل البنوك.</li>
+  <li><b>حدود المتغيرات (عشان ما يمر شي بالغلط)</b>: اسم المحل أو المستفيد ما يبلع كلام زايد فيه مبلغ بعملة (مثل «… رسوم SAR 5.00»): شكل جديد. «نص يتغير» = نفس عدد الكلمات اللي حددتها. الرسالة اللي فيها «مرفوضة / فشل / لم تتم» ما تطابق صيغة مثالها ما فيه هالكلام. المبلغ: أرقام بفواصل آلاف صحيحة، ولازم بالريال (مبلغ بعملة أجنبية بدون مقابل بالريال ما يتعرّف صيغة: أدخله يدويًا). التاريخ: لازم بنفس ترتيب وشكل مثال الصيغة، وإلا «ما قدرت أقرأ». الرسوم «داخل المبلغ» أكبر من المبلغ = «ما قدرت أقرأ». لو أكثر من صيغة تطابق الرسالة: الأدق (اللي نصها الثابت أطول) تغلب. سطر أطول من 300 حرف ما يطابق أي صيغة. والشكل له صيغة وحدة لكل بنك: لو عرّفته مرة ثانية يعتبر تعديل.</li>
+  <li><b>شكل جديد</b> (أي رسالة ما لها صيغة، حتى اللي ما فيها مبلغ): تنتظر في «المراجعة» بثلاثة أزرار: «عملية: عرّف الصيغة»، «معلومات ولا تسألني عن هالشكل» (تنحفظ صيغة معلومات، واللي بنفس الشكل بعدها تنحفظ معلومات بدون سؤال)، «معلومات هالمرة بس». الرسائل المنتظرة اللي بنفس الشكل تطلع بطاقة وحدة وقرارها واحد. «مو بنك: تجاهل رسائله» للمرسل كله. الرسالة اللي فيها رمز محتمل ما لها «ولا تسألني» (عشان ما تنحفظ الرموز الجاية): «رسالة رمز (احذف نصها)» أو «معلومات هالمرة بس».</li>
+  <li><b>تعريف الصيغة</b>: تختار نوع العملية وتأشّر في الرسالة على المتغيرات: المبلغ (مطلوب)، والمحل أو المستفيد أو المرسل، آخر 4 للبطاقة وللحساب، الرصيد، الرسوم، التاريخ، الوقت، وسيلة الدفع، و«نص يتغير» (كلام يتغير وما يهمك مثل رقم مرجع). تجيك معبّاة باقتراح التطبيق (من القارئ العام وكلمات القراءة) وأنت تصحح وتعتمد؛ الاقتراح ما ينحفظ منه شي لين تعتمد. التاريخ الملتبس (مثل 05/09/26) تختار ترتيبه مرة وينحفظ مع الصيغة. المتغير الرقمي داخل كلمة (مثل «**1234» أو «SAR250.00») ياخذ الرقم بس والباقي نص ثابت. اللي ما حددته ما ينقرأ: العملية بدون محل إذا ما أشّرت على المحل (ما يعتبر ناقص)، والتاريخ إذا ما أشّرت عليه من أول تاريخ في الرسالة بترتيب «شكله» (وإلا يوم وصولها)، والوقت من أول وقت مكتوب. وسيلة الدفع لرسالة الشراء أو الاسترداد من «كلمات قراءة الرسائل» (Apple Pay، أونلاين، وإلا نقاط بيع) إذا ما حددتها.</li>
+  <li><b>الرسوم في الصيغة</b>: متغير اختياري. إذا حددتها تختار: «داخل المبلغ» (المبلغ اللي أشّرت عليه شاملها: العملية = المبلغ) أو «فوق المبلغ» (العملية = المبلغ + الرسوم). وينحفظ مع الصيغة. إذا المبلغ + الرسوم يساوي رقم ثالث مكتوب في الرسالة، الاقتراح «فوق المبلغ». إذا ما حددت الرسوم: العملية بالمبلغ اللي أشّرت عليه بس. والرسوم في كل الأحوال تنحسب مع عمليتها على تصنيفها (1.7.0).</li>
+  <li><b>طابقت صيغة ومتغير ما انقرأ</b> (مثل تاريخ غير صالح): تروح المراجعة «ما قدرت أقرأ الرسالة» وتعدّل الصيغة أو تدخلها يدويًا.</li>
+  <li><b>صفحة «الصيغ»</b> (في «المزيد»): كل صيغة مع مثال وقراءته وعدد الرسائل اللي تطابقها. تعدّلها أو تحذفها (الحذف ما يغيّر العمليات المحفوظة، والرسائل الجاية بنفس الشكل ترجع تسألك). بعد أي تعريف أو تعديل، إذا فيه رسائل سابقة تطابق الصيغة وقراءتها تختلف (أو كانت «معلومات» وبتصير عمليات) يسألك: <b>من الحين وطالع</b>، <b>على الكل</b>، أو <b>من تاريخ تحدده</b>. التصحيح يمس اللي انقرأ من الرسالة بس (النوع، المبلغ والرسوم، الاسم، وسيلة الدفع، الرصيد، والتاريخ إذا الصيغة تحدده وأنت ما حددته بيدك)، وتصنيفك وأغراضك ومدينتك وملاحظاتك تبقى؛ والعملية المدموجة مع كشف يتصحح فيها وسيلة الدفع والاسم الناقص بس. العملية ما تنحذف أبدًا.</li>
+  <li><b>أشكال رسائلك السابقة (ترقية 1.7.1)</b>: رسائلك المحفوظة تجمعت حسب شكلها، وكل شكل طلع في «الصيغ» ينتظر اعتمادك مع مثال وقراءته السابقة: «اعتمد»، «عدّل»، «هذي معلومات»، أو «تجاهل الشكل». رسائل العمليات كلها، ورسائل «المعلومات» اللي فيها مبلغ أو تكرر شكلها (المعلومة اللي بدون مبلغ وجات مرة وحدة، مثل إعلان، ما تطلع). لين تعتمد الشكل، رسائله الجديدة تنتظر في «المراجعة» وتنعالج كلها أول ما تعتمده. صيغ ما قبل 1.7.1 والقارئ العام صاروا للاقتراح بس.</li>
+  <li><b>بطاقة ائتمانية (1.7.1)</b>: شراء أو سحب أو استرداد ببطاقة ائتمانية (مكتوب في الرسالة «بطاقة ائتمانية» أو credit card، ومو مدى) معروفة ينحفظ على البطاقة نفسها حتى لو الرسالة فيها رقم الحساب الجاري المربوط. والبطاقة الائتمانية اللي ما يعرفها التطبيق تتسجل «بطاقة …XXXX» مؤقتة، مو على الحساب الجاري (ورصيد هالرسائل ما يؤخذ: المتاح في البطاقة مو رصيد الحساب).</li>
+  <li><b>تاريخ العملية</b>: أول تاريخ في نص الرسالة، ويُقرأ بترتيب «شكله» المحفوظ (سنة-شهر-يوم أو يوم-شهر-سنة أو شهر-يوم-سنة). الشكل = نوع أجزاء التاريخ والفاصل بينها، وموضع الوقت، والكلمة اللي قبله، مثل «في 19:03 26-09-28». <b>(1.6.2) الأشكال لكل بنك</b>: البنك الجديد ما ياخذ ترتيب بنك ثاني حتى لو شكل تاريخه نفسه (مثلًا «05-09-26» عند بنك يوم-شهر-سنة ما ينقرأ 2005)، والرسائل الملصوقة بدون بنك لها الأشكال العامة. أول مرة يجي شكل جديد يسألك التطبيق دائمًا ويعرض التواريخ المحتملة، والرسالة (ملصوقة أو من الصندوق) تنتظر في المراجعة ما تنحفظ لين تجاوب. إذا طلع التاريخ بعد وقت وصول الرسالة أو لصقها بأكثر من يوم: مراجعة لهذي الرسالة بس، والترتيب المحفوظ ما يتغير. <b>(1.6.2) التاريخ القديم</b>: رسالة من الصندوق تاريخها أقدم من وقت وصولها بأكثر من يومين (غالبًا قراءة غلط) تروح المراجعة «تاريخ أقدم من وصول الرسالة» وتختار تاريخها؛ الملصوقة ما ينطبق عليها. تغيير ترتيب شكل من «الإعدادات» يصحح تاريخ العمليات اللي جا تاريخها آليًا من نفس الشكل فقط، وما يغيّر تاريخ حددته بنفسك ولا عملية أصلها كشف. الصيغة المتعلّمة اللي فيها حقل تاريخ تستخدم ترتيبها هي. إذا الرسالة ما فيها تاريخ: رسالة الصندوق تاخذ تاريخ استلامها، والملصوقة تروح المراجعة لين تحدد تاريخها. وقت الاستلام ما يعتبر وقت العملية. <b>(1.7.0) رسائل آخر الليل</b>: بعض البنوك (مثل الإنماء بعد حوالي 8:30 الليل) تكتب تاريخ اليوم الجاي. إذا التاريخ المكتوب = يوم وصول الرسالة + 1 (بتوقيت السعودية)، العملية تنحفظ على يوم الوصول والوقت يبقى نفسه (رسائل الصندوق واللصق بنفس الليلة). بعد يومين أو أكثر = مراجعة مثل قبل. العمليات القديمة اللي انحفظت على اليوم الجاي تصححت مع التحديث (اللي تاريخها من رسالتها بس، مو اللي حددته بنفسك ولا اللي فيها كشف)، وتلقاها خطوة في «سجل التعديلات». الرسالة اللي لصقتها بعد أيام ما ينعرف إنها من هالنوع. صيغة متعلّمة تاريخها في المستقبل وما لها شكل تاريخ معروف: تروح المراجعة «حدد التاريخ».</li>
   <li><b>المستفيد</b>: بالبصمة (الآيبان أو رقم الحساب قبل إخفائه)، أو آخر 4 أرقام مع الاسم مطابق تمامًا. ما فيه مطابقة تقريبية لأسماء الأشخاص.</li>
   <li><b>منع التكرار</b>: رقم الطلب هو المفتاح؛ رسالة محفوظة سابقًا ما تنعالج مرة ثانية (يتأكد استلامها فقط). نفس النص بالضبط (حتى الوقت) برقم جديد، أو نسخة منها لصقتها (الفرق بس في المرسل أو إخفاء الأرقام: نفس اليوم والدقيقة والمبلغ والبطاقة والتاجر، والرصيد والمرجع ما يختلفون؛ وبدون تاجر لازم رصيد أو مرجع متطابق) = نفس الرسالة وصلت مرتين: تنحسب مرة وحدة تلقائيًا وتطلع في «المراجعة» تحت «مكررة تلقائيًا» ومعها «مو مكررة» لو كانت عمليتين، إلا إذا الرسالة السابقة تجاهلتها أو كانت معلومات فقط (ما سوّت عملية). قرارك في المراجعة (عالجها، الحساب، التاريخ) ينحفظ على الرسالة، فما ينسأل مرة ثانية لو احتاجت مراجعة ثانية. المطابقة مع عمليات الكشف والإدخال اليدوي بنفس نقاط الكشوف: دليل حاسم أو 90+ دمج، 65–89 أو تعادل مراجعة (ما تنحسب لين تقرر)، أقل مستقلة. ومع عملية من رسالة ثانية: ما فيه مطابقة (عمليتان). الاتصال بالصندوق ينتظر لين 60 ثانية، وتأكيد الاستلام يتعاد مرة وحدة تلقائيًا إذا ما رجع رد.</li>
   <li><b>لما يوصل الكشف بعد الرسالة</b>: يندمج معها، والكشف يكمّل الأصل والرسوم وتاريخ القيد والرصيد والمرجع والمستفيد. تصنيفك يبقى.</li>
@@ -1193,24 +1320,36 @@ function vMethods() {
   <li><b>تأكيد الاستلام (ack)</b> ما يرسل إلا بعد نجاح الحفظ على الجهاز. إذا فشل الحفظ، البيانات في الذاكرة ترجع لآخر حالة محفوظة فعلًا، والرسالة تبقى في الصندوق وتنعالج في الجلب القادم. إذا انحفظت الرسالة وما وصل رد التأكيد (مثلًا طلعت من التطبيق لحظتها)، كل جلب يعيد التأكيد لها لين يوصل، وعلامة «لم يتأكد الاستلام» تختفي.</li>
   <li><b>بعد الجلب أو اللصق</b>: نافذة «عمليات جديدة» تعرض كل عملية انضافت (اللي بدون تصنيف بلون برتقالي) وأي بطاقة جديدة تسألك عن مالكها.</li>
   <li><b>الأوقات</b> (آخر جلب، وقت وصول الرسالة، سجل التعديلات) تنعرض بوقت جهازك.</li>
-  <li><b>من أي بنك؟ (1.6.2)</b> عند اللصق: «ما أدري» = مثل قبل (الأشكال العامة وكل الصيغ). إذا اخترت بنك، الرسائل تنقرأ بصيغه وأشكال تواريخه. الملصوقة ما تنتظر اعتماد «بنك جديد» لأنك تشوف نتيجتها قدامك.</li></ul>
-  <h3>البنوك وأول رسالة من بنك جديد (1.6.2)</h3><p>البنك = اسم المرسل اللي يرسله الاختصار (رسالة توصل بدون اسم مرسل ما تنحسب على بنك وتمشي مثل قبل، وصفحة «البنوك» تنبهك). صفحة «البنوك» في «المزيد» فيها كل مرسل وصلت منه رسائل: تسميه (الإنماء، الراجحي…)، وتشوف الأنواع اللي اعتمدتها منه وأشكال تواريخه والصيغ اللي علّمتها له (وتحذف صيغة)، وتدمج مرسلين في بنك واحد لو البنك غيّر اسم المرسل (نفس الاعتماد والأشكال والصيغ؛ وتقدر تفك الدمج).</p>
-  <p><b>أول رسالة</b> من الصندوق من بنك (أو نوع) ما اعتمدته، قراها القارئ العام، ما تنحفظ مباشرة: تنتظر في «المراجعة» باسم «بنك جديد: تأكد من القراءة» وتعرض وش قرأ (النوع، المبلغ، الاسم، البطاقة أو الحساب، وسيلة الدفع، الرصيد، الرسوم، التاريخ). وإذا التاريخ يحتاج سؤال (شكل جديد من هالبنك، أو قديم، أو في المستقبل) ينسأل في نفس البطاقة. «صحيح، اعتمد القراءة لهالبنك» = يعتمد النوع لهالبنك وتنحفظ العملية (في «ما راجعتها» بدون اعتماد مدينة تلقائي)، ومعها أي رسالة ثانية تنتظر نفس الاعتماد، ورسائل هالنوع الجاية منه تنحفظ مباشرة. «علّم الصيغة» تحدد الحقول بنفسك. رسائل الإنماء المقروءة بقارئه الخاص والصيغ اللي علّمتها تعتمد نوعها تلقائيًا. الترقية لـ 1.6.2 اعتمدت كل بنك ونوع عندك منه عمليات محفوظة. تلغي اعتماد نوع من صفحة البنك (العمليات ما تتغير).</p>
-  <p><b>رسالة فيها مبلغ بدون كلمة حركة</b> من بنك جديد (ما اعتمدت منه أي نوع) ما تنحفظ «معلومات» بصمت: تطلع «بنك جديد: رسالة فيها مبلغ» وتختار «مالية: علّم الصيغة» أو «معلومات فقط». المرفوضة والتذكيرات والعروض تبقى معلومات. وصيغة علّمتها لبنك تخلي رسائله بنفس الشكل مالية حتى لو ما فيها كلمة حركة.</p>
-  <p><b>مرسل متجاهل</b> («مو بنك: تجاهل رسائله»، من البطاقة في المراجعة أو من صفحة البنك)، مثل STC لما يرسل تأكيد شراء بعد رسالة البنك: رسائله تنحفظ «من مرسل متجاهل» بنصها بدون عمليات، والمعلّقة منه في المراجعة تنقفل بنفس الطريقة، والعمليات المحفوظة ما تتغير. رسائل الرمز منه تنحذف بدون نص مثل دايم. «إلغاء التجاهل» يسألك إذا تعيد قراءة رسائله المحفوظة (تمر بنفس الخطوات).</p>
+  <li><b>من أي بنك؟</b> عند اللصق: «ما أدري» = أشكال التاريخ العامة، وتجرّب صيغ كل البنوك. إذا اخترت بنك، الرسائل تنقرأ بصيغه وأشكال تواريخه. الملصوقة تمشي على نفس الصيغ: اللي ما لها صيغة تنتظر في «المراجعة».</li></ul>
+  <h3>البنوك</h3><p>البنك = اسم المرسل اللي يرسله الاختصار (رسالة توصل بدون اسم مرسل ما تنحسب على بنك: صيغها وأشكال تواريخها عامة، وصفحة «البنوك» تنبهك). صفحة «البنوك» في «المزيد» فيها كل مرسل وصلت منه رسائل: تسميه (الإنماء، الراجحي…)، وتشوف صيغه المعتمدة وأشكال تواريخه، وتدمج مرسلين في بنك واحد لو البنك غيّر اسم المرسل (نفس الصيغ والأشكال؛ وتقدر تفك الدمج). <b>(1.7.1)</b> سؤال «اعتمد القراءة لهالبنك» انشال: اعتماد الصيغة يغني عنه.</p>
+  <p><b>مرسل متجاهل</b> («مو بنك: تجاهل رسائله»، من البطاقة في المراجعة أو من صفحة البنك)، مثل STC لما يرسل تأكيد شراء بعد رسالة البنك: رسائله تنحفظ «من مرسل متجاهل» بنصها بدون عمليات، والمعلّقة منه في المراجعة تنقفل بنفس الطريقة، والعمليات المحفوظة ما تتغير. رسائل الرمز منه تنحذف بدون نص مثل دايم. «إلغاء التجاهل» يسألك إذا تعيد قراءة رسائله المحفوظة (اللي لها صيغة معتمدة تنحفظ، والباقي ينتظر في «المراجعة»).</p>
   <h3>التحديثات (1.6.2)</h3><p>كل ما ترجع للتطبيق (وكل نص ساعة وهو مفتوح) يسأل الموقع عن نسخة جديدة. «فحص التحديثات» في الإعدادات يعرض نسختك وآخر نسخة على الموقع، وإذا فيه جديد ينزّله ويطلع «حدّث الحين». «تحديث إجباري» لو علق: ينزّل كل ملفات التطبيق من الموقع مباشرة، وإذا وصلت كلها يحطها مكان المحفوظة في الجوال ويعيد الفتح؛ وإذا انقطع الاتصال في النص ما يتغير شي ويبقى التطبيق يشتغل بدون إنترنت. البيانات المالية (IndexedDB) ما تنلمس.</p>
-  <h3>التصنيفات</h3><p>كل تصنيف له رقم ثابت، والعمليات والمحلات والمستفيدون والقواعد والحدود والأغراض مربوطة بالرقم مو بالاسم؛ فتغيير الاسم أو الإيموجي أو اللون ما يغيّر أي رقم. التكرار والضرورة: العملية ← التاجر ← الفرعي ← الرئيسي («يتبع الرئيسي» في الفرعي = يأخذ قيمة الرئيسي). «التزام» يدخل رقم الالتزامات المعروفة إذا العملية متكررة. الحذف ما يحذف أي عملية: تنتقل لتصنيف تختاره، أو تبقى بدون تصنيف (وفي الفرعي تبقى تحت الرئيسي)، والتجار والمستفيدون والقواعد المرتبطة تتبع نفس الاختيار؛ القاعدة اللي ما يبقى لها عمل تتوقف. حد الصرف على تصنيف رئيسي محذوف ينتقل مع العمليات، إلا إذا التصنيف الجديد عليه حد من قبل أو اخترت «بدون تصنيف» فينحذف. «رسوم» وفرعياتها و«تبرعات» و«سحب نقدي» ما تنحذف لأن الحساب يستخدمها. <b>الاختيار (1.6.0)</b>: التصنيف الرئيسي يفتح دايمًا حتى لو ما له فرعي: تختار فرعي، أو تضيف فرعي، أو «اختره بدون فرعي». تنقل فرعي لرئيسي ثاني من تعديل التصنيف («المكان»)، وعملياته وأغراضه تنتقل معه.</p>
+  <h3>التصنيفات</h3><p>كل تصنيف له رقم ثابت، والعمليات والمحلات والمستفيدون والقواعد والحدود والأغراض مربوطة بالرقم مو بالاسم؛ فتغيير الاسم أو الإيموجي أو اللون ما يغيّر أي رقم. التكرار والضرورة والالتزام وفرص التوفير: العملية ← المحل أو المستفيد ← الفرعي ← الرئيسي («يتبع الرئيسي» في الفرعي = يأخذ قيمة الرئيسي). <b>(1.7.0)</b> التصنيف الجديد (واللي نزلت مع التطبيق وما غيّرتها) تبدأ «غير محدد». «التزام دائم» يدخل «الالتزامات الدائمة» بدون شرط التكرار. الحذف ما يحذف أي عملية: تنتقل لتصنيف تختاره، أو تبقى بدون تصنيف (وفي الفرعي تبقى تحت الرئيسي)، والتجار والمستفيدون والقواعد المرتبطة تتبع نفس الاختيار؛ القاعدة اللي ما يبقى لها عمل تتوقف. حد الصرف على تصنيف رئيسي محذوف ينتقل مع العمليات، إلا إذا التصنيف الجديد عليه حد من قبل أو اخترت «بدون تصنيف» فينحذف. «تبرعات» و«سحب نقدي» ما تنحذف لأن الحساب يستخدمها (و«رسوم» صار ينحذف من 1.7.0). <b>الاختيار (1.6.0)</b>: التصنيف الرئيسي يفتح دايمًا حتى لو ما له فرعي: تختار فرعي، أو تضيف فرعي، أو «اختره بدون فرعي». تنقل فرعي لرئيسي ثاني من تعديل التصنيف («المكان»)، وعملياته وأغراضه تنتقل معه.</p>
   <h3>القواعد</h3><p>الأولوية: تعديلك لعملية وحدة ← القاعدة ← التاجر أو المستفيد ← التصنيف الفرعي ← الرئيسي. القاعدة تحتاج شرط حقيقي واحد على الأقل (نص، تاجر، مستفيد، حساب، أو مبلغ). إذا انطبقت أكثر من قاعدة، الأعلى في القائمة تكسب. تنطبق على العمليات الجديدة من الكشوف والرسائل، وعلى السابقة فقط إذا اخترت «طبّقها على السابق».</p>
-  <h3>حدود الصرف</h3><p>على الدورة الحالية. الحد الكلي = الإنفاق الحقيقي كله. حد التصنيف نوعين: <b>حسب الفواتير</b> (الافتراضي، على التصنيف الرئيسي) = نفس رقمه في «صرفياتك»؛ و<b>حسب المنتجات</b> (رئيسي أو فرعي) = الأغراض المصنفة فيه + «غير مفصّل» من فواتيره، نفس رقم تحليل المنتجات. حدود تصنيفات المنتجات القديمة صارت «حسب المنتجات» على الفرعي الجديد. حذف تصنيف عليه حد «حسب المنتجات»: ينتقل الحد مع الأغراض، وإذا الهدف عليه حد يبقى حده وينحذف الثاني (ما يصير حدين). النسبة = المصروف ÷ الحد. تنبيه عند نسبة الإعداد (80% افتراضيًا) وعند 100%.</p>
+  <h3>حدود الصرف</h3><p>على الدورة الحالية. الحد الكلي = الإنفاق الحقيقي كله. حد التصنيف نوعين: <b>حسب الفواتير</b> (الافتراضي، على التصنيف الرئيسي) = نفس رقمه في «صرفياتك» (1.7.0: العملية مع رسومها)؛ و<b>حسب المنتجات</b> (رئيسي أو فرعي) = الأغراض المصنفة فيه + «غير مفصّل» من فواتيره، نفس رقم تحليل المنتجات. حدود تصنيفات المنتجات القديمة صارت «حسب المنتجات» على الفرعي الجديد. حذف تصنيف عليه حد «حسب المنتجات»: ينتقل الحد مع الأغراض، وإذا الهدف عليه حد يبقى حده وينحذف الثاني (ما يصير حدين). النسبة = المصروف ÷ الحد. تنبيه عند نسبة الإعداد (80% افتراضيًا) وعند 100%.</p>
   <h3>أسماء المحلات (1.6.0)</h3><p>تسمي المحل مرة، وتطلع كل عملياته (السابقة والجاية) باسمك؛ ما سميته = اسم الفاتورة. اسم الفاتورة الأصلي يبقى بخط صغير تحت الاسم. تعديل اسم محل مسمّى: <b>هذه المرة فقط</b> (العملية وحدها لمحل ثاني، والفاتورة تبقى لمحلها)، <b>لكل العمليات</b>، أو <b>اسم آخر لهذه الفاتورة</b>: نفس اسم الفاتورة يصير لأكثر من محل، والعملية تروح للاسم الجديد، والقديمة تبقى على الأول. بعدها كل عملية رسالة جديدة بهذا الاسم تسألك أي محل، والتصنيف يمشي على المحل اللي تختاره (لكل محل تصنيفه)، إلا اللي صنفتها يدويًا للعملية. اللي ما تختار لها تاخذ المحل الافتراضي (تحدده وقت تسجيل الاسم الثاني، وتغيّره من صفحة المحل)، وتطلع في «المراجعة» تحت «فاتورة تحتمل أكثر من محل»، ونفس الشي لعمليات الكشف.</p>
   <p><b>المطابقة</b>: اسمين «مطابقين» إذا تساووا بعد تجاهل المسافات والتشكيل وأ/ا/إ/آ وة/ه وى/ي والحروف الكبيرة والصغيرة. الاسم المطابق لمحل ثاني ممنوع بدون دمج: تدمجهم أو تغيّر الاسم. «مشابه» = واحد داخل الثاني (حرفين أو أكثر): يقترح الدمج وتقدر تخليهم منفصلين. وأنت تكتب: الأسماء المسجلة المشابهة + اقتراحات من جهازك (المتجر المعروف للفاتورة، واسم الفاتورة منظف، وأسماء متاجر معروفة) بدون إنترنت. <b>الدمج</b>: عمليات المحلين (والمحذوفة والمعلّقة في المراجعة) وأسماء فواتيرهم وقواعدهم ومتكررهم واستثناءاتهم تصير لمحل واحد، يطلع مرة وحدة بتصنيف واحد ومجموع واحد في كل مكان. إذا تصنيفهم مختلف يسألك أي تصنيف يبقى، وينطبق على عملياته ما عدا اللي صنفتها يدويًا لعملية أو بقاعدة.</p>
   <h3>العمليات الجديدة من الرسائل (1.6.0)</h3><p>وأنت فاتح التطبيق يدوّر على رسائل جديدة كل 30 ثانية (إذا الجلب التلقائي مفعّل). عمليات الرسائل الجديدة (من الصندوق أو اللصق) تطلع قدامك كاملة، وحدة ورا الثانية من الأقدم، تكمل فيها التصنيف والأغراض والمدينة والمجموعة. «تم» = راجعتها. «مراجعة لاحقًا» لهذي، «مراجعة الكل لاحقًا» للكل، و✕ يسألك: هذه لاحقًا، الكل لاحقًا، أو تراجع. إذا كنت في نص شي يطلع شريط صغير «وصلت عملية جديدة» تضغطه، وإذا ما ضغطته تنتظرك. المؤجلة تطلع في «المراجعة» تحت «عمليات ما راجعتها» وفي الرئيسية «عندك N عمليات ما راجعتها». رسالة اندمجت مع عملية موجودة ما تنعد جديدة، ولا الرسائل القديمة اللي تنعاد معالجتها (مثل فصل دمج غلط). المراجعة ما تغيّر أي رقم.</p>
-  <h3>كلمات قراءة الرسائل (1.6.1)</h3><p>في «المزيد». ثلاث أنواع مجموعات: <b>نوع العملية</b> (الترتيب مهم: أول مجموعة من فوق تنطبق على الرسالة تكسب، و«ما عدا» تمنع المجموعة، مثل «credit card» ما تنقرأ إيداع)، <b>وسيلة الدفع</b> (Apple Pay ثم أونلاين، وإذا ما انطبق شي: نقاط بيع)، و<b>الكلمات قبل الأسماء والرصيد</b> (قبل اسم المحل، المستفيد، المرسل، الرصيد). المطابقة: الحروف الكبيرة والصغيرة سوا، أ/ا/إ/آ سوا، ة/ه سوا، ى/ي في آخر الكلمة سوا، والمسافات مرنة. الكلمة تنطبق حتى لو جزء من كلمة («حوالة محلي» تنطبق على «حوالة محلية»)، إلا: الكلمة اللي آخرها «ى» لازم تكون نهاية كلمة («مدى» ما تنطبق على «مدين»)، والكلمة الإنجليزية لازم تكون بداية كلمة («POS» ما تنطبق داخل «deposited»). الكلمة حرفين أو أكثر، والمكرر ينشال، والأرقام الطويلة (مثل رقم بطاقة أو حساب) ما تنحفظ. <b>الفرز</b> (مالية أو معلومات) نفسه ما تغيّر، بس كلمة تضيفها أنت لنوع العملية تكفي عشان الرسالة اللي فيها مبلغ تنحسب مالية. كلمات رسائل الرمز والدخول مقفلة وما تنعدل. «رجّع الافتراضي» لمجموعة، و«رجّع الكل للافتراضي» للكل (وتحتاج «احفظ…» عشان تنطبق).</p>
+  <h3>كلمات قراءة الرسائل (1.6.1)</h3><p><b>(1.7.1)</b> الكلمات صارت للاقتراح: يعبّي منها التطبيق نوع العملية والاسم والرصيد لما تعرّف صيغة جديدة، ولوسيلة الدفع (Apple Pay وأونلاين) في الرسائل اللي صيغتها ما حددت وسيلة الدفع. الرسالة نفسها ما تنقرأ إلا بصيغة معتمدة. في «المزيد». ثلاث أنواع مجموعات: <b>نوع العملية</b> (الترتيب مهم: أول مجموعة من فوق تنطبق على الرسالة تكسب، و«ما عدا» تمنع المجموعة، مثل «credit card» ما تنقرأ إيداع)، <b>وسيلة الدفع</b> (Apple Pay ثم أونلاين، وإذا ما انطبق شي: نقاط بيع)، و<b>الكلمات قبل الأسماء والرصيد</b> (قبل اسم المحل، المستفيد، المرسل، الرصيد). المطابقة: الحروف الكبيرة والصغيرة سوا، أ/ا/إ/آ سوا، ة/ه سوا، ى/ي في آخر الكلمة سوا، والمسافات مرنة. الكلمة تنطبق حتى لو جزء من كلمة («حوالة محلي» تنطبق على «حوالة محلية»)، إلا: الكلمة اللي آخرها «ى» لازم تكون نهاية كلمة («مدى» ما تنطبق على «مدين»)، والكلمة الإنجليزية لازم تكون بداية كلمة («POS» ما تنطبق داخل «deposited»). الكلمة حرفين أو أكثر، والمكرر ينشال، والأرقام الطويلة (مثل رقم بطاقة أو حساب) ما تنحفظ. كلمات رسائل الرمز والدخول مقفلة وما تنعدل. «رجّع الافتراضي» لمجموعة، و«رجّع الكل للافتراضي» للكل (وتحتاج «احفظ…» عشان تنطبق).</p>
   <p><b>النسخ حسب التاريخ</b>: كل حفظ له «من تاريخ». الرسالة تنقرأ بآخر نسخة تاريخها قبل أو يساوي تاريخ العملية المكتوب في الرسالة، وإذا ما فيها تاريخ فتاريخ وصولها؛ فرسالة قديمة توصل متأخر تنقرأ بنسختها. قبل أول نسخة: الكلمات الافتراضية، وتنعرض «طريقة قراءة الرسائل قبل (التاريخ)». الحفظ بنفس تاريخ نسخة موجودة يستبدلها، ولو فيه نسخة أحدث تبقى هي، فالكلمات الجديدة تنطبق لين قبل تاريخها (المعاينة تنبهك). حذف نسخة يرجّع رسائل فترتها للنسخة اللي قبلها، والعمليات المحفوظة ما تتغير.</p>
-  <p><b>المعاينة قبل الحفظ</b> (للرسائل من التاريخ وبعده، وما تغيّر شي): (1) رسائل كانت في «المراجعة» لأنها ما انقرأت، أو انحسبت «معلومات»، وصارت تنقرأ عملية؛ (2) عمليات بتتغير قراءتها، قبل ← بعد. «قبل» = اللي انقرأ من الرسالة فعلًا لما انحفظت عمليتها (أو آخر تصحيح لها). تختار الكل أو بعضها أو «احفظ للرسائل الجاية بس»، واللي ما صححته يطلع لك مرة ثانية في التعديل الجاي. <b>التصحيح</b> يمس اللي انقرأ من الرسالة بس: النوع، المبلغ والرسوم، الاسم، وسيلة الدفع، الرصيد، المرجع. ويبقى: النوع اللي غيّرته بيدك وتوابعه (البطاقة المسددة، المستفيد)، التصنيف اليدوي أو بقاعدة، المحل اللي اخترته أو ثبّته، الأغراض، المدينة، المجموعات، الملاحظة. العملية المدموجة مع كشف: قيم الكشف تبقى، ويتصحح وسيلة الدفع (والاسم إذا ناقص) بس. المعاينة تعرض بس اللي بيتغير فعلًا في العملية. إذا التصحيح كمّل اسم محل ناقص، تنقفل مراجعة «ناقصة الحقول». عملية ما تنقرأ بالكلمات الجديدة (مثلًا حذفت كلمة مهمة) ما تتغير وتطلع تنبيه. الرسائل اللي صارت تنقرأ تصير عمليات في «ما راجعتها»، بدون اعتماد مدينة تلقائي. الحفظ خطوة وحدة في سجل التعديلات وتقدر تتراجع عنها.</p>
-  <h3>علامة «بدون مدينة» وفترات التجاهل (1.6.0)</h3><p>العلامة على المشتريات والسحب والمصروف النقدي اللي ما لها مدينة معتمدة (ما لها مدينة، أو اقتراح موقع ما اعتمدته)، إلا اللي اخترت لها «تجاهل الموقع لهذه العملية» أو اللي ما تنحسب في الصرف. تحويلات الأشخاص والرسوم بدون علامة. فلتر «بدون مدينة» في العمليات. <b>فترات التجاهل</b> (في «المزيد»): من تاريخ لتاريخ، تختار المدينة و/أو التصنيف. داخل الفترة (بتاريخ العملية) تختفي علامات «بدون مدينة» أو «بدون تصنيف» و«غير مصنف» و«تصنيف مؤقت»، وما تنعد في «بيانات تحتاج قرارك». الأرقام ما تتغير، والفلتر يعرضها ومعها «متجاهلة».</p>
+  <p><b>المعاينة قبل الحفظ</b> (للرسائل من التاريخ وبعده، وما تغيّر شي): عمليات محفوظة بتتغير قراءتها، قبل ← بعد (1.7.1: الرسالة اللي ما لها صيغة تتعرّف من «المراجعة»، مو بالكلمات). «قبل» = اللي انقرأ من الرسالة فعلًا لما انحفظت عمليتها (أو آخر تصحيح لها). تختار الكل أو بعضها أو «احفظ للرسائل الجاية بس»، واللي ما صححته يطلع لك مرة ثانية في التعديل الجاي. <b>التصحيح</b> يمس اللي انقرأ من الرسالة بس: النوع، المبلغ والرسوم، الاسم، وسيلة الدفع، الرصيد، المرجع. ويبقى: النوع اللي غيّرته بيدك وتوابعه (البطاقة المسددة، المستفيد)، التصنيف اليدوي أو بقاعدة، المحل اللي اخترته أو ثبّته، الأغراض، المدينة، المجموعات، الملاحظة. العملية المدموجة مع كشف: قيم الكشف تبقى، ويتصحح وسيلة الدفع (والاسم إذا ناقص) بس. المعاينة تعرض بس اللي بيتغير فعلًا في العملية. إذا التصحيح كمّل اسم محل ناقص، تنقفل مراجعة «ناقصة الحقول». عملية ما تنقرأ بالكلمات الجديدة (مثلًا حذفت كلمة مهمة) ما تتغير وتطلع تنبيه. الحفظ خطوة وحدة في سجل التعديلات وتقدر تتراجع عنها.</p>
+  <h3>المدينة والمجموعة على العملية (1.7.0)</h3><p>تحت اسم العملية، قبل أي شارة: «🏷️ المجموعة» لكل مجموعة، و«📍 المدينة» للمدينة المعتمدة (بيدك أو من الموقع أو من «الفترات»)، و«📍 المدينة؟» بلون تنبيه لاقتراح موقع ما اعتمدته (بدل «بدون مدينة»، وفلتر «بدون مدينة» يشملها). «بدون مدينة» = ما لها مدينة ولا اقتراح. الموقع اللي تجاهلته ما يطلع له شي. في كل القوائم.</p>
+  <h3>علامة «بدون مدينة» (1.6.0)</h3><p>العلامة على المشتريات والسحب والمصروف النقدي اللي ما لها مدينة معتمدة (ما لها مدينة، أو اقتراح موقع ما اعتمدته)، إلا اللي اخترت لها «تجاهل الموقع لهذه العملية» أو اللي ما تنحسب في الصرف. تحويلات الأشخاص والرسوم بدون علامة.</p>
+  <h3>الفترات (1.7.0، كانت «فترات التجاهل»)</h3><p>في «المزيد». من تاريخ لتاريخ (بتاريخ العملية)، وفيها أي مجموعة من:</p><ul>
+  <li><b>مدينة</b>: للمشتريات والسحب والمصروف النقدي بس (مو الأونلاين ولا التحويلات لأشخاص ولا الرسوم). عند الحفظ تختار: «اللي بدون مدينة بس»، أو «كل العمليات» (حتى اللي حطيت مدينتها بيدك، وترجع قيمتها القديمة لو حذفت الفترة). العملية اللي سجّل الجوال (الموقع) لها مدينة ثانية ما تتغير أبدًا: تطلع «N عمليات موقعها مختلف» في الصفحة والتنبيهات، وتختار «طبّق مدينة الفترة عليها كلها» أو تراجعها وحدة وحدة. وإذا وصل الموقع بعدين بمدينة ثانية لعملية أخذت مدينة الفترة، الموقع يغلب وترجع لقيمتها.</li>
+  <li><b>مجموعة</b>: كل الصرف داخل الفترة (مشتريات، سحب، نقدي، تحويلات لأشخاص، ورسومها)، مو الدخل ولا الاسترداد (يتبع شراءه). <b>(1.7.1)</b> التحويل بين حساباتك وسداد البطاقة ما يدخلون المجموعة أبدًا، ولا رسومهم (واللي كان داخل منهم طلع مع التحديث، واللي يتغير نوعه بعدين إلى «بين حساباتي» أو سداد بطاقة يطلع وقتها؛ تقدر تضيف العملية للمجموعة بيدك). العملية اللي تشيل منها المجموعة بيدك ما ترجع لها، ولو رجعتها بيدك ترجع عادي.</li>
+  <li><b>تجاهل</b> علامة «بدون مدينة» و/أو علامات التصنيف («بدون تصنيف» و«نوعها غير معروف» و«تحويلات لأشخاص ما صنفتها»): تختفي وما تنعد في «يحتاج منك» و«بيانات تحتاج قرارك». الأرقام ما تتغير، والفلتر يعرضها ومعها «متجاهلة».</li>
+  <li>العمليات اللي توصل بعدين داخل الفترة (رسائل أو كشف أو إدخال يدوي) تاخذ المدينة («بدون مدينة» بس) والمجموعة تلقائيًا. حذف الفترة أو تعديلها يرجّع اللي جا منها بس، وتعديلاتك اليدوية تبقى.</li></ul>
   <h3>البحث (1.6.0)</h3><p>يبحث في كل شي: اسم المحل واسم الفاتورة، المستفيد، البنك، الحساب، البطاقة، التصنيف، الملاحظة، المرجع، أسماء الأغراض وملاحظاتها وتصنيفاتها، أجزاء السحب، المدينة (المعتمدة والمقترحة)، المجموعات، والمبالغ (18 = 18.00 = ١٨: الإجمالي والأصل والرسوم وأسعار الأغراض ومجاميعها). يتجاهل الهمزات والتاء المربوطة والمسافات. تحت كل نتيجة سبب ظهورها، مثل «فيها: طماطم ×2».</p>
-  <h3>التراجع وسجل التعديلات</h3><p>كل حفظ خطوة وحدة (بما فيها الاستيراد وجلب الرسائل). التراجع والإعادة لآخر 30 خطوة في الجلسة. سجل التعديلات يبقى (آخر 2000) ويدخل النسخة الاحتياطية. المفتاح السري لصندوق الرسائل ما يدخل النسخة الاحتياطية أبدًا.</p>
+  <h3>التراجع وسجل التعديلات</h3><p>كل حفظ خطوة وحدة (بما فيها الاستيراد وجلب الرسائل). التراجع والإعادة لآخر 30 خطوة في الجلسة. <b>(1.7.0)</b> فوق زر «تراجع» (كلمة)، وبعد ما تتراجع يطلع جنبه «إعادة»؛ وكل تراجع أو إعادة (من فوق أو من الرسالة تحت أو من «سجل التعديلات») يسألك «تتراجع عن: …؟» قبل. «إعادة» تختفي لما ما يبقى شي تعيده أو لما تسوي تعديل جديد. سجل التعديلات يبقى (آخر 2000) ويدخل النسخة الاحتياطية. المفتاح السري لصندوق الرسائل ما يدخل النسخة الاحتياطية أبدًا.</p>
+  <h3>صفحة العمليات (1.7.0)</h3><ul>
+  <li><b>صف النوع</b>: «الكل | إنفاق | دخل | تحويلات | سلف». «إنفاق» = كل اللي ينحسب صرف. «تحويلات» = التحويل بين حساباتك وسداد البطاقات والإيداع النقدي. «سلف» = السلفة اللي عطيتها وسدادها لك (ما تنحسب صرف ولا دخل).</li>
+  <li><b>يحتاج منك</b>: يظهر بس إذا فيه شي، بعدد العمليات. تحته (لما تضغطه) الأنواع اللي فيها عدد بس: بدون تصنيف، بدون مدينة، تحويلات لأشخاص ما صنفتها، نوعها غير معروف، ما راجعتها، أي محل؟، مالك البطاقة غير محدد، سداد بطاقة غير مطابق. الأعداد حسب الفترة والفلاتر المعروضة، والمتجاهل بفترة ما ينعد.</li>
+  <li><b>الفلاتر</b> (أيقونة القمع): نوع العملية (أكثر من نوع)، التصنيف (رئيسي أو فرعي) «حسب الفواتير» = نفس رقم «صرفياتك»، أو «حسب المنتجات» = كل فاتورة فيها أغراض من التصنيف (والغير مفصّل) وجنبها مبلغ الأغراض بس، نفس رقم «المنتجات». والمدينة والمجموعة والحساب والبطاقة وطريقة الدفع والمصدر. كل فلتر شغال فقاعة عليها × تشيله لحاله.</li>
+  <li><b>الجزء من العملية</b>: لما الفلتر يخص جزء منها (مثل جزء سحب نقدي أو أغراض)، المبلغ يطلع «200 من 500»، ومجموع القائمة = رقم التصنيف.</li>
+  <li><b>التحديد</b>: ضغطة مطوّلة على عملية، أو «تحديد» في سطر العدد.</li>
+  <li><b>التنقل</b>: في نافذة العملية تسحب يمين أو يسار للعملية اللي بعدها أو قبلها بنفس ترتيب القائمة اللي فتحتها منها (من اليسار لليمين = اللي تحتها). في «عملية جديدة» التنقل ما يعلّمها «راجعتها». لو فيها أغراض ما انحفظت يسألك قبل. سحب النافذة لتحت من فوقها يسكّرها (نفس ✕). في «صرفياتك» تسحب بين الأيام (وبين الأشهر في «سنوي») وتعبر للأسبوع أو الدورة أو السنة المجاورة؛ بدون يوم مختار تتنقل الفترة كلها. ما يروح لأيام جاية.</li></ul>
+  <h3>التاريخ في المستقبل (1.7.0)</h3><p>الإدخال اليدوي ما يقبل تاريخ بعد اليوم («التاريخ في المستقبل»). في استيراد الكشف، السطر اللي تاريخه بعد اليوم يطلع «تاريخ في المستقبل» في مراجعة الاستيراد وما ينحفظ إلا إذا اخترت «التاريخ صحيح، احفظها».</p>
   ${methods150()}
   <h3>الخصوصية</h3><p>قبل الحفظ تنخفي: الآيبان، رقم الهوية، أرقام الحسابات (متصلة أو مفصولة بمسافات أو شرطات، مثل 1234 567890 1234)، رقم الجوال إذا ظهر كرقم فاتورة، أرقام عقود التمويل. البصمة تنحسب قبل الإخفاء، ويبقى آخر 4 أرقام. التواريخ والأوقات والمبالغ ما تنخفي، والرقم اللي قبله «مرجع» أو «رقم العملية» يبقى. المستفيد يُعرف ببصمة SHA-256 لآيبانه (تقليل تعرض، مو تشفير سري). المراجع البنكية تبقى للمطابقة.</p></div>`;
 }
@@ -1243,15 +1382,16 @@ function catPath(cat, sub) {
 function sheetTx(id) {
   const st = store(), t = st.get('transactions', id); if (!t) return;
   const m = merchantOf(t), b = benOf(t), ins = insOf(t), acc = accOf(t.accountId);
-  const canCat = ['Payment', 'CashExpense', 'PersonTransfer', 'Refund', 'Unknown', 'CashWithdrawal'].includes(t.transactionType) && t.transferSubtype !== 'round_up';
+  // 1.7.0: عملية رسومها بس (مثل رسوم تحويل) تقبل تصنيف، لأن رسومها تنحسب على تصنيفها
+  const canCat = (['Payment', 'CashExpense', 'PersonTransfer', 'Refund', 'Unknown', 'CashWithdrawal'].includes(t.transactionType) && t.transferSubtype !== 'round_up') || (E.feeOf(t) > 0 && E.spendEffect(t) === 0);
   const types = ['Payment', 'Income', 'InternalTransfer', 'CreditCardPayment', 'PersonTransfer', 'Refund', 'CashWithdrawal', 'Unknown'];
   const recDef = E.effective(st, Object.assign({}, t, { recurrenceType: null }), 'rec'), necDef = E.effective(st, Object.assign({}, t, { necessityType: null }), 'nec');
-  const recL = { recurring: 'متكرر', variable: 'متغير' }, necL = { essential: 'ضروري', discretionary: 'اختياري' };
+  const recL = { recurring: 'متكرر', variable: 'متغير' }, necL = { essential: 'ضروري', discretionary: 'كمالي' };
   const u = txUi(t);
   const src0 = (t.sourceLinks || [])[0];
   const F = S.flow && S.flow.ids[S.flow.i] === t.id ? S.flow : null;
   let h = F ? `<h3><button class="close" data-action="flowX" aria-label="إغلاق">×</button><span class="sp" style="text-align:center;color:var(--ink-3);font-weight:600" id="flowpg">${flowPgText()}</span><span style="width:34px"></span></h3>`
-    : `<h3><button class="close" data-action="txClose" aria-label="إغلاق">×</button><span class="sp"></span>${S.newList ? `<button class="btn" data-action="newBack">العمليات الجديدة ${ico('chevL')}</button>` : ''}</h3>`;
+    : `<h3><button class="close" data-action="txClose" aria-label="إغلاق">×</button><span class="sp txpos">${txNavText(t.id)}</span>${S.newList ? `<button class="btn" data-action="newBack">العمليات الجديدة ${ico('chevL')}</button>` : '<span style="width:34px"></span>'}</h3>`;
   if (F) h += flowCardsHtml(t);
   h += `
     <div class="txh">
@@ -1278,8 +1418,8 @@ function sheetTx(id) {
   h += `<details class="more"><summary>تعديل النوع والخصائص والتفاصيل</summary>
     <label class="f">النوع</label><select id="s_type">${types.map(x => `<option value="${x}" ${x === t.transactionType ? 'selected' : ''}>${TYPE_L[x]}</option>`).join('')}</select>
     <div id="s_cp_wrap" class="${t.transactionType === 'InternalTransfer' ? '' : 'hide'}"><label class="f">الحساب الآخر (لك)</label><select id="s_cp">${ownAccountOptions(t.counterpartyAccountId, true)}</select></div>`;
-  if (canCat) h += `<div class="grid2"><div><label class="f">التكرار</label><select id="s_rec"><option value="">افتراضي (${recL[recDef] || '—'})</option><option value="recurring" ${t.recurrenceType === 'recurring' ? 'selected' : ''}>متكرر</option><option value="variable" ${t.recurrenceType === 'variable' ? 'selected' : ''}>متغير</option></select></div>
-      <div><label class="f">الضرورة</label><select id="s_nec"><option value="">افتراضي (${necL[necDef] || '—'})</option><option value="essential" ${t.necessityType === 'essential' ? 'selected' : ''}>ضروري</option><option value="discretionary" ${t.necessityType === 'discretionary' ? 'selected' : ''}>اختياري</option></select></div></div>${txChainFields(t)}`;
+  if (canCat) h += `<div class="grid2"><div><label class="f">التكرار</label><select id="s_rec"><option value="">افتراضي (${recL[recDef] || 'غير محدد'})</option><option value="recurring" ${t.recurrenceType === 'recurring' ? 'selected' : ''}>متكرر</option><option value="variable" ${t.recurrenceType === 'variable' ? 'selected' : ''}>متغير</option></select></div>
+      <div><label class="f">الضرورة</label><select id="s_nec"><option value="">افتراضي (${necL[necDef] || 'غير محدد'})</option><option value="essential" ${t.necessityType === 'essential' ? 'selected' : ''}>ضروري</option><option value="discretionary" ${t.necessityType === 'discretionary' ? 'selected' : ''}>كمالي</option></select></div></div>${txChainFields(t)}`;
   h += `<dl class="kv" style="margin-top:14px">
     <dt>تاريخ العملية</dt><dd>${fdate(t.transactionDate, true)}</dd>${t.postingDate && t.postingDate !== t.transactionDate ? `<dt>تاريخ القيد</dt><dd>${fdate(t.postingDate, true)}</dd>` : ''}
     <dt>الأداة</dt><dd>${ins ? esc(ins.label) + ` (المالك: ${OWNER_L[ins.instrumentOwner]}) <a data-action="editInstrument" data-id="${ins.id}">تعديل</a>` : 'أداة دفع غير محددة'}</dd>
@@ -1307,6 +1447,9 @@ function txExcludeBtn(t) {
 // أجزاء خاصة بنوع العملية داخل نافذتها: نوع التحويل، ربط الاسترداد، تقسيم السحب، نقل مصروف نقدي لسحب
 function txBlocks(t) {
   const st = store(), b = benOf(t); let h = '';
+  // 1.7.0: عملية رسومها بس أو اسمها «رسوم»: اقتراح بس، ما تتصنف إلا إذا وافقت
+  const fs = E.feeSuggestion(st, t);
+  if (fs) h += `<div class="txblock sug"><div class="small">مقترح: <b>${esc(E.catName(st, fs))}</b>${E.feeOf(t) > 0 && E.spendEffect(t) === 0 ? ' (العملية رسوم بس)' : ''}. ما تتصنف إلا إذا وافقت.</div><div class="btns" style="margin-top:6px"><button class="btn" data-action="feeAccept" data-id="${t.id}">صنّفها «${esc(E.catName(st, fs))}»</button></div></div>`;
   if (t.excludedByUser) h += `<div class="banner i" style="margin-top:10px"><div>هذي العملية ما تنحسب في الصرف ولا في أي رقم. تقدر ترجعها بزر «احسبها في الصرف».</div></div>`;
   const tk = E.transferKindOf(t);
   if (tk && t.direction === 'out' && t.transferSubtype !== 'round_up') {
@@ -1382,7 +1525,7 @@ function pickCategory(cur, opts) {
   opts = opts || {};
   return new Promise(res => {
     S.pickResolve = res;
-    S.pick = { cat: cur.cat || null, sub: cur.sub || null, stage: 'grid', allowNone: opts.allowNone !== false };
+    S.pick = { cat: cur.cat || null, sub: cur.sub || null, stage: 'grid', allowNone: opts.allowNone !== false, follow: opts.follow || null };
     renderPick();
   });
 }
@@ -1395,7 +1538,9 @@ function renderPick() {
     h += `<div class="catgrid">${mains.map(c => { const u = catUi(c.id); return `<button data-action="pickMain" data-id="${c.id}" class="${P.cat === c.id ? 'on' : ''}"><span style="color:${u.color};display:flex">${glyph(u)}</span><span>${esc(c.name)}</span></button>`; }).join('')}</div>`;
     h = h.replace(/<\/div>$/, '');
     h += `<button data-action="pickNew" class="newcat"><span style="display:flex">${ico('plus')}</span><span>تصنيف جديد</span></button></div>`;
-    if (P.allowNone) h += `<div style="text-align:center;margin-top:16px"><button class="btn" data-action="pickNone">بدون تصنيف</button></div>`;
+    // 1.7.0: الغرض: «مثل الفاتورة» يرجّعه يتبع تصنيف فاتورته
+    if (P.follow) h += `<div style="text-align:center;margin-top:16px"><button class="btn ${P.follow.on ? 'p' : ''}" data-action="pickFollow">مثل الفاتورة${P.follow.label ? ` (${esc(P.follow.label)})` : ''}</button></div>`;
+    else if (P.allowNone) h += `<div style="text-align:center;margin-top:16px"><button class="btn" data-action="pickNone">بدون تصنيف</button></div>`;
   } else if (P.stage === 'new') {
     h += `<div class="catform">${catFormHtml(null, P.newParent || null, false)}<div class="btns" style="margin-top:12px"><button class="btn p" data-action="catSave" data-pick="1">إضافة واختيار</button><button class="btn" data-action="pickBack">رجوع</button></div></div>`;
   } else {
@@ -1425,18 +1570,39 @@ function sheetPeriod() {
     <h3 style="margin-top:14px">فترة مخصصة</h3><div class="grid2"><div><label class="f">من</label><input type="date" id="p_from" value="${cur.start}"></div><div><label class="f">إلى</label><input type="date" id="p_to" value="${cur.end}"></div></div>
     <button class="btn p" style="margin-top:10px" data-action="setCustomPeriod">تطبيق</button>`);
 }
+// 1.7.0: شاشة الفلاتر بأقسام: نوع العملية (أكثر من نوع)، التصنيف (رئيسي أو فرعي، حسب الفواتير أو المنتجات)، المدينة، المجموعة، الحساب والبطاقة، طريقة الدفع، المصدر
 function sheetFilters() {
-  const st = store(), f = S.filters;
-  const sel = (id, opts, cur) => `<select id="${id}"><option value="">الكل</option>${opts.map(([v, l]) => `<option value="${v}" ${v === cur ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`;
-  openSheet(`<h3>فلاتر<span class="sp"></span><button class="close" data-action="closeSheet">×</button></h3>
-    <label class="f">النوع</label>${sel('f_kind', Object.entries(KIND_L).filter(([k]) => k !== 'all'), f.kind === 'all' ? '' : f.kind)}
-    <label class="f">الحساب</label>${sel('f_acc', st.all('accounts').map(a => [a.id, a.name]), f.accountId)}
-    <label class="f">الأداة</label>${sel('f_ins', st.all('instruments').map(i => [i.id, i.label]), f.instrumentId)}
-    <label class="f">طريقة الدفع</label>${sel('f_method', Object.entries(METHOD_L), f.method)}
-    <label class="f">التصنيف</label>${sel('f_cat', [['__none', 'بدون تصنيف'], ['__person', 'تحويلات لأشخاص (مؤقت)'], ['__roundup', 'تقريب (وجهته غير محددة)']].concat(st.all('categories').filter(c => !c.parentId).sort((a, b) => a.order - b.order).map(c => [c.id, c.name])), f.categoryId)}
-    <label class="f">المصدر</label>${sel('f_src', Object.entries(SRC_L), f.source)}
-    <label class="f">المدينة</label><select id="f_city"><option value="">الكل</option><option value="none" ${f.noCity ? 'selected' : ''}>بدون مدينة (مشتريات وسحب ومصروف نقدي)</option></select>
-    <div class="btns" style="margin-top:12px"><button class="btn p" data-action="applyFilters">تطبيق</button><button class="btn" data-action="clearFilters">مسح الكل</button></div>`);
+  const st = store(), f = S.fDraft || (S.fDraft = JSON.parse(JSON.stringify(S.filters)));
+  const sel = (id, opts, cur, allL) => `<select id="${id}"><option value="">${allL || 'الكل'}</option>${opts.map(([v, l]) => `<option value="${esc(v)}" ${v === cur ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`;
+  const types = f.types || [], cat = f.categoryId || null;
+  const catTxt = !cat ? 'كل التصنيفات' : cat === '__none' ? 'بدون تصنيف' : String(cat).startsWith('__') ? bucketName(cat) : pcName(cat), cu = catUi(cat || '__none');
+  const used = cityUsage(), cities = st.all('cities').filter(c => c.active !== false && used.has(c.id)).sort((a, b) => (used.get(b.id) || 0) - (used.get(a.id) || 0));
+  const cityCur = f.noCity ? '__none' : (f.cityId || '');
+  if (f.cityId && !cities.some(c => c.id === f.cityId)) cities.unshift({ id: f.cityId, name: f.cityId === '__unknown' ? 'غير معروفة' : cityName(f.cityId) }); // فلتر مدينة من صفحة المدن يبقى
+  const groups = st.all('groups').filter(g => g.active !== false).map(g => [g.id, ((g.emoji || '') + ' ' + g.name).trim()]);
+  openSheet(`<h3>الفلاتر<span class="sp"></span><button class="close" data-action="fxClose" aria-label="إغلاق">×</button></h3>
+    <div class="fxsec"><div class="fxh">نوع العملية <span class="muted small">(تقدر تختار أكثر من نوع)</span></div><div class="chipw">${FX_TYPES.map(([k, l]) => `<button type="button" class="chip ${types.includes(k) ? 'on' : ''}" data-action="fxType" data-k="${k}">${l}</button>`).join('')}</div></div>
+    <div class="fxsec"><div class="fxh">التصنيف</div><div class="btns"><button type="button" class="btn" data-action="fxCat"><span style="color:${cu.color};display:flex">${glyph(cu)}</span>${esc(catTxt)}</button>${cat ? `<button type="button" class="btn" data-action="fxCatClear" aria-label="شيل التصنيف">×</button>` : `<button type="button" class="chip" data-action="fxCatNone">بدون تصنيف</button>`}</div>
+      ${cat && cat !== '__none' && !String(cat).startsWith('__') ? `<div class="seg" style="margin-top:8px"><button type="button" class="${f.catBasis !== 'products' ? 'on' : ''}" data-action="fxBasis" data-v="invoices">حسب الفواتير</button><button type="button" class="${f.catBasis === 'products' ? 'on' : ''}" data-action="fxBasis" data-v="products">حسب المنتجات</button></div>
+      <p class="small muted" style="margin:6px 0 0">${f.catBasis === 'products' ? 'كل فاتورة فيها أغراض من هذا التصنيف (حتى لو الفاتورة نفسها تصنيف ثاني)، وجنبها مبلغ الأغراض بس.' : 'الفواتير المصنفة فيه، بنفس رقم «صرفياتك».'}</p>` : ''}</div>
+    <div class="fxsec"><div class="grid2"><div><label class="f">المدينة</label><select id="f_city"><option value="">الكل</option><option value="__none" ${cityCur === '__none' ? 'selected' : ''}>بدون مدينة</option>${cities.map(c => `<option value="${c.id}" ${cityCur === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></div>
+      <div><label class="f">المجموعة</label>${sel('f_grp', groups, f.groupId)}</div></div></div>
+    <div class="fxsec"><div class="grid2"><div><label class="f">الحساب</label>${sel('f_acc', st.all('accounts').map(a => [a.id, a.name]), f.accountId)}</div>
+      <div><label class="f">البطاقة أو الأداة</label>${sel('f_ins', st.all('instruments').map(i => [i.id, i.label]), f.instrumentId)}</div></div>
+      <div class="grid2"><div><label class="f">طريقة الدفع</label>${sel('f_method', Object.entries(METHOD_L), f.method)}</div>
+      <div><label class="f">المصدر</label>${sel('f_src', Object.entries(SRC_L), f.source)}</div></div></div>
+    <div class="btns" style="margin-top:14px"><button class="btn p" data-action="applyFilters">تطبيق</button><button class="btn" data-action="clearFilters">مسح الكل</button></div>`);
+}
+// يقرأ القوائم في المسودة قبل ما تنعاد رسم الشاشة
+function fxSync() {
+  const f = S.fDraft; if (!f || !$('f_acc')) return f;
+  const v = (id) => ($(id) && $(id).value) || null;
+  const city = v('f_city');
+  Object.assign(f, { accountId: v('f_acc'), instrumentId: v('f_ins'), method: v('f_method'), source: v('f_src'), groupId: v('f_grp') });
+  if (city === '__none') { f.noCity = true; delete f.cityId; delete f.cityMode; }
+  else if (city) { f.cityId = city; if (f.cityMode !== 'withGps') delete f.cityMode; delete f.noCity; }
+  else { delete f.noCity; delete f.cityId; delete f.cityMode; }
+  return f;
 }
 function sheetManual(kind, pre) {
   pre = pre || {};
@@ -1445,7 +1611,7 @@ function sheetManual(kind, pre) {
   const title = { expense: 'مصروف', income: 'دخل', withdrawal: 'سحب نقدي', deposit: 'إيداع نقدي' }[kind];
   let h = `<h3>${title}<span class="sp"></span><button class="close" data-action="closeSheet">×</button></h3>
     <label class="f">المبلغ</label><input type="text" inputmode="decimal" id="m_amt" value="${pre.amount || ''}" placeholder="0.00">
-    <label class="f">التاريخ</label><input type="date" id="m_date" value="${E.todayISO()}">`;
+    <label class="f">التاريخ</label><input type="date" id="m_date" value="${E.todayISO()}" max="${E.todayISO()}">`;
   const ws = kind === 'expense' ? E.recentWithdrawals(st, E.todayISO(), 90) : [];
   if (kind === 'expense') h += `<label class="f">الوصف أو التاجر</label><input type="text" id="m_desc" value="${esc(pre.description || '')}"><label class="f">دُفع عن طريق</label><select id="m_ins">${insList.map(i => `<option value="${i.id}" ${i.id === cashIns.id ? 'selected' : ''}>${esc(i.label)}</option>`).join('')}</select>
     ${ws.length ? `<div id="m_wwrap"><label class="f">النقد هذا من سحب نقدي؟</label><select id="m_w"><option value="">— اختر —</option>${ws.map(w => `<option value="${w.id}">نعم: سحب ${fmt(w.amount)} · ${fdate(w.date)} (باقي ${fmt(w.remaining)})</option>`).join('')}<option value="__direct">لا، نقد من مصدر ثاني (صرف مباشر)</option></select><p class="small muted">السحب نفسه انحسب صرف. إذا المصروف منه، يصير جزء منه وما ينحسب مرتين.</p></div>` : ''}
@@ -1512,11 +1678,11 @@ function sheetRoundUp() {
 }
 /* ================= MVP1.1 + 1.1.1: الرسائل، المراجعة، التعديل الجماعي، السجل، الحدود، القواعد ================= */
 const SR = () => window.SmsReader;
-const REVIEW_L = { sms_deleted_again: 'عملية حذفتها قبل', sms_duplicate: 'تكرار محتمل مع عملية موجودة', sms_no_account: 'الحساب غير معروف', sms_unparsed: 'ما قدرت أقرأ الرسالة', sms_unknown: 'رسالة غير معروفة النوع', sms_same_content: 'نفس نص رسالة سابقة', sms_partial: 'عملية ناقصة الحقول', sms_no_date: 'رسالة بدون تاريخ', sms_date_shape: 'ترتيب التاريخ', sms_new_bank: 'بنك جديد: تأكد من القراءة', sms_new_bank_info: 'بنك جديد: رسالة فيها مبلغ' };
+const REVIEW_L = { sms_deleted_again: 'عملية حذفتها قبل', sms_duplicate: 'تكرار محتمل مع عملية موجودة', sms_no_account: 'الحساب غير معروف', sms_unparsed: 'ما قدرت أقرأ الرسالة', sms_unknown: 'رسالة غير معروفة النوع', sms_same_content: 'نفس نص رسالة سابقة', sms_partial: 'عملية ناقصة الحقول', sms_no_date: 'رسالة بدون تاريخ', sms_date_shape: 'ترتيب التاريخ', sms_new_bank: 'بنك جديد: تأكد من القراءة', sms_new_bank_info: 'بنك جديد: رسالة فيها مبلغ', sms_new_shape: 'شكل رسالة جديد' };
 const SHAPE_TITLE = { old: 'تاريخ أقدم من وصول الرسالة', new: 'شكل تاريخ جديد', legacy: 'تاريخ رسائل سابقة', future: 'تاريخ في المستقبل', order_invalid: 'التاريخ ما ينطبق على الترتيب المحفوظ' };
 const MSG_STATUS_L = { sender_ignored: 'من مرسل متجاهل', tx: 'عملية', merged: 'اندمجت', duplicate: 'مكررة', review: 'مراجعة', informational: 'معلومات', discarded: 'رمز تحقق', ignored: 'متجاهلة', manual: 'أدخلت يدويًا', deleted: 'محذوفة' };
 const CLS_L = { financial: 'مالية', otp: 'رمز تحقق', informational: 'معلومات', unknown: 'غير معروفة' };
-const FIELD_L = { amount: 'المبلغ', merchant: 'التاجر', beneficiary: 'المستفيد', counterparty: 'المرسل', cardLast4: 'آخر 4 للبطاقة', accountLast4: 'آخر 4 للحساب', balance: 'الرصيد', fee: 'الرسوم', direction: 'الاتجاه', date: 'التاريخ', time: 'الوقت', method: 'وسيلة الدفع' };
+const FIELD_L = { amount: 'المبلغ', merchant: 'المحل', beneficiary: 'المستفيد', counterparty: 'المرسل', cardLast4: 'آخر 4 للبطاقة', accountLast4: 'آخر 4 للحساب', balance: 'الرصيد', fee: 'الرسوم', direction: 'الاتجاه', date: 'التاريخ', time: 'الوقت', method: 'وسيلة الدفع' };
 const FAMILY_DIR = { sms_purchase: 'out', sms_refund: 'in', sms_transfer_out: 'out', sms_transfer_in: 'in', salary: 'in', sms_cash_withdrawal: 'out', sms_cash_deposit: 'in', bill_payment: 'out', card_payment: 'out', sms_debit: 'out', sms_credit: 'in' };
 W.msg = ['رسالة واحدة', 'رسالتان', 'رسائل', 'رسالة'];
 
@@ -1558,6 +1724,7 @@ async function fetchInbox(manual) {
     let plan = null;
     if (msgs.length) plan = await processSms(msgs, 'جلب ' + cnt(msgs.length, 'msg'), 'inbox');
     else await persist(null, { noStep: true });
+    { const w = E.waitingForFormats(store()); if (w.length) { const p2 = await E.reprocessMessages(store(), w, {}); if (p2) { E.commitSms(store(), p2, { markReview: true }); await persist(null, { noStep: true }); } } }
     // 1.5.1: رسالة محفوظة عندنا رجعت ومعها مدينة ما كانت عندنا (وصلت بعد السحب): تنربط كاقتراح، وتنحفظ قبل تأكيد الرسالة
     let cityDone = 0;
     msgs.forEach(m => { if (m.suggestedCity && E.applyCityUpdate(store(), m) === 'applied') cityDone++; });
@@ -1622,9 +1789,9 @@ function dataIssues() {
   const unk = st.all('transactions').filter(t => t.transactionType === 'Unknown' && !igC(t));
   if (unk.length) items.push({ t: `${cnt(unk.length, 'op')} نوعها غير معروف${unk.some(t => t.direction === 'out') ? ' (الخارجة منها داخلة في صرفك)' : ''}`, a: `<a data-action="issueTxs" data-kind="unclassified_all">صنّفها</a>` });
   const tmp = st.all('transactions').filter(t => t.classificationStatus === 'temporary' && !igC(t));
-  if (tmp.length) items.push({ t: `${cnt(tmp.length, 'tr')} لأشخاص بتصنيف مؤقت`, a: `<a data-action="issueTxs" data-kind="temporary">حدد تصنيفها</a>` });
-  const unc = st.all('transactions').filter(t => !igC(t) && E.spendParts(st, t).some(p => p.cat === '__none'));
-  if (unc.length) items.push({ t: `${cnt(unc.length, 'op')} صرف بدون تصنيف`, a: `<a data-action="issueTxs" data-kind="uncategorized">صنّفها</a>` });
+  if (tmp.length) items.push({ t: `${cnt(tmp.length, 'tr')} لأشخاص ما صنفتها`, a: `<a data-action="issueTxs" data-kind="temporary">حدد تصنيفها</a>` });
+  const unc = st.all('transactions').filter(t => !igC(t) && t.transactionType !== 'Refund' && E.spendParts(st, t).some(p => p.cat === '__none'));
+  if (unc.length) items.push({ t: `${cnt(unc.length, 'op')} صرف بدون تصنيف`, a: `<a data-action="needGo" data-k="uncategorized">صنّفها</a>` }); // 1.7.0: نفس «يحتاج منك ← بدون تصنيف»
   const oldCash = st.all('transactions').filter(isOldCash);
   if (oldCash.length && st.all('transactions').some(t => t.transactionType === 'CashWithdrawal')) items.push({ t: `${cnt(oldCash.length, 'op')} مصروف نقدي مسجل قبل التحديث. السحب صار ينحسب صرف، فإذا كانت من سحب انقلها له عشان ما تنحسب مرتين`, a: `<a data-action="issueTxs" data-kind="oldcash">راجعها</a>` });
   const ru = st.all('transactions').filter(isRoundUpUnknown).length;
@@ -1670,16 +1837,19 @@ function reviewCard(r) {
       btns = `<button class="btn p" data-action="rvAcc" data-id="${r.id}">احفظها</button><button class="btn" data-action="rvMsg" data-id="${r.id}" data-v="ignore">تجاهل</button>`;
       break;
     }
-    case 'sms_unparsed': body = `<div class="small">ناقص: ${(r.missing || []).map(k => FIELD_L[k] || k).join('، ') || '—'}. علّمني الصيغة مرة وحدة، والرسائل الجاية من نفس الصيغة تنقرأ تلقائيًا.</div>`;
-      btns = `<button class="btn p" data-action="teachSms" data-id="${r.id}">علّم الصيغة</button><button class="btn" data-action="rvManual" data-id="${r.id}">أدخلها يدويًا</button><button class="btn" data-action="rvMsg" data-id="${r.id}" data-v="informational">معلومات فقط</button>`; break;
-    case 'sms_unknown': body = `<div class="small">${esc(r.reason || 'ما تعرفت على نوعها')}. وش نوعها؟</div>`;
-      btns = `<button class="btn p" data-action="teachSms" data-id="${r.id}">مالية: علّم الصيغة</button><button class="btn" data-action="rvMsg" data-id="${r.id}" data-v="informational">معلومات فقط</button><button class="btn r" data-action="rvMsg" data-id="${r.id}" data-v="otp">رسالة رمز (احذف نصها)</button>`; break;
-    case 'sms_new_bank': { const x = newBankCard(r, m); body = x.body; btns = x.btns; break; }
-    case 'sms_new_bank_info': body = `<div class="small">رسالة من <b>${esc(E.bankLabel(st, m && m.sender) || '—')}</b> (بنك جديد ما اعتمدت منه شي) فيها مبلغ${SR().extractAmount(m && m.text || '') ? ` ${num(SR().extractAmount(m.text).value)}` : ''}، بس ما عرفت نوعها. لو هي عملية علّمني صيغتها، وإلا خلها معلومات.</div>`;
-      btns = `<button class="btn p" data-action="teachSms" data-id="${r.id}">مالية: علّم الصيغة</button><button class="btn" data-action="rvMsg" data-id="${r.id}" data-v="informational">معلومات فقط</button>`; break;
+    case 'sms_new_shape': {
+      // 1.7.1: رسالة ما لها صيغة معتمدة. الاقتراح = تخمين، تصححه وتعتمده
+      const g = r.suggest, grp = (r._group || []).length, pend = r.pendingId && st.get('templates', r.pendingId), ids = [r.id].concat(r._group || []).join(',');
+      body = `<div class="small">${g ? `اقتراحي لقراءتها: <b>${esc(FAM_L()[g.family] || g.family || '')}</b>${g.amount != null ? ` · <span class="num">${fmt(g.amount)}</span>` : ''}${g.name ? ` · <bdi>${esc(g.name)}</bdi>` : ''}. إذا هي عملية، عرّف صيغتها (تصحّح الاقتراح وتعتمده) والرسائل الجاية بنفس الشكل تمشي لحالها.` : r.hasAmount ? 'فيها مبلغ بس ما قدرت أقترح لها قراءة. إذا هي عملية عرّف صيغتها، وإلا خلها معلومات.' : 'ما فيها مبلغ. إذا مو مهمة خلها معلومات.'}${grp ? ` <b>ومعها ${cnt(grp, 'msg')} بنفس الشكل</b> تنتظر نفس القرار.` : ''}${pend ? ' شكلها موجود في «الصيغ» ينتظر اعتمادك.' : ''}</div>`;
+      btns = `${pend ? `<button class="btn p" data-action="fmtPendGo" data-id="${pend.id}">افتح الشكل واعتمده</button>` : ''}<button class="btn ${pend ? '' : 'p'}" data-action="teachSms" data-id="${r.id}">عملية: عرّف الصيغة</button>${r.weakOtp ? '' : `<button class="btn" data-action="rvInfoFmt" data-id="${r.id}">معلومات ولا تسألني عن هالشكل</button>`}<button class="btn" data-action="rvInfoOnce" data-ids="${ids}">معلومات هالمرة بس</button>${r.weakOtp ? `<button class="btn r" data-action="rvMsg" data-ids="${ids}" data-v="otp">رسالة رمز (احذف نصها)</button>` : ''}`;
+      break;
+    }
+    case 'sms_unparsed': { const f = r.templateId && st.get('templates', r.templateId);
+      body = `<div class="small">${f ? `طابقت صيغة «${esc(f.name || '')}» بس ما قدرت أقرأ: <b>${(r.missing || []).map(k => FIELD_L[k] || k).join('، ') || '—'}</b>. عدّل الصيغة، أو أدخلها يدويًا.` : `ناقص: ${(r.missing || []).map(k => FIELD_L[k] || k).join('، ') || '—'}.`}</div>`;
+      btns = `<button class="btn p" data-action="teachSms" data-id="${r.id}">${f ? 'عدّل الصيغة' : 'عرّف الصيغة'}</button><button class="btn" data-action="rvManual" data-id="${r.id}">أدخلها يدويًا</button><button class="btn" data-action="rvInfoOnce" data-ids="${r.id}">معلومات هالمرة بس</button>`; break; }
     case 'sms_same_content': { const o = st.get('messages', r.otherMessageId); body = `<div class="small">نفس نص رسالة سابقة${o && o.receivedAt ? ` (${fdate(ldate(o.receivedAt), true)})` : ''}. ممكن تكون نفس الرسالة وصلت مرتين، أو عمليتين متطابقتين.</div>`;
       btns = `<button class="btn p" data-action="rvSame" data-id="${r.id}">عمليتان مختلفتان: عالجها</button><button class="btn" data-action="rvMsg" data-id="${r.id}" data-v="ignore">مكررة: تجاهلها</button>`; break; }
-    case 'sms_no_date': body = `<div class="small">الرسالة ما فيها تاريخ واضح، وما أعتمد وقت اللصق لأنها ممكن تكون رسالة قديمة. المبلغ ${num(r.info ? r.info.grossAmount : 0)}.</div>
+    case 'sms_no_date': body = `<div class="small">${(store().get('messages', r.messageId) || {}).source === 'paste' ? 'الرسالة ما فيها تاريخ واضح، وما أعتمد وقت اللصق لأنها ممكن تكون رسالة قديمة.' : 'ما قدرت أعتمد تاريخ هالرسالة (التاريخ اللي قريته بعد وقت وصولها، أو ما فيها تاريخ واضح).'} المبلغ ${num(r.info ? r.info.grossAmount : 0)}.</div>
         <label class="f">تاريخ العملية</label><input type="date" id="rvdate_${r.id}" max="${E.todayISO()}">`;
       btns = `<button class="btn p" data-action="rvDate" data-id="${r.id}">احفظها بهذا التاريخ</button><button class="btn" data-action="rvMsg" data-id="${r.id}" data-v="ignore">تجاهل</button>`; break;
     case 'sms_date_shape': {
@@ -1699,10 +1869,10 @@ function reviewCard(r) {
     case 'sms_deleted_again': { const d = st.get('deletedTxs', r.deletedId); body = `<div class="small">هذي الرسالة لعملية حذفتها قبل${d ? `: <b>${esc(txTitle(d))}</b> ${fmt(d.grossAmount)} · ${fdate(d.transactionDate, true)}` : ''}. ترجعها؟</div>`;
       btns = `<button class="btn p" data-action="rvDel" data-id="${r.id}" data-v="restore">رجّعها</button><button class="btn" data-action="rvDel" data-id="${r.id}" data-v="keep">خلها محذوفة</button>`; break; }
     case 'sms_partial': { const t = st.get('transactions', r.txId); body = `<div class="small">انحفظت العملية، لكن ناقص: ${(r.missing || []).map(k => FIELD_L[k] || k).join('، ')}.</div><div class="kvbox" style="margin-top:6px;font-size:12.5px">${txMini(t)}</div>`;
-      btns = `<button class="btn p" data-action="teachSms" data-id="${r.id}">علّم الصيغة وأكملها</button>${t ? `<button class="btn" data-action="openTx" data-id="${t.id}">افتح العملية</button>` : ''}<button class="btn" data-action="rvMsg" data-id="${r.id}" data-v="ignore">تم</button>`; break; }
+      btns = `<button class="btn p" data-action="teachSms" data-id="${r.id}">عرّف الصيغة وأكملها</button>${t ? `<button class="btn" data-action="openTx" data-id="${t.id}">افتح العملية</button>` : ''}<button class="btn" data-action="rvMsg" data-id="${r.id}" data-v="ignore">تم</button>`; break; }
   }
   if (m && m.sender && IGN_SENDER_KINDS.has(r.kind)) btns += `<button class="btn" data-action="rvIgnoreSender" data-id="${r.id}">مو بنك: تجاهل رسائل ${esc(E.bankLabel(st, m.sender))}</button>`;
-  const title = r.kind === 'sms_date_shape' ? (SHAPE_TITLE[r.reason] || REVIEW_L[r.kind]) : (REVIEW_L[r.kind] || r.kind);
+  const title = r.kind === 'sms_date_shape' ? (SHAPE_TITLE[r.reason] || REVIEW_L[r.kind]) : r.kind === 'sms_new_shape' && r.pendingId && st.get('templates', r.pendingId) ? 'رسالة شكلها ينتظر اعتمادك' : (REVIEW_L[r.kind] || r.kind);
   return `<div class="rv"><div class="rvh"><b>${title}</b><span class="sp"></span><span class="small muted">${fdate(ldate(r.createdAt))}</span></div>${msgBox(m)}${body}<div class="btns" style="margin-top:10px">${btns}</div></div>`;
 }
 // 1.5.2: رسائل بنفس النص بالضبط (حتى الوقت) انحسبت مرة وحدة تلقائيًا
@@ -1712,45 +1882,102 @@ function autoDupCard(r) {
     <div class="small">نفس نص رسالة وصلت قبل${o && o.receivedAt ? ` (${fdt(o.receivedAt, true)})` : ''} بالضبط حتى الوقت، فانحسبت مرة وحدة.</div>
     <div class="btns" style="margin-top:10px"><button class="btn" data-action="rvNotDup" data-id="${r.id}">مو مكررة: احسبها عملية</button><button class="btn" data-action="rvDupHide" data-id="${r.id}">تمام، إخفاء</button></div></div>`;
 }
+// 1.7.1: الرسائل المنتظرة اللي بنفس الشكل (ونفس البنك) بطاقة وحدة: قرار واحد يمشي عليها كلها
+function groupedReviews() {
+  const out = [], seen = new Map();
+  openReviews().forEach(r => {
+    if (r.kind !== 'sms_new_shape' || !r.sig) { out.push(r); return; }
+    const k = (r.bank || '') + '|' + r.sig, head = seen.get(k);
+    if (head) head._group.push(r.id); else { const c = Object.assign({}, r, { _group: [] }); seen.set(k, c); out.push(c); }
+  });
+  return out;
+}
+const pendingFormats = () => E.smsFormats(store(), 'pending');
 function vReviewCenter() {
-  const rs = openReviews(), issues = dataIssues();
+  const rs = groupedReviews(), issues = dataIssues(), pf = pendingFormats();
   const dups = store().all('reviews').filter(r => r.resolution === 'auto_duplicate' && !r.hidden).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   const un = E.unreviewedTxs(store()).sort(txOrder), sc = E.shopChoiceTxs(store()).sort(sortTx);
   let h = '';
   if (un.length) h += `<div class="card"><h2>عمليات ما راجعتها <span class="sp"></span><button class="btn p" data-action="flowResume">كمّل المراجعة</button></h2><p class="small muted">عمليات جديدة من الرسائل أجلت مراجعتها أو وصلت وأنت مشغول. تطلع لك وحدة ورا الثانية تكمل تصنيفها وأغراضها ومدينتها.</p>${un.slice(0, 30).map(t => txRow(t, true)).join('')}${un.length > 30 ? `<div class="small muted" style="margin-top:6px">و${un.length - 30} غيرها</div>` : ''}</div>`;
   if (sc.length) h += `<div class="card"><h2>فاتورة تحتمل أكثر من محل <span class="sp"></span><span class="muted">${sc.length}</span></h2><p class="small muted">أخذت المحل الافتراضي لين تختار. التصنيف يمشي على المحل اللي تختاره.</p>${sc.slice(0, 40).map(shopChoiceCard).join('')}</div>`;
+  if (pf.length) h += `<div class="card"><h2>أشكال رسائل تنتظر اعتمادك <span class="sp"></span><button class="btn p" data-action="go" data-view="formats">افتحها (${pf.length})</button></h2><p class="small muted">أشكال رسائلك السابقة: اعتمد كل شكل أو عدّله. لين تعتمد الشكل، رسائله الجديدة تنتظر هنا.</p></div>`;
   h += `<div class="card"><h2>رسائل تحتاج قرارك <span class="sp"></span><span class="muted">${rs.length}</span></h2>${rs.length ? rs.map(reviewCard).join('') : '<div class="muted">ما فيه رسائل معلّقة.</div>'}</div>`;
   if (dups.length) h += `<div class="card"><h2>مكررة تلقائيًا <span class="sp"></span><span class="muted">${dups.length}</span></h2><p class="small muted">نفس الرسالة وصلت أكثر من مرة، فانحسبت مرة وحدة. لو كانت عمليتين فعلًا اضغط «مو مكررة».</p>${dups.map(autoDupCard).join('')}</div>`;
   h += `<div class="card"><h2>بيانات تحتاج قرارك <span class="sp"></span><span class="muted">${issues.length}</span></h2>${issues.length ? `<div class="list">${issues.map(i => `<div class="it" style="cursor:default"><div class="m"><div class="t" style="font-weight:600">${i.t}</div></div><div class="small">${i.a}</div></div>`).join('')}</div>` : '<div class="muted">كل شي واضح.</div>'}</div>`;
   return h;
 }
 
-/* ---------- تعليم صيغة رسالة ---------- */
+/* ---------- تعريف صيغة رسالة (1.7.1: الصيغ الثابتة) ----------
+   S.teachSms = {mode: review|pending|edit, back, reviewId, messageId, formatId, text, tokens, ranges: {المتغير: [من كلمة، إلى كلمة]}, skips: Set(كلمات تتغير)، active, family, sender, feeMode, dateOrder, name}.
+   التعبئة المبدئية اقتراح من القارئ العام: المستخدم يصحح ويعتمد. الكلام اللي ما يتحدد = نص ثابت لازم يتطابق بالضبط. */
 function tokenize(text) { const out = []; const re = /[^\s]+/g; let m; while ((m = re.exec(text))) { let s = m.index, e = s + m[0].length; while (e > s && /[،,.:;؛)\]]/.test(text[e - 1]) && e - s > 1) e--; while (s < e && /[(\[:]/.test(text[s]) && e - s > 1) s++; out.push({ s, e, line: text.slice(0, m.index).split('\n').length - 1 }); } return out; }
-function teachFieldsFor(family) {
-  const base = ['amount'];
-  if (family === 'sms_transfer_out') base.push('beneficiary'); else if (family === 'sms_transfer_in' || family === 'salary') base.push('counterparty'); else if (!['sms_cash_withdrawal', 'sms_cash_deposit', 'card_payment'].includes(family)) base.push('merchant');
-  const extra = ['sms_transfer_out', 'sms_transfer_in', 'salary', 'sms_cash_withdrawal', 'sms_cash_deposit'].includes(family) ? [] : ['method'];
-  // التاريخ والوقت ووسيلة الدفع اختيارية: إذا ما تحددت، القارئ العام يتعرف عليها
-  return base.concat(['cardLast4', 'accountLast4', 'balance', 'fee', 'date', 'time'], extra);
+const teachFieldsFor = (family) => E.formatFieldsFor(family);
+const FIELD_COLOR = { amount: PAL.green, merchant: PAL.blue, beneficiary: PAL.blue, counterparty: PAL.blue, cardLast4: PAL.violet, accountLast4: PAL.orange, balance: PAL.aqua, fee: PAL.red, date: PAL.yellow, time: PAL.magenta, method: PAL.gray, skip: '#8A90A0' };
+// src: {mode, back, text, sender, receivedAt, source, reviewId, messageId, formatId, fmt}
+function teachStart(src) {
+  const st = store(), R = SR(); let text = R.norm(src.text || ''); if (!text) return toast('نص الرسالة غير متاح');
+  // تعديل صيغة محفوظة: نفس تحديدك السابق. على مثالها نفسه، أو على رسالة ثانية تطابقها (مثل رسالة ما انقرأ واحد من متغيراتها)
+  let f = src.fmt && src.fmt.role === 'tx' ? src.fmt : null, fsp = null;
+  if (f) {
+    if (R.norm(f.sample || '') === text) fsp = { spans: f.spans || {}, skips: f.skips || [] };
+    else { fsp = R.formatSpansIn(f, text); if (!fsp && src.mode === 'edit' && f.sample) { text = R.norm(f.sample); fsp = { spans: f.spans || {}, skips: f.skips || [] }; } }
+    if (!fsp) f = null;
+  }
+  const T = { mode: src.mode, back: src.back || 'reviewc', reviewId: src.reviewId || null, messageId: src.messageId || null, formatId: src.formatId || null, text, tokens: tokenize(text), ranges: {}, skips: new Set(), active: 'amount',
+    family: 'sms_purchase', sender: src.sender || null, receivedAt: src.receivedAt || null, source: src.source || 'paste', feeMode: null, feeTop: false, dateOrder: null, name: '' };
+  const toRange = (a, b) => { const s = T.tokens.findIndex(tk => tk.e > a), e = T.tokens.map(tk => tk.s < b).lastIndexOf(true); return s >= 0 && e >= s ? [s, e] : null; };
+  if (f) {
+    Object.entries(fsp.spans).forEach(([k, r]) => { const x = toRange(r[0], r[1]); if (x) T.ranges[k] = x; });
+    fsp.skips.forEach(r => { const x = toRange(r[0], r[1]); if (x) for (let i = x[0]; i <= x[1]; i++) T.skips.add(i); });
+    Object.assign(T, { family: f.family, feeMode: f.feeMode || null, dateOrder: f.dateOrder || null, name: f.status === 'approved' && f.name !== E.formatName(st, f) ? (f.name || '') : '' });
+  } else {
+    const p = E.proposeFormat(st, { text, sender: T.sender, receivedAt: T.receivedAt, source: T.source }, 'tx', { smartFee: true });
+    if (p.fields) Object.entries(p.fields).forEach(([k, r]) => { const x = toRange(r.start, r.end); if (x) T.ranges[k] = x; });
+    if (p.meta) { (p.meta.skips || []).forEach(r => { const x = toRange(r.start, r.end); if (x) for (let i = x[0]; i <= x[1]; i++) T.skips.add(i); }); T.dateOrder = p.meta.dateOrder || null; if (p.meta.family) T.family = p.meta.family; }
+    else if (src.fmt && src.fmt.family) T.family = src.fmt.family;
+    // تاريخ ترتيبه ملتبس وما نعرفه لهالبنك: نحدده لك وتختار أنت التاريخ الصحيح (والاقتراح = اللي يطابق يوم وصول الرسالة)
+    if (p.dateHint && !T.ranges.date && E.formatFieldsFor(T.family).includes('date')) { const x = toRange(p.dateHint.start, p.dateHint.end); if (x) { T.ranges.date = x; T.dateOrder = p.dateGuess || null; } }
+    T.feeTop = !!p.feeTop; T.feeMode = T.ranges.fee && p.feeTop ? 'top' : null; // الرسوم: تختار أنت. الاقتراح «فوق المبلغ» بس لو المبلغ + الرسوم = رقم ثالث في الرسالة
+  }
+  S.teachSms = T; go('teachsms');
 }
-const FIELD_COLOR = { amount: PAL.green, merchant: PAL.blue, beneficiary: PAL.blue, counterparty: PAL.blue, cardLast4: PAL.violet, accountLast4: PAL.orange, balance: PAL.aqua, fee: PAL.red, date: PAL.yellow, time: PAL.magenta, method: PAL.gray };
+function teachBuild(T) {
+  const spec = {}; Object.entries(T.ranges).forEach(([k, r]) => { if (r) spec[k] = { start: T.tokens[r[0]].s, end: T.tokens[r[1]].e }; });
+  const idx = Array.from(T.skips).sort((a, b) => a - b), skips = [];
+  idx.forEach(i => { const tk = T.tokens[i], last = skips[skips.length - 1]; if (last && last.to === i - 1 && T.tokens[i - 1].line === tk.line) { last.end = tk.e; last.to = i; } else skips.push({ start: tk.s, end: tk.e, to: i }); });
+  return SR().learnFormat(T.text, spec, { role: 'tx', family: T.family, direction: E.FAMILY_DIR[T.family], bank: E.bankLabel(store(), T.sender) || null, sender: T.sender, skips, dateOrder: T.dateOrder || null, feeMode: T.feeMode });
+}
+function teachPreviewHtml(T) {
+  const L = teachBuild(T);
+  if (L.error) return `<div class="banner w" style="margin-top:12px"><div>${esc(TEACH_ERR[L.error] || L.error)}</div></div>`;
+  const i = L.preview, row = (l, v) => `<div style="display:flex;gap:8px;margin:3px 0"><span class="muted" style="min-width:104px">${l}</span><b style="flex:1;min-width:0;overflow-wrap:anywhere"><bdi>${v}</bdi></b></div>`;
+  const name = i.merchantRaw || i.beneficiaryRaw || i.counterpartyName || null;
+  const amt = i.feeOnTop ? `${esc(fmt(i.grossAmount))} <span class="small muted">= ${esc(fmt(i.amountRead))} + رسوم ${esc(fmt(i.feeAmount))}</span>` : esc(fmt(i.grossAmount)) + (i.feeAmount ? ` <span class="small muted">(منها رسوم ${esc(fmt(i.feeAmount))})</span>` : '');
+  return `<div class="kvbox small" style="margin-top:12px"><b>كذا بتنقرأ الرسائل اللي بهالشكل:</b>${row('النوع', esc(E.SMS_FAMILY_L[T.family] || ''))}${row('المبلغ المحسوب', amt)}${name ? row('الاسم', esc(name)) : ''}${i.instrumentLast4 ? row('البطاقة', '…' + esc(i.instrumentLast4)) : ''}${i.accountLast4 ? row('الحساب', '…' + esc(i.accountLast4)) : ''}${i.balanceAfter != null ? row('الرصيد', esc(fmt(i.balanceAfter))) : ''}${i.transactionDate ? row('التاريخ', esc(fdate(i.transactionDate, true)) + (i.time ? ' ' + esc(ftime(i.time)) : '')) : row('التاريخ', '<span class="muted">ما حددته: من أول تاريخ في الرسالة (وإلا يوم وصولها)</span>')}</div>`;
+}
 function vTeachSms() {
   const T = S.teachSms; if (!T) return `<div class="card empty">لا يوجد.</div>`;
   const fields = teachFieldsFor(T.family);
   const val = (k) => T.ranges[k] ? T.text.slice(T.tokens[T.ranges[k][0]].s, T.tokens[T.ranges[k][1]].e) : '';
-  const owner = (i) => Object.keys(T.ranges).find(k => T.ranges[k] && i >= T.ranges[k][0] && i <= T.ranges[k][1]);
+  const owner = (i) => T.skips.has(i) ? 'skip' : Object.keys(T.ranges).find(k => T.ranges[k] && i >= T.ranges[k][0] && i <= T.ranges[k][1]);
   let lines = [], cur = -1;
-  T.tokens.forEach((tk, i) => { if (tk.line !== cur) { lines.push([]); cur = tk.line; } const o = owner(i); lines[lines.length - 1].push(`<button class="tok ${o ? 'on' : ''}" data-action="tokTap" data-i="${i}" style="${o ? `background:${tint(FIELD_COLOR[o], '2E')};border-color:${FIELD_COLOR[o]}` : ''}">${esc(T.text.slice(tk.s, tk.e))}</button>`); });
-  return `<div class="card"><h2>علّمني صيغة هذي الرسالة</h2>
-    <p class="small muted">١) اختر نوع العملية. ٢) اختر الحقل تحت، ثم اضغط على الكلمة أو الكلمات اللي تمثله في الرسالة. المبلغ مطلوب، والباقي إذا موجود. التاريخ والوقت ووسيلة الدفع اختيارية: إذا ما حددتها، التطبيق يتعرف عليها بنفسه.</p>
+  T.tokens.forEach((tk, i) => { if (tk.line !== cur) { lines.push([]); cur = tk.line; } const o = owner(i); lines[lines.length - 1].push(`<button class="tok ${o ? 'on' : ''}" data-action="tokTap" data-i="${i}" style="${o ? `background:${tint(FIELD_COLOR[o], '2E')};border-color:${FIELD_COLOR[o]}${o === 'skip' ? ';border-style:dashed' : ''}` : ''}">${esc(T.text.slice(tk.s, tk.e))}</button>`); });
+  const title = T.mode === 'edit' ? 'تعديل الصيغة' : T.mode === 'pending' ? 'عدّل الشكل واعتمده' : 'عرّف صيغة هذي الرسالة';
+  return `<div class="card"><h2>${title}</h2>
+    <p class="small muted">١) اختر نوع العملية. ٢) اختر المتغير تحت، ثم اضغط في الرسالة على الكلمة أو الكلمات اللي تمثله. المبلغ مطلوب، والباقي اختياري. اللي معبّى الحين اقتراح: صحّحه. الكلام اللي ما تحدده «نص ثابت»: الرسائل الجاية لازم يكون فيها نفسه بالضبط، وأي سطر أو كلمة ثابتة جديدة تعتبر شكل جديد ويسألك عنه.</p>
     <label class="f">نوع العملية</label><select id="ts_family" data-change="teachFamily">${Object.entries(E.SMS_FAMILY_L).map(([k, v]) => `<option value="${k}" ${k === T.family ? 'selected' : ''}>${v}</option>`).join('')}</select>
-    <label class="f">اسم البنك (للتعريف)</label><input type="text" id="ts_bank" value="${esc(T.bank || '')}">
-    <div class="fchips">${fields.map(k => `<button class="fchip ${T.active === k ? 'on' : ''}" data-action="teachField" data-k="${k}" style="--c:${FIELD_COLOR[k]}"><span class="dot"></span>${FIELD_L[k]}${k === 'amount' ? ' *' : ''}<span class="v">${esc(val(k))}</span></button>`).join('')}</div>
+    ${T.sender ? `<div class="small muted" style="margin-top:6px">البنك: <b>${esc(E.bankLabel(store(), T.sender) || T.sender)}</b></div>` : '<div class="small muted" style="margin-top:6px">رسالة ملصوقة بدون بنك: الصيغة تمشي على رسائل أي بنك بنفس الشكل.</div>'}
+    <div class="fchips">${fields.map(k => `<button class="fchip ${T.active === k ? 'on' : ''}" data-action="teachField" data-k="${k}" style="--c:${FIELD_COLOR[k]}"><span class="dot"></span>${FIELD_L[k]}${k === 'amount' ? ' *' : ''}<span class="v">${esc(val(k))}</span></button>`).join('')}<button class="fchip ${T.active === 'skip' ? 'on' : ''}" data-action="teachField" data-k="skip" style="--c:${FIELD_COLOR.skip}"><span class="dot"></span>نص يتغير (تجاهله)<span class="v">${T.skips.size ? T.skips.size : ''}</span></button></div>
     <div class="toks">${lines.map(l => `<div class="tline">${l.join('')}</div>`).join('')}</div>
+    <p class="small muted" style="margin-top:6px">«نص يتغير»: كلمات تتغير من رسالة لرسالة وما تهمك (مثل رقم مرجع). الأرقام اللي ما حددتها تعتبر متغيرة من نفسها.</p>
+    ${T.ranges.fee ? `<div class="kvbox" style="margin-top:10px"><b class="small">الرسوم (${esc(val('fee'))}):</b>
+      <label class="f" style="margin:6px 0 0"><input type="radio" name="ts_fee" value="in" data-change="teachFee" ${T.feeMode === 'in' ? 'checked' : ''}> داخل المبلغ (المبلغ اللي حددته شاملها)</label>
+      <label class="f" style="margin:6px 0 0"><input type="radio" name="ts_fee" value="top" data-change="teachFee" ${T.feeMode === 'top' ? 'checked' : ''}> فوق المبلغ (تنضاف له، والعملية تنحسب بالمجموع)</label>
+      ${T.feeTop ? '<div class="small muted" style="margin-top:6px">المبلغ + الرسوم يساوي رقم ثالث مكتوب في الرسالة، فالأقرب إنها «فوق المبلغ».</div>' : ''}</div>` : ''}
     ${teachDateBox(T, val('date'))}
-    ${T.replaceId ? `<label class="f"><input type="checkbox" id="ts_replace" checked> حدّث الصيغة السابقة لهذا البنك (الصيغة تغيرت)</label>` : ''}
-    <div class="btns" style="margin-top:14px"><button class="btn g" data-action="teachSmsSave">حفظ الصيغة ومعالجة الرسائل</button><button class="btn" data-action="teachSmsCancel">إلغاء</button></div></div>`;
+    ${teachPreviewHtml(T)}
+    <label class="f">اسم الصيغة (اختياري)</label><input type="text" id="ts_name" data-change="teachName" maxlength="60" value="${esc(T.name || '')}" placeholder="${esc(E.SMS_FAMILY_L[T.family] || '')}${T.sender ? ' — ' + esc(E.bankLabel(store(), T.sender) || T.sender) : ''}">
+    <div class="btns" style="margin-top:14px"><button class="btn g" data-action="teachSmsSave">${T.mode === 'edit' ? 'حفظ التعديل' : 'اعتمد الصيغة'}</button><button class="btn" data-action="teachSmsCancel">إلغاء</button></div></div>`;
 }
 
 // التاريخ الملتبس (مثل 05/09/26): المستخدم يختار الصحيح مرة وحدة، وينحفظ ترتيبه مع الصيغة
@@ -1759,6 +1986,7 @@ function teachDateBox(T, v) {
   const ch = SR().dateChoices(v);
   if (!ch.length) return `<div class="banner w" style="margin-top:10px">ما قدرت أقرأ تاريخ من الجزء المحدد.</div>`;
   if (ch.length === 1) { T.dateOrder = ch[0].o; return ''; }
+  if (T.dateOrder && !ch.some(c => c.o === T.dateOrder)) T.dateOrder = null;
   return `<div class="kvbox" style="margin-top:10px"><b class="small">وش التاريخ الصحيح لهذي الرسالة؟</b>${ch.map(c => `<label class="f" style="margin:6px 0 0"><input type="radio" name="ts_dord" value="${c.o}" data-change="teachDateOrder" ${T.dateOrder === c.o ? 'checked' : ''}> ${fdate(c.date, true)}</label>`).join('')}</div>`;
 }
 
@@ -1767,7 +1995,7 @@ function vMessages() {
   const list = store().all('messages').sort((a, b) => String(b.processedAt || '').localeCompare(String(a.processedAt || ''))).slice(0, 200);
   const cfg = settings().inbox || {};
   let h = `<div class="card"><h2>الرسائل البنكية <span class="sp"></span>${cfg.url ? `<button class="btn" data-action="fetchInbox">جلب الآن</button>` : ''}</h2><p class="small muted">آخر 200 رسالة انعالجت. رسائل الرموز ما ينحفظ نصها. ${cfg.lastFetchAt ? 'آخر جلب: ' + fdt(cfg.lastFetchAt, true) : ''}</p>`;
-  h += list.length ? `<div class="list">${list.map(m => `<div class="it" data-action="openMsg" data-id="${m.id}"><div class="m"><div class="t small" style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc((m.text || '(نص محذوف)').replace(/\n/g, ' · '))}</div><div class="badges"><span class="b ${m.status === 'review' ? 'w' : m.status === 'tx' || m.status === 'merged' ? 'g' : 'n'}">${MSG_STATUS_L[m.status] || m.status}</span><span class="b n">${CLS_L[m.cls] || ''}</span>${m.parser ? `<span class="b n">${m.parser === 'template' ? 'صيغة متعلّمة' : m.parser === 'alinma' ? 'صيغة الإنماء' : 'قارئ عام'}</span>` : ''}<span class="b n">${m.source === 'inbox' ? 'صندوق' : 'لصق'}</span>${m.source === 'inbox' && !m.ackedAt ? '<span class="b w">لم يتأكد الاستلام</span>' : ''}</div></div></div>`).join('')}</div>` : '<div class="muted">ما فيه رسائل للحين.</div>';
+  h += list.length ? `<div class="list">${list.map(m => `<div class="it" data-action="openMsg" data-id="${m.id}"><div class="m"><div class="t small" style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc((m.text || '(نص محذوف)').replace(/\n/g, ' · '))}</div><div class="badges"><span class="b ${m.status === 'review' ? 'w' : m.status === 'tx' || m.status === 'merged' ? 'g' : 'n'}">${MSG_STATUS_L[m.status] || m.status}</span><span class="b n">${CLS_L[m.cls] || ''}</span>${m.parser ? `<span class="b n">${m.parser === 'format' ? 'صيغة معتمدة' : m.parser === 'template' ? 'صيغة متعلّمة (قبل 1.7.1)' : m.parser === 'alinma' ? 'صيغة الإنماء (قبل 1.7.1)' : 'قارئ عام (قبل 1.7.1)'}</span>` : ''}<span class="b n">${m.source === 'inbox' ? 'صندوق' : 'لصق'}</span>${m.source === 'inbox' && !m.ackedAt ? '<span class="b w">لم يتأكد الاستلام</span>' : ''}</div></div></div>`).join('')}</div>` : '<div class="muted">ما فيه رسائل للحين.</div>';
   return h + `</div>`;
 }
 
@@ -1775,11 +2003,11 @@ function vMessages() {
 function vAudit() {
   const st = store(), u = st.undoStack[st.undoStack.length - 1], r = st.redoStack[st.redoStack.length - 1];
   const list = st.all('auditLog').sort((a, b) => b.at.localeCompare(a.at)).slice(0, 300);
-  const SRC = { user: '', undo: 'تراجع', redo: 'إعادة' };
+  const SRC = { user: '', undo: 'تراجع', redo: 'إعادة', system: 'تحديث' };
   const TBL = { transactions: 'عملية', merchants: 'تاجر', beneficiaries: 'مستفيد', accounts: 'حساب', instruments: 'أداة', imports: 'استيراد', messages: 'رسالة', reviews: 'مراجعة', rules: 'قاعدة', limits: 'حد', templates: 'صيغة', settings: 'إعدادات', categories: 'تصنيف' };
   const summ = (c) => Object.entries(c || {}).map(([n, x]) => [x.created ? `+${x.created}` : '', x.updated ? `✎${x.updated}` : '', x.removed ? `−${x.removed}` : ''].filter(Boolean).join(' ') + ' ' + (TBL[n] || n)).join(' · ');
-  let h = `<div class="card"><h2>التراجع والإعادة</h2><div class="btns"><button class="btn" data-action="undo" ${u ? '' : 'disabled'}>↶ تراجع${u ? ': ' + esc(u.label) : ''}</button><button class="btn" data-action="redo" ${r ? '' : 'disabled'}>↷ إعادة${r ? ': ' + esc(r.label) : ''}</button></div>
-    <p class="small muted" style="margin-top:8px">آخر 30 خطوة في هذي الجلسة. تنمسح لما يتسكّر التطبيق، والسجل تحت يبقى.</p></div>`;
+  let h = `<div class="card"><h2>التراجع والإعادة</h2><div class="btns"><button class="btn" data-action="undo" ${u ? '' : 'disabled'}>تراجع${u ? ': ' + esc(u.label) : ''}</button><button class="btn" data-action="redo" ${r ? '' : 'disabled'}>إعادة${r ? ': ' + esc(r.label) : ''}</button></div>
+    <p class="small muted" style="margin-top:8px">آخر 30 خطوة في هذي الجلسة. كل تراجع أو إعادة يسألك قبل. تنمسح لما يتسكّر التطبيق، والسجل تحت يبقى.</p></div>`;
   h += `<div class="card"><h2>سجل التعديلات <span class="sp"></span><span class="muted">${st.all('auditLog').length}</span></h2>${list.length ? `<div class="list">${list.map(e => `<div class="it" style="cursor:default"><div class="m"><div class="t">${esc(e.label)} ${SRC[e.source] ? `<span class="b n">${SRC[e.source]}</span>` : ''}</div><div class="s">${fdt(e.at, true)} · ${esc(summ(e.counts))}</div>${(e.items || []).length ? `<div class="s">${e.items.slice(0, 3).map(i => esc(i.text) + ' ' + fmt(i.amount)).join('، ')}</div>` : ''}</div></div>`).join('')}</div>` : '<div class="muted">فاضي.</div>'}</div>`;
   return h;
 }
@@ -1902,10 +2130,34 @@ const A = {
   merchantDrill: async (el) => { if (!await itemsLeaveOk()) return; S.flow = null; S.items = null; closeSheet(); go('txs', { filters: { kind: 'all', merchantId: el.dataset.id, allTime: true } }); },
   benDrill: (el) => { closeSheet(); go('txs', { filters: { kind: 'all', beneficiaryId: el.dataset.id, allTime: true } }); },
   setKind: (el) => { S.filters.kind = el.dataset.kind; S.txLimit = 300; render(); },
+  // 1.7.0: صف النوع و«يحتاج منك» والفلاتر
+  setGroup: (el) => { S.filters.group = el.dataset.g === 'all' ? undefined : el.dataset.g; S.txLimit = 300; render(); },
+  needToggle: () => { S.filters.need = S.filters.need ? undefined : 'any'; S.txLimit = 300; render(); },
+  needPick: (el) => { S.filters.need = S.filters.need === el.dataset.k ? 'any' : el.dataset.k; S.txLimit = 300; render(); },
+  fxClear: (el) => {
+    const f = S.filters, k = el.dataset.k;
+    if (k === 'kind') f.kind = 'all';
+    else if (k.startsWith('type:')) f.types = (f.types || []).filter(x => x !== k.slice(5));
+    else if (k === 'categoryId') { delete f.categoryId; delete f.catBasis; }
+    else if (k === 'cityId') { delete f.cityId; delete f.cityMode; }
+    else if (k === 'q') S.q = '';
+    else if (k === 'period') f.allTime = true;
+    else if (k === 'txIds') { delete f.txIds; delete f.label; }
+    else if (k === 'rate') { delete f.rate; delete f.label; }
+    else if (k === 'savings') { delete f.savings; delete f.savingsCat; delete f.label; }
+    else delete f[k];
+    S.txLimit = 300; render();
+  },
   moreTx: () => { S.txLimit = (S.txLimit || 300) + 300; render(); },
-  filterSheet: () => sheetFilters(),
-  applyFilters: () => { const v = (id) => $(id).value || null; S.filters = Object.assign({}, S.filters, { kind: v('f_kind') || 'all', accountId: v('f_acc'), instrumentId: v('f_ins'), method: v('f_method'), categoryId: v('f_cat'), source: v('f_src'), noCity: $('f_city') && $('f_city').value === 'none' ? true : undefined }); closeSheet(); render(); },
-  clearFilters: () => { S.filters = { kind: 'all', allTime: true }; S.q = ''; closeSheet(); render(); },
+  filterSheet: () => { S.fDraft = null; sheetFilters(); },
+  fxClose: () => { S.fDraft = null; closeSheet(null); },
+  fxType: (el) => { const f = fxSync(), k = el.dataset.k; f.types = (f.types || []).includes(k) ? f.types.filter(x => x !== k) : (f.types || []).concat(k); sheetFilters(); },
+  fxCat: async () => { const f = fxSync(), pair = f.categoryId && !String(f.categoryId).startsWith('__') ? E.itemCatPair(store(), f.categoryId) : { cat: null, sub: null }; const r = await pickCategory({ cat: pair.cat === '__none' ? null : pair.cat, sub: pair.sub }); if (r && (r.sub || r.cat)) { f.categoryId = r.sub || r.cat; } sheetFilters(); },
+  fxCatNone: () => { const f = fxSync(); f.categoryId = '__none'; delete f.catBasis; sheetFilters(); },
+  fxCatClear: () => { const f = fxSync(); delete f.categoryId; delete f.catBasis; sheetFilters(); },
+  fxBasis: (el) => { const f = fxSync(); if (el.dataset.v === 'products') f.catBasis = 'products'; else delete f.catBasis; sheetFilters(); },
+  applyFilters: () => { const f = fxSync() || S.filters; Object.keys(f).forEach(k => { if (f[k] === null || f[k] === undefined || (Array.isArray(f[k]) && !f[k].length)) delete f[k]; }); S.filters = Object.assign({ kind: 'all' }, f); S.fDraft = null; S.txLimit = 300; closeSheet(); render(); },
+  clearFilters: () => { S.filters = { kind: 'all', allTime: true }; S.q = ''; S.fDraft = null; closeSheet(); render(); },
   openTx: async (el) => { if (S.items && S.items.txId !== el.dataset.id && !await itemsLeaveOk()) return; sheetTx(el.dataset.id); },
   saveTx: async (el, ev, opts) => {
     const st = store(), t = st.get('transactions', el.dataset.id); if (!t) return;
@@ -1937,7 +2189,7 @@ const A = {
       const cat = form.cat, sub = form.sub;
       if (cat !== (t.categoryId || null) || sub !== (t.subcategoryId || null)) {
         let scope = 'this';
-        if (t.merchantId || t.beneficiaryId) { scope = await askScope(t.merchantId ? `المحل: ${txTitle(t)}` : `المستفيد: ${txTitle(t)}`); if (!scope) { if (itemsSaved) await persist(); if ((opts && (opts.reopen || opts.flow))) sheetTx(t.id); return false; } }
+        if ((t.merchantId || t.beneficiaryId) && !(E.feeOf(t) > 0 && E.spendEffect(t) === 0)) { scope = await askScope(t.merchantId ? `المحل: ${txTitle(t)}` : `المستفيد: ${txTitle(t)}`); if (!scope) { if (itemsSaved) await persist(); if ((opts && (opts.reopen || opts.flow))) sheetTx(t.id); return false; } }
         const n = E.setCategory(st, t.id, cat, sub, scope);
         if (scope !== 'this') S.savedCount = n; // «السابقة والقادمة» أو «القادمة»: العدد يظهر مع «تم الحفظ» في رسالة وحدة
       }
@@ -2060,6 +2312,7 @@ const A = {
     const kind = el.dataset.kind, amt = E.parseNum($('m_amt').value);
     if (!amt || amt <= 0) return toast('المبلغ غير صحيح');
     const e = { kind, amount: amt, date: $('m_date').value || E.todayISO(), description: $('m_desc') ? $('m_desc').value.trim() : '', note: $('m_note').value.trim() };
+    if (e.date > E.todayISO()) return toast('التاريخ في المستقبل'); // 1.7.0
     if (kind === 'expense') {
       e.instrumentId = $('m_ins').value; e.categoryId = $('s_cat').value || null; e.subcategoryId = $('s_sub').value || null;
       const cashIns = store().all('instruments').find(i => i.kind === 'cash');
@@ -2138,6 +2391,7 @@ const A = {
     if ($('cur_city')) s.currentCityId = $('cur_city').value || null;
     const bd = parseInt($('bkdays').value, 10); if (bd >= 1) s.backupReminderDays = bd;
     store().put('settings', s);
+    if ($('cc_mode')) E.setCommitCfg(store(), { alertMode: $('cc_mode').value, alertValue: $('cc_val').value, n: $('cc_n').value }); // 1.7.1
     const n = E.applyOwnerAliases(store());
     await persist(); S.period = null; render(); toast(n ? `تم الحفظ، وتحولت ${n} إلى تحويلات داخلية` : 'تم حفظ الإعدادات');
   },
@@ -2159,7 +2413,7 @@ const A = {
       const r = E.commitImport(store(), S.plan, S.decisions); await E.splitSmsMerges(store()); E.detectRecurring(store());
       await persist(); DB.requestPersistence();
       S.plan = null; S.planFile = null; S.decisions = {};
-      toast(`تم الاستيراد: ${r.created} جديدة${r.merged ? `، ${r.merged} مدمجة` : ''}${r.restored ? `، ${r.restored} رجعت من المحذوفة` : ''}${r.keptDeleted ? `، ${r.keptDeleted} بقيت محذوفة` : ''}`, 3500);
+      toast(`تم الاستيراد: ${r.created} جديدة${r.merged ? `، ${r.merged} مدمجة` : ''}${r.restored ? `، ${r.restored} رجعت من المحذوفة` : ''}${r.keptDeleted ? `، ${r.keptDeleted} بقيت محذوفة` : ''}${r.skippedFuture ? `، ${r.skippedFuture} ما انحفظت (تاريخها في المستقبل)` : ''}`, 3500);
       S.period = null;
       if (S.queue.length) { const next = S.queue.shift(); await processFile(next); } else go('home', { nav: true });
     } finally { S.busy = false; }
@@ -2188,7 +2442,8 @@ const A = {
   },
 };
 /* ---------- أوامر MVP1.1 ---------- */
-const TEACH_ERR = { not_found: 'ما لقيت أحد الحقول في النص', no_amount: 'حدد المبلغ', too_generic: 'الرسالة قصيرة جدًا لتكون صيغة، حدد حقول أقل أو استخدم رسالة أوضح', self_test_failed: 'الصيغة ما قدرت تقرأ نفس الرسالة، راجع الحقول', date_order: 'اختر التاريخ الصحيح تحت الرسالة', bad_date: 'الجزء المحدد للتاريخ ما فيه تاريخ واضح', bad_time: 'الجزء المحدد للوقت ما فيه وقت واضح' };
+const TEACH_ERR = { not_found: 'ما لقيت أحد الحقول في النص', no_amount: 'حدد المبلغ', too_generic: 'الرسالة قصيرة جدًا لتكون صيغة، حدد حقول أقل أو استخدم رسالة أوضح', self_test_failed: 'الصيغة ما قدرت تقرأ نفس الرسالة، راجع الحقول', date_order: 'اختر التاريخ الصحيح تحت الرسالة', bad_date: 'الجزء المحدد للتاريخ ما فيه تاريخ واضح', bad_time: 'الجزء المحدد للوقت ما فيه وقت واضح',
+  fee_mode: 'اختر: الرسوم داخل المبلغ ولا فوقه؟', overlap: 'متغيرين على نفس الكلمة: خل كل كلمة لمتغير واحد', amount_currency: 'المبلغ اللي حددته بعملة غير الريال. حدد المبلغ المكتوب بالريال، وإذا الرسالة ما فيها مبلغ بالريال أدخلها يدويًا', too_long: 'الرسالة طويلة جدًا (سطر أطول من 300 حرف): ما تصير صيغة. خلها «معلومات هالمرة بس» أو أدخلها يدويًا', no_guess: 'ما قدرت أقترح قراءة لهذي الرسالة: حدد المتغيرات بنفسك' };
 const SINGLE_TOKEN = { amount: 1, balance: 1, fee: 1, cardLast4: 1, accountLast4: 1 };
 Object.assign(A, {
   pasteSms: async () => {
@@ -2355,61 +2610,81 @@ Object.assign(A, {
     await persist('رسالة مكررة: مو مكررة'); render(); toast(plan ? smsSummaryText(plan.smsSummary) : 'تم');
   },
   rvDupHide: async (el) => { E.hideAutoDuplicate(store(), el.dataset.id); await persist(null, { noStep: true }); render(); },
-  rvMsg: async (el) => { E.resolveMessageReview(store(), el.dataset.id, el.dataset.v); await persist('قرار مراجعة رسالة'); render(); },
+  rvMsg: async (el) => { (el.dataset.ids ? String(el.dataset.ids).split(',').filter(Boolean) : [el.dataset.id]).forEach(id => E.resolveMessageReview(store(), id, el.dataset.v)); await persist('قرار مراجعة رسالة'); render(); },
   rvManual: (el) => {
     const r = store().get('reviews', el.dataset.id), m = r && store().get('messages', r.messageId); if (!m) return;
     const amt = SR().extractAmount(m.text || ''); S.pendingManualReview = r.id;
     sheetManual('expense', { amount: amt ? amt.value : '', description: '' });
   },
   teachSms: (el) => {
-    const r = store().get('reviews', el.dataset.id), m = r && store().get('messages', r.messageId);
+    const st = store(), r = st.get('reviews', el.dataset.id), m = r && st.get('messages', r.messageId);
     if (!m || !m.text) return toast('نص الرسالة غير متاح');
-    const text = SR().norm(m.text), tpl = m.templateId ? store().get('templates', m.templateId) : null, g = SR().parseGeneric(text, E.smsWordsFor(store(), text, m.receivedAt, null, E.bankOf(store(), m.sender)).W);
-    const T = { reviewId: r.id, messageId: m.id, text, tokens: tokenize(text), ranges: {}, active: 'amount', family: (tpl && tpl.family) || g.family || 'sms_purchase', bank: (tpl && tpl.bank) || m.sender || '', sender: m.sender || null, replaceId: tpl ? tpl.id : null };
-    // اقتراح أولي من القارئ العام (تقدر تغيره)
-    const findTok = (pred) => T.tokens.findIndex(tk => pred(text.slice(tk.s, tk.e)));
-    if (g.grossAmount) { const i = findTok(x => Number(x.replace(/[^\d.]/g, '')) === g.grossAmount); if (i >= 0) T.ranges.amount = [i, i]; }
-    if (g.instrumentLast4) { const i = findTok(x => x.replace(/\D/g, '') === g.instrumentLast4); if (i >= 0) T.ranges.cardLast4 = [i, i]; }
-    const nameVal = g.merchantRaw || g.beneficiaryRaw || g.counterpartyName, nameKey = g.merchantRaw ? 'merchant' : g.beneficiaryRaw ? 'beneficiary' : g.counterpartyName ? 'counterparty' : null;
-    if (nameVal && nameKey) { const a = text.indexOf(nameVal); if (a >= 0) { const s = T.tokens.findIndex(tk => tk.s >= a), e = T.tokens.map(tk => tk.e <= a + nameVal.length).lastIndexOf(true); if (s >= 0 && e >= s) T.ranges[nameKey] = [s, e]; } }
-    S.teachSms = T; go('teachsms');
+    const f = r.kind === 'sms_unparsed' && r.templateId ? st.get('templates', r.templateId) : null;
+    teachStart({ mode: f ? 'edit' : 'review', back: 'reviewc', text: m.text, sender: m.sender, receivedAt: m.receivedAt, source: m.source, reviewId: r.id, messageId: m.id, formatId: f ? f.id : null, fmt: f });
   },
-  teachField: (el) => { S.teachSms.bank = $('ts_bank').value; S.teachSms.active = el.dataset.k; render(); },
-  teachDateOrder: (el) => { if (S.teachSms) S.teachSms.dateOrder = el.value; },
+  teachField: (el) => { S.teachSms.active = el.dataset.k; S.teachSms.name = $('ts_name') ? $('ts_name').value : S.teachSms.name; render(); },
+  teachDateOrder: (el) => { if (S.teachSms) { S.teachSms.dateOrder = el.value; S.teachSms.name = $('ts_name') ? $('ts_name').value : S.teachSms.name; render(); } },
+  teachFee: (el) => { if (S.teachSms) { S.teachSms.feeMode = el.value; S.teachSms.name = $('ts_name') ? $('ts_name').value : S.teachSms.name; render(); } },
   teachFamily: () => {
-    const T = S.teachSms; T.family = $('ts_family').value; T.bank = $('ts_bank').value;
-    const ok = teachFieldsFor(T.family); Object.keys(T.ranges).forEach(k => { if (!ok.includes(k)) delete T.ranges[k]; });
+    const T = S.teachSms; T.family = $('ts_family').value; T.name = $('ts_name') ? $('ts_name').value : T.name;
+    const ok = teachFieldsFor(T.family), NAME_K = ['merchant', 'beneficiary', 'counterparty'], was = NAME_K.find(k => T.ranges[k]), now = NAME_K.find(k => ok.includes(k));
+    if (was && now && was !== now && !T.ranges[now]) { T.ranges[now] = T.ranges[was]; delete T.ranges[was]; if (T.active === was) T.active = now; } // الاسم اللي حددته ينتقل (المحل ↔ المستفيد ↔ المحوّل)
+    Object.keys(T.ranges).forEach(k => { if (!ok.includes(k)) delete T.ranges[k]; });
+    if (!T.ranges.fee) T.feeMode = null;
+    if (T.active !== 'skip' && !ok.includes(T.active)) T.active = 'amount';
     render();
   },
   tokTap: (el) => {
     const T = S.teachSms, i = +el.dataset.i, k = T.active; if (!k) return;
-    T.bank = $('ts_bank').value;
+    T.name = $('ts_name') ? $('ts_name').value : T.name;
+    if (k === 'skip') {
+      Object.keys(T.ranges).forEach(f => { const r = T.ranges[f]; if (r && i >= r[0] && i <= r[1]) delete T.ranges[f]; });
+      if (T.skips.has(i)) T.skips.delete(i); else T.skips.add(i);
+      if (!T.ranges.fee) T.feeMode = null;
+      return render();
+    }
+    T.skips.delete(i);
     Object.keys(T.ranges).forEach(f => { const r = T.ranges[f]; if (f !== k && r && i >= r[0] && i <= r[1]) delete T.ranges[f]; });
     const r = T.ranges[k];
     if (k === 'date') T.dateOrder = null;
     if (!r) T.ranges[k] = [i, i];
     else if (i === r[0] && i === r[1]) delete T.ranges[k];
     else if (SINGLE_TOKEN[k] || T.tokens[i].line !== T.tokens[r[0]].line) T.ranges[k] = [i, i];
+    else if (i >= r[0] && i <= r[1]) T.ranges[k] = [i, i]; // ضغطت كلمة داخل التحديد: يصير عليها هي بس (عشان تقدر تصغّره)، وتكبّره بالضغط على كلمة برّاه
     else T.ranges[k] = [Math.min(r[0], i), Math.max(r[1], i)];
+    if (T.ranges[k]) {
+      const n = T.ranges[k];
+      for (let j = n[0]; j <= n[1]; j++) T.skips.delete(j);
+      Object.keys(T.ranges).forEach(f => { const o = T.ranges[f]; if (f !== k && o && o[0] <= n[1] && o[1] >= n[0]) delete T.ranges[f]; }); // التحديد الجديد غطّى متغير ثاني: ينشال
+    }
+    if (!T.ranges.fee) T.feeMode = null;
     render();
   },
   teachSmsSave: async () => {
-    const T = S.teachSms; T.bank = $('ts_bank').value.trim(); T.family = $('ts_family').value;
+    const T = S.teachSms, st = store(); if (!T) return;
+    T.family = $('ts_family').value; T.name = $('ts_name') ? $('ts_name').value : '';
     if (!T.ranges.amount) return toast('حدد المبلغ في الرسالة');
-    const spec = {}; Object.entries(T.ranges).forEach(([k, r]) => { spec[k] = { start: T.tokens[r[0]].s, end: T.tokens[r[1]].e }; });
-    const L = SR().learnTemplate(T.text, spec, { family: T.family, direction: FAMILY_DIR[T.family], bank: T.bank, sender: T.sender, dateOrder: T.dateOrder || null });
+    if (T.ranges.fee && !T.feeMode) return toast(TEACH_ERR.fee_mode);
+    const L = teachBuild(T);
     if (L.error) return toast(TEACH_ERR[L.error] || L.error);
-    const replace = T.replaceId && $('ts_replace') && $('ts_replace').checked;
-    const res = E.saveSmsTemplate(store(), L.template, { sample: T.text, replaceId: replace ? T.replaceId : null });
-    const again = res.affected.filter(a => a.review.kind !== 'sms_partial').map(a => a.message.id);
-    let plan = null, filled = 0;
-    if (again.length) { plan = await E.reprocessMessages(store(), again, {}); if (plan) E.commitSms(store(), plan); }
-    res.affected.filter(a => a.review.kind === 'sms_partial').forEach(a => { if (E.fillFromTemplate(store(), a.review.id, res.template)) filled++; });
-    await persist('تعليم صيغة رسالة');
-    S.teachSms = null; goUp('reviewc');
-    toast(`انحفظت الصيغة${plan ? '، ' + smsSummaryText(plan.smsSummary) : ''}${filled ? `، واكتملت ${cnt(filled, 'op')}` : ''}`, 6000);
+    const res = E.saveSmsFormat(st, L.template, { sample: T.text, replaceId: T.formatId || null, name: T.name });
+    await finishFormat(res, T.mode === 'edit' ? 'تعديل صيغة رسالة' : 'اعتماد صيغة رسالة', T.back);
   },
-  teachSmsCancel: () => { S.teachSms = null; goUp('reviewc'); },
+  teachSmsCancel: () => { const b = (S.teachSms && S.teachSms.back) || 'reviewc'; S.teachSms = null; goUp(b); },
+  // «معلومات ولا تسألني عن هالشكل»: صيغة معلومات، والرسائل اللي تطابقها تنحفظ معلومات بدون سؤال
+  rvInfoFmt: async (el) => {
+    const st = store(), r = st.get('reviews', el.dataset.id); if (!r) return;
+    const res = E.saveInfoFormat(st, r.messageId); if (!res || res.error) return toast(res && res.error === 'otp' ? 'فيها رمز محتمل: ما تنحفظ لها صيغة معلومات. اختر «رسالة رمز» أو «معلومات هالمرة بس»' : 'ما قدرت أحفظها صيغة معلومات. اختر «معلومات هالمرة بس»', 6000);
+    if (res.waiting.length) { const plan = await E.reprocessMessages(st, res.waiting, {}); if (plan) E.commitSms(st, plan); }
+    await persist('صيغة معلومات'); render();
+    toast(`تمام: رسائل هالشكل تنحفظ معلومات بدون سؤال${res.waiting.length > 1 ? ` (وانقفلت ${cnt(res.waiting.length, 'msg')})` : ''}`, 5000);
+  },
+  // «معلومات هالمرة بس»: هذي الرسالة واللي معها بنفس الشكل، بدون صيغة
+  rvInfoOnce: async (el) => {
+    const st = store(), ids = String(el.dataset.ids || '').split(',').filter(Boolean); if (!ids.length) return;
+    ids.forEach(id => E.resolveMessageReview(st, id, 'informational'));
+    await persist('رسالة معلومات'); render();
+  },
   // التحديد والتعديل الجماعي
   selStart: () => { S.sel = new Set(); render(); },
   selEnd: () => { S.sel = null; render(); },
@@ -2508,9 +2783,22 @@ function onClick(ev) {
   S.opLabel = ACTION_LABEL[el.dataset.action] || null;
   if (el.tagName === 'A') ev.preventDefault();
   if ((el.dataset.action === 'sheetBg' || el.dataset.action === 'pickBg') && ev.target !== el) return;
+  // 1.7.1: الأزرار اللي تحفظ (اعتماد صيغة، تطبيق على السابق، قرارات الالتزام): ضغطة ثانية قبل ما تخلص الأولى ما تنحسب، عشان ما يتكرر شي
+  const act = el.dataset.action, guard = ONCE_ACTIONS.has(act);
+  if (guard && S.busyAct && S.busyAct.has(act)) return;
   const r = fn(el, ev);
-  if (r && typeof r.catch === 'function') r.catch(e => console.error(e)); // فشل الحفظ ينعرض للمستخدم داخل persist
+  if (r && typeof r.then === 'function') {
+    if (guard) { (S.busyAct || (S.busyAct = new Set())).add(act); }
+    r.then(() => { if (guard) S.busyAct.delete(act); }, async (e) => {
+      console.error(e); // فشل الحفظ ينعرض للمستخدم داخل persist
+      if (!guard) return;
+      S.busyAct.delete(act);
+      // خطأ في نص العملية قبل الحفظ: نرجع الذاكرة لآخر حالة محفوظة عشان ما يبقى نص تغيير معلّق
+      try { await reloadFromDb(); render(); toast('صار خطأ وما انحفظ التغيير. جرّب مرة ثانية'); } catch (e2) { console.error(e2); }
+    });
+  }
 }
+const ONCE_ACTIONS = new Set(['fmtScopeApply', 'teachSmsSave', 'rvInfoFmt', 'rvInfoOnce', 'fmtApprove', 'fmtToInfo', 'commitApprove', 'commitDecide', 'commitPay', 'commitAmount', 'commitAlertSave', 'commitMulti', 'commitSplitSave', 'commitMarkClear']);
 function onChange(ev) {
   const el = ev.target;
   if (el.dataset && el.dataset.change && A[el.dataset.change]) A[el.dataset.change](el, ev);
@@ -2525,7 +2813,7 @@ function onChange(ev) {
 }
 document.addEventListener('input', (ev) => {
   if (ev.target.id === 'city_q') { S.cityQ = ev.target.value; const box = $('city_list'); if (box) box.innerHTML = cityListHtml(); return; }
-  if (ev.target.id === 'q') { S.q = ev.target.value; clearTimeout(S._qt); S._qt = setTimeout(() => { const box = $('txlist'); if (box) box.innerHTML = txListHtml(); const fl = $('fline'); if (fl) fl.innerHTML = filtersLine(); }, 200); }
+  if (ev.target.id === 'q') { S.q = ev.target.value; clearTimeout(S._qt); S._qt = setTimeout(() => { const box = $('txlist'); if (box) box.innerHTML = txListHtml(); const fl = $('fline'); if (fl) fl.innerHTML = filtersLine(); const nr = $('needrow'); if (nr) nr.innerHTML = needRow(S.filters); }, 200); }
 });
 document.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' && ev.target.id === 'quick') A.quickAdd(); if (ev.key === 'Escape') { if (S.rateResolve) finishRate(null); else if ($('sheet2').innerHTML) finishPick(null); else if ($('sheet').innerHTML) { if (S.sheetKind === 'tx' && S.flow) A.flowX(); else if (S.sheetKind === 'tx' && itemsDirty()) A.txClose(); else if (S.sheetKind === 'shop') shopBack(); else closeSheet(null); } } });
 
@@ -2594,15 +2882,20 @@ async function restoreFrom(file) {
   E.migrateDateShapes(S.store); E.migrate162(S.store); await persist(null, { noStep: true }); // نسخة من إصدار قديم: أشكال تواريخ رسائلها، والبنوك (1.6.2)
   const m141 = E.migrate141(S.store); // نسخة من قبل 1.4.1
   if (m141.reprocess.length) { const plan = await E.reprocessMessages(S.store, m141.reprocess); if (plan) E.commitSms(S.store, plan); }
-  E.migrate150(S.store); await E.migrate152(S.store); await E.splitSmsMerges(S.store); const m160 = E.migrate160(S.store); E.detectRecurring(S.store); // نسخة من قبل 1.5.0 / 1.5.2 / 1.6.0
+  E.migrate150(S.store); await E.migrate152(S.store); await E.splitSmsMerges(S.store); const m160 = E.migrate160(S.store); // نسخة من قبل 1.5.0 / 1.5.2 / 1.6.0
+  const m170 = E.migrate170(S.store); const m171 = E.migrate171(S.store); E.sweepPeriods(S.store); E.detectRecurring(S.store); // 1.7.0 و1.7.1
+  let fx = { fixed: 0 }; if (!S.store.settings.migrated170dates) { S.store.settings.migrated170dates = true; S.store.put('settings', S.store.settings); fx = E.fixNextDayDates(S.store); }
   await persist(null, { noStep: true });
-  S.period = null; S.plan = null; S.items = null; S.flow = null; go('home', { nav: true }); toast('تمت الاستعادة');
+  if (fx.fixed) S.store.addAudit({ id: E.uid(), at: new Date().toISOString(), label: `تصحيح تاريخ ${fx.fixed === 1 ? 'عملية' : fx.fixed + ' عمليات'} (رسائل آخر الليل) — تحديث 1.7.0`, source: 'system', changes: [] });
+  if (fx.fixed) await persist(null, { noStep: true });
+  S.period = null; S.plan = null; S.items = null; S.flow = null; go('home', { nav: true }); toast('تمت الاستعادة' + (fx.fixed ? `، وتصحح تاريخ ${cnt(fx.fixed, 'op')} من رسائل آخر الليل` : '') + (m170.itemsNowCategorized ? `، و${m170.itemsNowCategorized} غرض صار له تصنيف فاتورته` : ''), 7000);
   if (m160.changed && (m160.placed || []).length) setTimeout(sheetPlaceCats, 600);
+  else if (m171.changed && (m171.shapes || (m171.commit && m171.commit.asked))) setTimeout(() => sheetNotice171({ shapes: m171.shapes, asked: m171.commit ? m171.commit.asked : 0, auto: m171.commit ? m171.commit.auto : 0, groups: m171.groupsDropped }), 900);
 }
 
 
 /* ================= 1.5.0 (MVP1.2): الأغراض، المدن، المجموعات، الالتزامات، التوقع، السيولة، الحجوزات، التوفير، الضروري والكمالي، المقارنات، السنوي، التنبيهات ================= */
-Object.assign(TITLES, { insights: 'التحليل', forecast: 'توقع الدورة', liquidity: 'السيولة', commitments: 'الالتزامات', reserves: 'المحجوز', savings: 'فرص التوفير',
+Object.assign(TITLES, { insights: 'التحليل', forecast: 'توقع الدورة', liquidity: 'السيولة', commitments: 'الالتزامات الدائمة', reserves: 'المحجوز', savings: 'فرص التوفير',
   necessity: 'ضروري وكمالي', compare: 'المقارنات', annual: 'السنوي', cities: 'المدن', products: 'المنتجات', items: 'الأغراض', pcats: 'التصنيفات', groups: 'المجموعات', group: 'المجموعة', alerts: 'التنبيهات' });
 Object.assign(NAV_OF, { insights: 'more', alerts: 'more', forecast: 'insights', liquidity: 'insights', commitments: 'insights', reserves: 'insights', savings: 'insights', necessity: 'insights', compare: 'insights',
   annual: 'insights', cities: 'insights', products: 'insights', items: 'products', pcats: 'products', groups: 'insights', group: 'groups' });
@@ -2644,7 +2937,7 @@ function txImpact(t, f) {
   const st = store();
   if (f.groupId) { if (E.isExcluded(st, t)) return 0; if (E.inGroup(st, t, f.groupId)) return sumP(E.spendParts(st, t)); return E.round2(E.itemNet(st, t).filter(o => (o.item.groupIds || []).includes(f.groupId)).reduce((s, o) => s + o.net, 0)); }
   let ps = f.rate ? E.variableParts(st, t) : f.savings ? E.eligibleParts(st, t).filter(p => !f.savingsCat || p.cat === f.savingsCat) : E.spendParts(st, t);
-  if (f.categoryId) ps = ps.filter(p => p.cat === f.categoryId);
+  if (f.categoryId) ps = ps.filter(p => partMatchCat(p, f.categoryId));
   if (f.nec) ps = ps.filter(p => E.necOfPart(st, t, p) === f.nec);
   return sumP(ps);
 }
@@ -2699,10 +2992,12 @@ function txGroupsRow(t) {
   return `<div class="drow">${ico('tag')}<div class="m">${gs.length ? gs.map(g => `<span class="b">${esc(((g.emoji || '') + ' ' + g.name).trim())}</span>`).join(' ') : '<span class="muted">بدون مجموعة</span>'}</div><a data-action="groupsPick" data-id="${t.id}">${gs.length ? 'تعديل' : '+ مجموعة'}</a></div>`;
 }
 function txChainFields(t) {
-  const st = store(), dc = E.effective(st, Object.assign({}, t, { isCommitment: null }), 'commit'), ds = E.effective(st, Object.assign({}, t, { savingsEligible: null }), 'save');
+  // 1.7.0: الافتراضي من الجهة أو التصنيف، و«غير محدد» إذا ما تحدد في أي مستوى
+  const st = store(), dc = E.effective(st, Object.assign({}, t, { isCommitment: null }), 'commit', true), ds = E.effective(st, Object.assign({}, t, { savingsEligible: null }), 'save', true);
+  const yn = (v) => v === true ? 'نعم' : v === false ? 'لا' : 'غير محدد';
   const o = (v, cur, l) => `<option value="${v}" ${String(cur == null ? '' : cur) === v ? 'selected' : ''}>${l}</option>`;
-  return `<div class="grid2"><div><label class="f">التزام</label><select id="s_com">${o('', t.isCommitment, `افتراضي (${dc ? 'نعم' : 'لا'})`)}${o('true', t.isCommitment, 'نعم')}${o('false', t.isCommitment, 'لا')}</select></div>
-    <div><label class="f">يدخل فرص التوفير</label><select id="s_sav">${o('', t.savingsEligible, `افتراضي (${ds ? 'نعم' : 'لا'})`)}${o('true', t.savingsEligible, 'نعم')}${o('false', t.savingsEligible, 'لا')}</select></div></div>
+  return `<div class="grid2"><div><label class="f">التزام دائم</label><select id="s_com">${o('', t.isCommitment, `افتراضي (${yn(dc)})`)}${o('true', t.isCommitment, 'نعم')}${o('false', t.isCommitment, 'لا')}</select></div>
+    <div><label class="f">يدخل فرص التوفير</label><select id="s_sav">${o('', t.savingsEligible, `افتراضي (${yn(ds)})`)}${o('true', t.savingsEligible, 'نعم')}${o('false', t.savingsEligible, 'لا')}</select></div></div>
     <label class="f"><input type="checkbox" id="s_rx" ${E.isRateExcluded(st, 'transaction', t.id) ? 'checked' : ''}> استثنها من معدل الإنفاق المتغير (التوقع)</label>`;
 }
 function subjectChainFields(o, kind, recNec) {
@@ -2710,7 +3005,7 @@ function subjectChainFields(o, kind, recNec) {
   let h = '<div class="grid2">';
   if (recNec) h += `<div><label class="f">التكرار</label><select id="sc_rec">${op('', o.defaultRecurrenceType, 'من التصنيف')}${op('recurring', o.defaultRecurrenceType, 'متكرر')}${op('variable', o.defaultRecurrenceType, 'متغير')}</select></div>
     <div><label class="f">الضرورة</label><select id="sc_nec">${op('', o.defaultNecessityType, 'من التصنيف')}${op('essential', o.defaultNecessityType, 'ضروري')}${op('discretionary', o.defaultNecessityType, 'كمالي')}</select></div>`;
-  h += `<div><label class="f">التزام</label><select id="sc_com">${op('', o.isCommitment, 'من التصنيف')}${op('true', o.isCommitment, 'نعم')}${op('false', o.isCommitment, 'لا')}</select></div>
+  h += `<div><label class="f">التزام دائم</label><select id="sc_com">${op('', o.isCommitment, 'من التصنيف')}${op('true', o.isCommitment, 'نعم')}${op('false', o.isCommitment, 'لا')}</select></div>
     <div><label class="f">يدخل فرص التوفير</label><select id="sc_sav">${op('', o.savingsEligible, 'من التصنيف')}${op('true', o.savingsEligible, 'نعم')}${op('false', o.savingsEligible, 'لا')}</select></div></div>
     <label class="f"><input type="checkbox" id="sc_rx" ${E.isRateExcluded(st, kind, o.id) ? 'checked' : ''}> استثنه من معدل الإنفاق المتغير (التوقع)</label>`;
   return h;
@@ -2735,10 +3030,10 @@ function txBlocks150(t) {
   const st = store(); let h = '';
   // يبدو أنها متكررة
   const rc = E.recurringOfTx(st, t);
-  if (rc && rc.status === 'suggested' && E.spendEffect(t) > 0) h += `<div class="banner i" style="display:block;margin-top:10px"><b>يبدو أن هذه العملية متكررة</b>
+  if (rc && rc.status === 'suggested' && E.spendEffect(t) > 0) h += `<div class="banner i" style="display:block;margin-top:10px"><b>تبدو متكررة — تضيفها التزام دائم؟</b>
     <div class="small" style="margin-top:4px">التكرار المتوقع: ${CAD_L[rc.cadence]} · المبلغ المعتاد: <span class="num">${fmt(rc.expectedAmount)}</span> · آخر عملية: ${fdate(rc.lastDate, true)} · القادمة المتوقعة: ${fdate(E.nextDue(rc, today0(), store()), true)} ${FC}</div>
-    <div class="btns" style="margin-top:8px"><button class="btn p" data-action="recConfirm" data-id="${rc.id}" data-c="1" data-tx="${t.id}">أكّد: التزام</button><button class="btn" data-action="recConfirm" data-id="${rc.id}" data-c="0" data-tx="${t.id}">متكرر بس مو التزام</button><button class="btn" data-action="recDismiss" data-id="${rc.id}" data-tx="${t.id}">مو متكرر</button></div></div>`;
-  else if (rc && rc.status === 'confirmed' && E.spendEffect(t) > 0) h += `<div class="small muted" style="margin-top:8px">${ico('repeat')} متكرر مؤكد (${CAD_L[rc.cadence]})${rc.isCommitment ? ' · التزام' : ''} · القادمة ${fdate(E.nextDue(rc, today0(), store()), true)} <a data-action="recEdit" data-id="${rc.id}">تعديل</a></div>`;
+    <div class="btns" style="margin-top:8px"><button class="btn p" data-action="recConfirm" data-id="${rc.id}" data-c="1" data-tx="${t.id}">نعم، التزام دائم</button><button class="btn" data-action="recConfirm" data-id="${rc.id}" data-c="0" data-tx="${t.id}">متكرر بس</button><button class="btn" data-action="recDismiss" data-id="${rc.id}" data-tx="${t.id}">مو متكرر</button></div></div>`;
+  else if (rc && rc.status === 'confirmed' && E.spendEffect(t) > 0) h += `<div class="small muted" style="margin-top:8px">${ico('repeat')} متكرر مؤكد (${CAD_L[rc.cadence]})${E.recIsFlagged(st, rc) ? ' · التزام دائم' : ''} · القادمة ${fdate(E.nextDue(rc, today0(), store()), true)} <a data-action="recEdit" data-id="${rc.id}">تعديل</a></div>`;
   // الأغراض (1.6.0: صفوف داخل النافذة)
   h += itemsBoxHtml(t);
   // الاسترداد: وش الأغراض المسترجعة
@@ -2812,8 +3107,9 @@ function applyManualCity(tx) {
   const c = $('m_city') ? $('m_city').value : '', sc = $('m_scity') ? $('m_scity').value : '';
   if (!c && !sc) return;
   const t = store().get('transactions', tx.id); if (!t) return;
-  if (c) t.cityId = c;
+  if (c) { delete t.periodCity; t.cityId = c; t.cityManualAt = new Date().toISOString(); } // 1.7.0: اختيارك يغلب «الفترات»
   if (sc) Object.assign(t, { suggestedCityId: sc, suggestedCityRaw: cityName(sc), citySuggestionSource: 'device_gps', citySuggestedAt: new Date().toISOString() });
+  if (sc && t.periodCity && !t.periodCity.forced && t.cityId !== sc) E.restorePeriodCity(t); // موقعك الحين مدينة ثانية: الموقع يغلب
   store().put('transactions', t);
   S.askCityAfter = c && c !== settings().currentCityId && !(settings().cityPromptSnoozeUntil > new Date().toISOString()) ? c : null;
 }
@@ -2862,12 +3158,12 @@ function vInsights() {
   try { fc = cachedFc(); } catch (e) { console.error(e); }
   try { L = cachedLiq(); } catch (e) { console.error(e); }
   const recs = st.all('recurring'), conf = recs.filter(r => r.status === 'confirmed').length, sug = recs.filter(r => r.status === 'suggested').length;
-  const res = E.reservesTotal(st, today0());
+  const res = E.reservesTotal(st, today0()), cmL = E.commitmentList(st, today0());
   const item = (view, t, sub, icon, color) => `<div class="it" data-action="go" data-view="${view}">${icCircle({ color: color || PAL.blue, icon }, 's')}<div class="m"><div class="t">${t}</div><div class="s">${sub}</div></div>${ico('chevL', 'chev')}</div>`;
   return `<div class="card"><h2>الدورة الحالية</h2><div class="list">
     ${item('forecast', 'توقع نهاية الدورة', fc ? `توقع ${fmt(fc.total)} · الفائض المتوقع ${fmt(fc.surplus)}${fc.confidence === 'low' ? ' · ثقة منخفضة' : ''}` : 'ما فيه دورة حالية', 'trend', PAL.violet)}
     ${item('liquidity', 'السيولة القابلة للصرف', L && L.known ? fmt(L.total) : 'تحتاج رصيد حساب معروف (كشف أو رسالة فيها الرصيد)', 'wallet', PAL.green)}
-    ${item('commitments', 'الالتزامات والاشتراكات', `${conf} مؤكد · ${sug} مقترح يحتاج مراجعتك`, 'repeat', PAL.blue)}
+    ${item('commitments', 'الالتزامات الدائمة' + (cmL.some(c => c.status !== 'approved' || c.changed || c.multi) ? ` <span class="cnt">${cmL.filter(c => c.status !== 'approved' || c.changed || c.multi).length}</span>` : ''), `${cmL.length} التزام${cmL.some(c => c.status !== 'approved') ? ` · ${cmL.filter(c => c.status !== 'approved').length} ينتظر اعتمادك` : ''}${cmL.some(c => c.changed) ? ' · تغيّر سعر بعضها' : ''}${cmL.some(c => c.multi) ? ' · أكثر من دفعة في دورة' : ''}${sug ? ` · ${sug} مقترح يحتاج مراجعتك` : ''}`, 'repeat', PAL.blue)}
     ${item('reserves', 'الأموال المحجوزة', res.total ? fmt(res.total) : 'ما فيه حجوزات', 'lock', PAL.gray)}
     ${item('savings', 'فرص التوفير', 'الرجوع لسلوكك الطبيعي في الكماليات', 'piggy', PAL.magenta)}
     ${item('alerts', 'التنبيهات' + (activeAlerts().length ? ` <span class="cnt">${activeAlerts().length}</span>` : ''), 'مركز تنبيهات واحد', 'bell', PAL.orange)}
@@ -2899,7 +3195,7 @@ function vForecast() {
   else if (fc.rateSource === 'history') h += `<p class="small">مضى أقل من 7 أيام، فالمعدل = وسيط الإنفاق المتغير اليومي لآخر 3 دورات مكتملة (ما نخلط أيام الدورة السابقة مع الحالية). بعد 7 أيام يتحول لمعدل الدورة الحالية.</p>
     <div class="list">${fc.history.map(x => `<div class="it" ${drillAttr(x.txIds, 'الإنفاق المتغير ' + fperiod(x.cycle), { rate: true })}><div class="m"><div class="t">${fperiod(x.cycle)}</div><div class="s">${fmt(x.amount)} ÷ ${x.days} يوم</div></div><span class="num">${fmt(x.rate)}</span></div>`).join('')}</div>`;
   else h += `<p class="small">ما فيه 3 دورات مكتملة، فالمعدل من بيانات الدورة الحالية بس (ثقة منخفضة). بعد 7 أيام يصير المعدل الطبيعي للدورة.</p>`;
-  h += `</div><div class="card"><h2>المعدلات</h2><p class="small muted">الإنفاق المتغير = الإنفاق الحقيقي ناقص التحويلات الداخلية وسداد البطاقات والعمليات بأثر صفر والالتزامات المتكررة المعروفة واستثناءاتك. السحب النقدي والخارج غير المعروف يبقون صرف.</p><div class="rows">
+  h += `</div><div class="card"><h2>المعدلات</h2><p class="small muted">الإنفاق المتغير = الإنفاق الحقيقي ناقص التحويلات الداخلية وسداد البطاقات والعمليات بأثر صفر و«الالتزامات الدائمة» واستثناءاتك. السحب النقدي والخارج غير المعروف يبقون صرف.</p><div class="rows">
     ${rowR('', 'معدل الدورة الحالية (المتغير)', money(cr.cycleRate), drillAttr(cr.variable.txIds, 'الإنفاق المتغير في الدورة', { rate: true }), `${fmt(cr.variable.amount)} ÷ ${cr.elapsed} يوم`)}
     ${rowR('', 'معدل آخر 7 أيام داخل الدورة', cr.last7 ? money(cr.last7.rate) : '<span class="muted small">بعد 7 أيام</span>', cr.last7 ? drillAttr(cr.last7.txIds, 'الإنفاق المتغير آخر 7 أيام', { rate: true }) : '', cr.last7 ? `${fmt(cr.last7.amount)} ÷ 7` : 'ما يدخل فيه أيام من الدورة السابقة')}
     ${rowR('', 'معدل الأيام المنقضية (كل الصرف)', money(cr.elapsedRate), drillAttr(cr.all.txIds, 'كل صرف الدورة'), `${fmt(cr.all.amount)} ÷ ${cr.elapsed} يوم`)}</div></div>`;
@@ -2950,24 +3246,137 @@ function sheetAccLiq(id) {
 function recLine(r) {
   return `${CAD_L[r.cadence] || r.cadence} · المعتاد <span class="num">${fmt(r.expectedAmount)}</span>${r.amountMin !== r.amountMax ? ` (${fmt(r.amountMin)}–${fmt(r.amountMax)})` : ''} · آخر ${fdate(r.lastDate)} · القادمة ${fdate(E.nextDue(r, today0(), store()))}`;
 }
+// 1.7.1: «الالتزامات الدائمة»: كل جهة معلّمة «التزام دائم» لها خطة: سؤال اعتماد المبلغ، نظام الدفعات (شهري/متغير)، والقيمة (ثابت/متغير).
+// اللي تنتظر جوابك ما تنحسب التزام. تنبيه لما يتغير السعر، ولما تجي أكثر من دفعة في نفس الدورة
+const commitDispl = (c) => c.shown != null ? money(c.shown) : '<span class="muted">—</span>';
+const avgUnit = (n, w) => n === 1 ? (w === 'pay' ? 'آخر دفعة' : 'آخر دورة') : `آخر ${n} ${w === 'pay' ? 'دفعات' : 'دورات'}`;
+function commitLine(c) {
+  const lastTxt = `آخر مبلغ ${fmt(c.last.amount)} (${fdate(c.last.date)})`;
+  if (c.status !== 'approved') return `ينتظر اعتماد مبلغه · آخر فاتورة ${fmt(c.last.amount)} (${fdate(c.last.date)})`;
+  if (c.pay === 'variable') {
+    if (c.value === 'fixed') return `المعتمد لكل دفعة ${fmt(c.approved)} · ${c.perCycle != null ? `متوسط الدورة ${fmt(c.perCycle)} (${avgUnit(c.cyclesUsed, 'cyc')})` : 'متوسط الدورة يطلع بعد أول دورة كاملة'}`;
+    return c.shown != null ? `متوسط ${avgUnit(c.cyclesUsed, 'cyc')} كاملة · ${lastTxt}` : `المتوسط يطلع بعد أول دورة كاملة · ${lastTxt}`;
+  }
+  if (c.value === 'variable') return `متوسط ${avgUnit(c.paysUsed, 'pay')} · ${lastTxt}`;
+  return `المعتمد ${fmt(c.approved)} · ${lastTxt}`;
+}
+const alertTxt = (al) => al.mode === 'sar' ? `${fmt(al.value)} ريال` : `${al.value}%`;
+// أزرار «سؤال الاعتماد»
+function commitAskHtml(c) {
+  const k = esc(c.key);
+  return `<div class="small">آخر فاتورة لـ<b>${esc(c.name)}</b> <b class="num">${fmt(c.suggest)}</b> ريال (${fdate(c.last.date)}). نعتمد هالمبلغ كقيمة معتمدة لهذا الالتزام؟</div>
+    <div class="btns" style="margin-top:8px"><button class="btn p" data-action="commitApprove" data-k="${k}" data-v="approve">نعم اعتمده</button><button class="btn" data-action="commitOther" data-k="${k}">مبلغ ثاني</button><button class="btn" data-action="commitApprove" data-k="${k}" data-v="variable">قيمته متغيرة</button></div>`;
+}
+// أزرار «تغيّر السعر»: لو المبلغ قريب من ضعف المعتمد، «حق شهرين» و«مقدم» أول
+function commitPriceHtml(c) {
+  const k = esc(c.key), b = {
+    update: `<button class="btn${c.nearDouble ? '' : ' p'}" data-action="commitDecide" data-k="${k}" data-v="update">تحديث بالسعر (${fmt(c.last.amount)})</button>`,
+    variable: `<button class="btn" data-action="commitDecide" data-k="${k}" data-v="variable">خله متغير</button>`,
+    exception: `<button class="btn" data-action="commitDecide" data-k="${k}" data-v="exception">استثناء هالشهر</button>`,
+    arrears: `<button class="btn${c.nearDouble ? ' p' : ''}" data-action="commitSplitOpen" data-k="${k}" data-id="${esc(c.last.id)}" data-kind="arrears">دفعت حق شهرين (الماضي ما دفعته)</button>`,
+    advance: `<button class="btn" data-action="commitSplitOpen" data-k="${k}" data-id="${esc(c.last.id)}" data-kind="advance">دفعت مقدم للشهر الجاي</button>`,
+  };
+  const order = c.nearDouble ? ['arrears', 'advance', 'update', 'variable', 'exception'] : ['update', 'variable', 'exception', 'arrears', 'advance'];
+  return `<div class="small">آخر مبلغ <b class="num">${fmt(c.last.amount)}</b> (${fdate(c.last.date)}) والمعتمد <b class="num">${fmt(c.approved)}</b> <span class="${c.diffAbs > 0 ? 'warn-t' : 'muted'}">(${c.diffAbs > 0 ? '+' : ''}${fmt(c.diffAbs)}${c.diffPct != null ? ` · ${c.diffPct > 0 ? '+' : ''}${c.diffPct}%` : ''})</span>.${c.nearDouble ? ' <b>المبلغ تقريبًا ضعف سعره.</b>' : ''}</div>
+    <div class="btns" style="margin-top:8px">${order.map(x => b[x]).join('')}</div>`;
+}
+function commitMultiHtml(c) {
+  const k = esc(c.key), st = store(), per = { start: c.multi.cycleStart, end: c.multi.cycleEnd };
+  const rows = c.multi.txIds.map(id => st.get('transactions', id)).filter(Boolean).sort((a, b) => (E.txDate(a) + (a.time || '')).localeCompare(E.txDate(b) + (b.time || '')));
+  return `<div class="small">فيه <b>${c.multi.count === 2 ? 'دفعتين' : c.multi.count + ' دفعات'}</b> لـ<b>${esc(c.name)}</b> في نفس الدورة (${fperiod(per)}): ${rows.map(t => `<span class="num">${fmt(E.payAmt(t))}</span> يوم ${fdate(E.txDate(t))}`).join('، ')}. هل هو متغير، أو تعثر من شهر سابق، أو دفعة مقدمة، أو استثناء؟</div>
+    <div class="btns" style="margin-top:8px"><button class="btn" data-action="commitMulti" data-k="${k}" data-v="variable">دفعاته متغيرة (أكثر من دفعة عادي)</button><button class="btn" data-action="commitMulti" data-k="${k}" data-v="arrears">تعثر من شهر سابق</button><button class="btn" data-action="commitMulti" data-k="${k}" data-v="advance">دفعة مقدمة للشهر الجاي</button><button class="btn" data-action="commitMulti" data-k="${k}" data-v="exception">استثناء لهالشهر بس</button></div>`;
+}
+function undefinedBanner(field, period, what) {
+  if (!period) return '';
+  const u = E.undefinedSpend(store(), period, field); if (!(u.amount > 0.004)) return '';
+  return `<div class="card undef"><div class="row"><div style="flex:1;min-width:0"><b class="num">${fmt(u.amount)}</b> ر.س <span>${what}</span><div class="small muted">«غير محدد» ما نخمّنه. حدده مرة وحدة على التصنيف ويمشي على عملياته.${u.pending > 0.004 ? ` منها <span class="num">${fmt(u.pending)}</span> لالتزامات تنتظر اعتماد مبلغها.` : ''}</div></div><button class="btn p" data-action="defineOpen" data-f="${field}" data-pk="${esc(period.start + '|' + period.end)}">حدّدها</button></div></div>`;
+}
 function vCommitments() {
   const st = store(), today = today0(), cur = E.currentCycle(st), R = cur ? E.computePeriod(st, cur) : null;
   const recs = st.all('recurring'), sug = recs.filter(r => r.status === 'suggested'), conf = recs.filter(r => r.status === 'confirmed'), dis = recs.filter(r => r.status === 'dismissed');
-  const up = cur ? E.upcomingCommitments(st, today, cur.end, today) : [];
-  let h = `<div class="card rows">${R ? rowR(dirI('repeat'), 'الالتزامات المعروفة المدفوعة هذي الدورة', money(R.commitments), 'data-action="kpi" data-kind="commitments" data-p="cur"', cnt(R.commitmentItems.length, 'op')) : ''}
+  const up = cur ? E.upcomingCommitments(st, today, cur.end, today) : [], L = E.commitmentList(st, today), cfg = E.commitCfg(st);
+  const pend = L.filter(c => c.status !== 'approved'), changed = L.filter(c => c.changed), multi = L.filter(c => c.multi);
+  const head = (c) => `<div class="rvh"><b>${esc(c.name)}</b><span class="sp" style="flex:1"></span><a data-action="commitOpen" data-k="${esc(c.key)}">التفاصيل</a></div>`;
+  let h = `<div class="card rows">${R ? rowR(dirI('repeat'), 'الالتزامات الدائمة المدفوعة هذي الدورة', money(R.commitments), 'data-action="kpi" data-kind="commitments" data-p="cur"', cnt(R.commitmentItems.length, 'op')) : ''}
     ${rowR(dirI('cal'), 'القادمة قبل نهاية الدورة ' + FC, money(E.round2(up.reduce((s, u) => s + u.amount, 0))), '', up.length ? up.map(u => esc(u.name) + ' ' + fdate(u.date)).slice(0, 3).join('، ') : 'ما فيه')}</div>`;
-  if (sug.length) h += `<div class="card"><h2>يبدو إنها متكررة (راجعها)</h2><p class="small muted">اكتشاف آلي: نفس التاجر أو المستفيد والحساب، بفاصل منتظم ومبلغ قريب. ما يصير التزام مؤكد إلا بموافقتك.</p>${sug.map(r => `<div class="rv"><div class="rvh"><b>${esc(E.subjectName(st, r))}</b><span class="sp" style="flex:1"></span><a ${drillAttr(r.evidenceTxIds, 'عمليات ' + E.subjectName(st, r))}>العمليات</a></div><div class="small muted">${recLine(r)}</div>
-    <div class="btns" style="margin-top:8px"><button class="btn p" data-action="recConfirm" data-id="${r.id}" data-c="1">التزام</button><button class="btn" data-action="recConfirm" data-id="${r.id}" data-c="0">متكرر بس مو التزام</button><button class="btn" data-action="recDismiss" data-id="${r.id}">مو متكرر</button></div></div>`).join('')}</div>`;
-  h += `<div class="card"><h2>المؤكدة</h2>${conf.length ? `<div class="list">${conf.map(r => `<div class="it" data-action="recEdit" data-id="${r.id}">${icCircle({ color: r.isCommitment ? PAL.blue : PAL.gray, icon: 'repeat' }, 's')}<div class="m"><div class="t">${esc(E.subjectName(st, r))}${r.isCommitment ? ' <span class="b">التزام</span>' : ''}${r.reserve ? ' <span class="b n">محجوز له</span>' : ''}</div><div class="s">${recLine(r)}</div></div>${ico('chevL', 'chev')}</div>`).join('')}</div>` : '<div class="muted">ما فيه للحين. أكّد المقترح فوق، أو من أي عملية.</div>'}</div>`;
+  if (pend.length) h += `<div class="card" id="cmPend"><h2>تنتظر اعتماد مبلغها (${pend.length})</h2><p class="small muted">لين تجاوب، ما تنحسب التزام ومبالغها مع «غير محدد».</p>${pend.map(c => `<div class="rv">${head(c)}${commitAskHtml(c)}</div>`).join('')}</div>`;
+  if (changed.length) h += `<div class="card"><h2>تغيّر سعرها (${changed.length})</h2><p class="small muted">آخر مبلغ يختلف عن المعتمد بأكثر من حد التنبيه (${alertTxt({ mode: cfg.alertMode, value: cfg.alertValue })}، أو الحد الخاص بالالتزام).</p>${changed.map(c => `<div class="rv">${head(c)}${commitPriceHtml(c)}</div>`).join('')}</div>`;
+  if (multi.length) h += `<div class="card"><h2>${ico('alert')} أكثر من دفعة في نفس الدورة (${multi.length})</h2>${multi.map(c => `<div class="rv">${head(c)}${commitMultiHtml(c)}</div>`).join('')}</div>`;
+  h += `<div class="card"><h2>الالتزامات الدائمة <span class="sp"></span><span class="muted">${L.length}</span></h2>${L.length ? `<div class="list">${L.map(c => `<div class="it" data-action="commitOpen" data-k="${esc(c.key)}">${icCircle({ color: c.status !== 'approved' ? PAL.gray : (c.changed || c.multi) ? PAL.orange : PAL.blue, icon: c.subjectType === 'merchant' ? 'store' : 'person' }, 's')}<div class="m"><div class="t">${esc(c.name)}${c.status !== 'approved' ? ' <span class="b w">ينتظر اعتمادك</span>' : ''}${c.changed ? ' <span class="b w">تغيّر السعر</span>' : ''}${c.multi ? ' <span class="b w">⚠️ أكثر من دفعة</span>' : ''}${c.status === 'approved' && c.value === 'variable' ? ' <span class="b n">قيمته متغيرة</span>' : ''}${c.status === 'approved' && c.pay === 'variable' ? ' <span class="b n">دفعاته متغيرة</span>' : ''}</div><div class="s">${commitLine(c)}</div></div>${commitDispl(c)}</div>`).join('')}</div>`
+    : '<div class="muted small">ما فيه للحين. «التزام دائم» تحدده أنت على التصنيف أو الفرعي أو المحل أو المستفيد أو العملية نفسها، أو توافق على المقترح تحت.</div>'}
+    ${(E.commitmentGroups(st).none || []).length ? `<p class="small muted" style="margin-top:8px">و${cnt(E.commitmentGroups(st).none.length, 'op')} التزام بدون محل أو مستفيد (تدخل المجموع بس). <a ${drillAttr(E.commitmentGroups(st).none.map(t => t.id), 'التزامات بدون جهة')}>اعرضها</a></p>` : ''}</div>`;
+  h += undefinedBanner('commit', cur, 'من صرف هذي الدورة ما حددت هل هو «التزام دائم» أو لا');
+  if (sug.length) h += `<div class="card"><h2>تبدو متكررة — تضيفها التزام دائم؟</h2><p class="small muted">اكتشاف آلي: نفس التاجر أو المستفيد والحساب، بفاصل منتظم ومبلغ قريب. ما تصير التزام إلا بموافقتك.</p>${sug.map(r => `<div class="rv"><div class="rvh"><b>${esc(E.subjectName(st, r))}</b><span class="sp" style="flex:1"></span><a ${drillAttr(r.evidenceTxIds, 'عمليات ' + E.subjectName(st, r))}>العمليات</a></div><div class="small muted">${recLine(r)}</div>
+    <div class="btns" style="margin-top:8px"><button class="btn p" data-action="recConfirm" data-id="${r.id}" data-c="1">نعم، التزام دائم</button><button class="btn" data-action="recConfirm" data-id="${r.id}" data-c="0">متكرر بس</button><button class="btn" data-action="recDismiss" data-id="${r.id}">مو متكرر</button></div></div>`).join('')}</div>`;
+  h += `<div class="card"><h2>المتكررة المؤكدة <span class="sp"></span><span class="muted small">للتوقع والحجز</span></h2>${conf.length ? `<div class="list">${conf.map(r => `<div class="it" data-action="recEdit" data-id="${r.id}">${icCircle({ color: E.recIsFlagged(st, r) ? PAL.blue : PAL.gray, icon: 'repeat' }, 's')}<div class="m"><div class="t">${esc(E.subjectName(st, r))}${E.recIsFlagged(st, r) ? ' <span class="b">التزام دائم</span>' : ''}${r.reserve ? ' <span class="b n">محجوز له</span>' : ''}</div><div class="s">${recLine(r)}</div></div>${ico('chevL', 'chev')}</div>`).join('')}</div>` : '<div class="muted small">ما فيه للحين.</div>'}</div>`;
   if (dis.length) h += `<div class="card"><details><summary class="muted">رفضتها (${dis.length})</summary><div class="list">${dis.map(r => `<div class="it" style="cursor:default"><div class="m"><div class="t">${esc(E.subjectName(st, r))}</div><div class="s">${recLine(r)}</div></div><button class="btn" data-action="recRestore" data-id="${r.id}">رجّعه مقترح</button></div>`).join('')}</div></details></div>`;
-  h += `<div class="card prose"><p class="small">أربع مفاهيم مستقلة: <b>التكرار</b> (متكرر أو متغير)، <b>الضرورة</b> (ضروري أو كمالي)، <b>الالتزام</b>، و<b>فرص التوفير</b>. كل وحدة تتحدد بالأدق: التصنيف ← الفرعي ← التاجر أو المستفيد ← العملية. «الالتزامات المعروفة» = متكرر + التزام.</p></div>`;
+  h += `<div class="card prose"><p class="small">أربع خصائص مستقلة، وكلها تبدأ «غير محدد» لين تحددها: <b>التكرار</b> (متكرر أو متغير)، <b>الضرورة</b> (ضروري أو كمالي)، <b>التزام دائم</b>، و<b>فرص التوفير</b>. كل وحدة تتحدد بالأدق: العملية ← المحل أو المستفيد ← الفرعي ← التصنيف.
+    «الالتزامات الدائمة» = الصرف المعلّم «التزام دائم» (ما يشترط تكرار). كل محل أو مستفيد يصير التزام يسألك التطبيق عن مبلغه المعتمد (يقترح آخر فاتورة)، وما ينحسب التزام لين تجاوب. إذا آخر 3 دفعات له متساوية ينعتمد بدون سؤال. حد التنبيه وعدد المتوسط من <a data-action="go" data-view="settings">الإعدادات</a>.</p></div>`;
   return h;
+}
+const MARK_L = { exception: 'استثناء', arrears: 'تعثر (حق دورة سابقة)', advance: 'مقدم (لدورة جاية)' };
+function sheetCommit(key) {
+  const st = store(), c = E.commitmentOf(st, key, today0()); if (!c) return closeSheet(null);
+  const cfg = E.commitCfg(st), k = esc(key), ok = c.status === 'approved', L = E.commitLedger(st, key, today0());
+  const seg = (on, act, v, label) => `<button style="flex:1" class="${on ? 'on' : ''}" data-action="${act}" data-k="${k}" data-v="${v}">${label}</button>`;
+  const shownTxt = !ok ? '' : c.pay === 'variable'
+    ? (c.value === 'fixed' ? `يعرض المعتمد لكل دفعة <b class="num">${fmt(c.approved)}</b>${c.perCycle != null ? `، ومتوسط الدورة <b class="num">${fmt(c.perCycle)}</b> (${avgUnit(c.cyclesUsed, 'cyc')} كاملة)` : '، ومتوسط الدورة يطلع بعد أول دورة كاملة'}.`
+      : (c.shown != null ? `يعرض متوسط الدورة: <b class="num">${fmt(c.shown)}</b> (${avgUnit(c.cyclesUsed, 'cyc')} كاملة).` : 'المتوسط يطلع بعد ما تكتمل دورة وحدة على الأقل.'))
+    : (c.value === 'variable' ? `يعرض متوسط ${avgUnit(c.paysUsed, 'pay')}: <b class="num">${fmt(c.shown)}</b>، وما ينبهك لما يتغير السعر.` : '');
+  const noteOf = (e) => e.kind === 'arrears' && e.k < 0 ? 'دفعة متأخرة' : e.kind === 'advance' && e.k > 0 ? 'مدفوع مقدم' : e.kind === 'exception' ? 'استثناء' : '';
+  const cyc = c.cycles.map(x => { const notes = Array.from(new Set(x.entries.map(noteOf).filter(Boolean))); return `<div class="it" style="cursor:default"><div class="m"><div class="t small">${fperiod(x)}${x.open ? ' <span class="b n">الحالية</span>' : x.future ? ' <span class="b n">جاية</span>' : ''}</div><div class="s">${x.amount > 0.004 ? `${cnt(new Set(x.entries.map(e => e.txId)).size, 'op')}${notes.length ? ' · ' + notes.join('، ') : ''}` : (x.open || x.future ? 'ما فيه دفعة للحين' : '<span class="warn-t">ما فيه دفعة</span>')}</div></div><span class="num">${x.amount > 0.004 ? fmt(x.amount) : '—'}</span></div>`; }).join('');
+  const marked = Object.keys(c.plan.marks || {}).map(id => ({ id, mk: c.plan.marks[id], x: L.byTx.get(id) })).filter(o => o.x);
+  const own = c.alertOwn ? c.alert.mode : 'global';
+  openSheet(`<h3>${esc(c.name)}<span class="sp"></span><button class="close" data-action="closeSheet">×</button></h3>
+    ${!ok ? `<div class="banner w" style="display:block">${commitAskHtml(c)}<div class="small muted" style="margin-top:8px">لين تجاوب ما ينحسب التزام، ومبالغه مع «غير محدد».</div></div>` : ''}
+    ${c.changed ? `<div class="banner w" style="display:block">${commitPriceHtml(c)}</div>` : ''}
+    ${c.multi ? `<div class="banner w" style="display:block">${commitMultiHtml(c)}</div>` : ''}
+    ${ok ? `<label class="f">نظام الدفعات</label><div class="seg" style="display:flex">${seg(c.pay !== 'variable', 'commitPay', 'monthly', 'شهري (دفعة كل دورة)')}${seg(c.pay === 'variable', 'commitPay', 'variable', 'متغير (أكثر من دفعة)')}</div>
+    <label class="f">القيمة</label><div class="seg" style="display:flex">${seg(c.value === 'fixed', 'commitDecide', 'fixed', 'ثابت')}${seg(c.value === 'variable', 'commitDecide', 'variable', 'متغير')}</div>
+    ${c.value === 'fixed' ? `<label class="f">المبلغ المعتمد${c.pay === 'variable' ? ' (لكل دفعة)' : ''}${c.auto ? ' <span class="small muted">· انعتمد تلقائي لأن آخر 3 دفعات متساوية</span>' : ''}</label><div class="btns" style="flex-wrap:nowrap"><input type="text" inputmode="decimal" id="cm_amt" value="${c.approved != null ? c.approved : ''}" style="flex:1"><button class="btn p" data-action="commitAmount" data-k="${k}">حفظ</button></div>` : ''}
+    ${shownTxt ? `<p class="small" style="margin-top:8px">${shownTxt}</p>` : ''}
+    ${c.value === 'fixed' ? `<label class="f">حد تنبيه تغيّر السعر</label><div class="btns" style="flex-wrap:nowrap"><select id="cm_almode" style="flex:1.4"><option value="global" ${own === 'global' ? 'selected' : ''}>مثل العام (${alertTxt({ mode: cfg.alertMode, value: cfg.alertValue })})</option><option value="pct" ${own === 'pct' ? 'selected' : ''}>نسبة خاصة (%)</option><option value="sar" ${own === 'sar' ? 'selected' : ''}>مبلغ خاص (ريال)</option></select><input type="text" inputmode="decimal" id="cm_alval" value="${c.alertOwn ? c.alert.value : ''}" placeholder="القيمة" style="flex:1"><button class="btn" data-action="commitAlertSave" data-k="${k}">حفظ</button></div>
+      <p class="small muted">ينبهك لما آخر مبلغ يختلف عن المعتمد بأكثر من ${alertTxt(c.alert)}.</p>` : ''}` : `<div class="btns" id="cm_other" style="flex-wrap:nowrap;margin-bottom:10px"><input type="text" inputmode="decimal" id="cm_amt" placeholder="مبلغ ثاني تكتبه" style="flex:1"><button class="btn" data-action="commitApprove" data-k="${k}" data-v="amount">اعتمد هالمبلغ</button></div>`}
+    ${cyc ? `<h3 style="margin-top:14px;font-size:15px">سجل الدورات</h3><div class="list">${cyc}</div><p class="small muted">الدفعة المتعثرة أو المقدمة تنحسب هنا على دورتها. صرفك الفعلي يبقى بتاريخ الدفع.</p>` : ''}
+    ${marked.length ? `<h3 style="margin-top:14px;font-size:15px">دفعات عليها علامة</h3><div class="list">${marked.map(o => `<div class="it" style="cursor:default"><div class="m"><div class="t small"><span class="num">${fmt(o.x.amount)}</span> · ${fdate(o.x.date, true)}</div><div class="s">${MARK_L[o.mk.kind] || o.mk.kind}${o.x.split ? ': ' + o.x.split.filter(p => p.amount > 0).map(p => `<span class="num">${fmt(p.amount)}</span> ${p.k === 0 ? 'لدورتها' : p.k < 0 ? `قبلها بـ${-p.k === 1 ? 'دورة' : -p.k + ' دورات'}` : `بعدها بـ${p.k === 1 ? 'دورة' : p.k + ' دورات'}`}`).join('، ') : ''}</div></div>${o.mk.kind !== 'exception' ? `<button class="btn" data-action="commitSplitOpen" data-k="${k}" data-id="${esc(o.id)}" data-kind="${o.mk.kind}" data-edit="1">عدّل</button>` : ''}<button class="btn r" data-action="commitMarkClear" data-k="${k}" data-id="${esc(o.id)}">${ico('trash')}</button></div>`).join('')}</div>` : ''}
+    <dl class="kv"><dt>آخر مبلغ</dt><dd>${num(c.last.amount)} · ${fdate(c.last.date, true)}</dd><dt>العمليات</dt><dd><a ${drillAttr(c.txIds, 'التزام: ' + c.name)}>${cnt(c.count, 'op')}</a></dd></dl>
+    <div class="btns" style="margin-top:12px"><button class="btn" data-action="${c.subjectType === 'merchant' ? 'editMerchant' : 'editBeneficiary'}" data-id="${esc(c.subjectId)}">${c.subjectType === 'merchant' ? 'إعدادات المحل' : 'إعدادات المستفيد'}</button><button class="btn r" data-action="commitOff" data-k="${k}">مو التزام دائم</button></div>`);
+}
+// تقسيم دفعة على دورات (تعثر: الدورات السابقة · مقدم: الجاية). S.cmSplit = {key, txId, kind, rows: [{k, amount}]}
+function sheetCommitSplit() {
+  const X = S.cmSplit; if (!X) return;
+  const st = store(), L = E.commitLedger(st, X.key, today0()), x = L.byTx.get(X.txId), c = E.commitmentOf(st, X.key, today0()); if (!x || !c) return closeSheet(null);
+  const lab = (k) => { const cy = L.C.list[x.idx + k]; return `${k === 0 ? 'دورة الدفعة نفسها' : k < 0 ? (k === -1 ? 'الدورة اللي قبلها' : `قبلها بـ${-k} دورات`) : (k === 1 ? 'الدورة الجاية' : `بعدها بـ${k} دورات`)}${cy ? ` <span class="small muted">· ${fperiod(cy)}</span>` : ''}`; };
+  const tot = E.round2(X.rows.reduce((s, r) => s + (Number(E.parseNum(r.amount)) || 0), 0));
+  const canAdd = X.rows.length < 12 && !!L.C.list[x.idx + (X.kind === 'arrears' ? Math.min.apply(null, X.rows.map(r => r.k)) - 1 : Math.max.apply(null, X.rows.map(r => r.k)) + 1)];
+  openSheet(`<h3>${X.kind === 'arrears' ? 'دفعة عن أكثر من شهر (تعثر)' : 'دفعة مقدمة'}<span class="sp"></span><button class="close" data-action="commitOpen" data-k="${esc(X.key)}">×</button></h3>
+    <p class="small">دفعة <b>${esc(c.name)}</b> <b class="num">${fmt(x.amount)}</b> بتاريخ ${fdate(x.date, true)}. قسّمها على الدورات اللي تغطيها. التقسيم في «سجل الالتزام» بس: صرفك الفعلي يبقى بتاريخ الدفع.</p>
+    <div class="list">${X.rows.map((r, i) => `<div class="it" style="cursor:default"><div class="m"><div class="t small">${lab(r.k)}</div></div><input type="text" inputmode="decimal" class="cmsp" data-i="${i}" data-change="cmSplitCalc" value="${r.amount}" style="width:110px"></div>`).join('')}</div>
+    <p class="small" id="cmsp_sum" style="margin-top:8px">${splitSumTxt(tot, x.amount)}</p>
+    <div class="btns" style="margin-top:10px"><button class="btn p" data-action="commitSplitSave">حفظ التقسيم</button>${canAdd ? `<button class="btn" data-action="commitSplitAdd">+ ${X.kind === 'arrears' ? 'دورة قبل' : 'دورة بعد'}</button>` : ''}${X.rows.length > 2 ? `<button class="btn" data-action="commitSplitLess">− دورة</button>` : ''}<button class="btn" data-action="commitOpen" data-k="${esc(X.key)}">إلغاء</button></div>`);
+}
+function splitSumTxt(tot, amt) { const left = E.round2(amt - tot); return `المجموع <b class="num">${fmt(tot)}</b> من <b class="num">${fmt(amt)}</b>${Math.abs(left) > 0.004 ? ` · <span class="warn-t">${left > 0 ? 'الباقي' : 'زايد'} ${fmt(Math.abs(left))}</span>` : ' · تمام'}`; }
+// 1.7.0: «حدّدها»: التصنيفات اللي صرفها «غير محدد» في هذي الخاصية، وجنب كل وحدة أزرار سريعة
+const DEFINE_F = {
+  nec: { title: 'الضروري والكمالي', key: 'defaultNecessityType', opts: [['essential', 'ضروري'], ['discretionary', 'كمالي']] },
+  save: { title: 'فرص التوفير', key: 'savingsEligible', opts: [[true, 'يدخل'], [false, 'ما يدخل']] },
+  commit: { title: 'الالتزامات الدائمة', key: 'isCommitment', opts: [[true, 'التزام دائم'], [false, 'مو التزام']] },
+};
+function sheetDefine(field, per) {
+  const st = store(), D = DEFINE_F[field], u = E.undefinedSpend(st, per, field);
+  const cats = u.categories.filter(c => !String(c.categoryId).startsWith('__') && st.get('categories', c.categoryId)), other = E.round2(u.amount - (u.pending || 0) - cats.reduce((s, c) => s + c.amount, 0));
+  S.defineCtx = { field, per };
+  openSheet(`<h3>${D.title}: حدّدها<span class="sp"></span><button class="close" data-action="closeSheet">×</button></h3>
+    <p class="small muted">${fperiod(per)} · اللي تختاره ينحفظ على التصنيف ويمشي على كل عملياته (السابقة والجاية). المحل أو العملية تقدر تغيّرها لها.</p>
+    ${cats.length ? `<div class="list">${cats.map(c => { const u2 = catUi(c.categoryId); return `<div class="it defrow" style="cursor:default">${icCircle(u2, 's')}<div class="m"><div class="t">${esc(E.catName(st, c.categoryId))}</div><div class="s num">${fmt(c.amount)}</div></div><div class="defb">${D.opts.map(([v, l]) => `<button class="btn" data-action="defineSet" data-cat="${esc(c.categoryId)}" data-v="${v}">${l}</button>`).join('')}</div></div>`; }).join('')}</div>` : '<div class="muted">كل التصنيفات محددة.</div>'}
+    ${u.pending > 0.004 ? `<div class="banner w" style="display:block;margin-top:10px"><b class="num">${fmt(u.pending)}</b> ر.س لـ${u.pendingKeys.length === 1 ? 'التزام ينتظر اعتماد مبلغه' : u.pendingKeys.length === 2 ? 'التزامين ينتظرون اعتماد مبالغهم' : u.pendingKeys.length + ' التزامات تنتظر اعتماد مبالغها'}: ما تنحسب التزام لين تجاوب. <a data-action="commitPendGo">جاوب عليها</a></div>` : ''}
+    ${other > 0.004 ? `<p class="small muted" style="margin-top:10px">و<b class="num">${fmt(other)}</b> صرف بدون تصنيف أو تحويلات لأشخاص ما صنفتها: صنّفها أول وبعدين حدد تصنيفها. <a data-action="needGo" data-k="uncategorized">اعرضها</a></p>` : ''}`);
 }
 function sheetRecurring(id) {
   const st = store(), r = st.get('recurring', id); if (!r) return;
   openSheet(`<h3>${esc(E.subjectName(st, r))}<span class="sp"></span><button class="close" data-action="closeSheet">×</button></h3><div class="small muted">${recLine(r)}</div>
     <div class="grid2"><div><label class="f">التكرار</label><select id="rc_cad">${['weekly', 'monthly', 'yearly'].map(c => `<option value="${c}" ${r.cadence === c ? 'selected' : ''}>${CAD_L[c]}</option>`).join('')}</select></div><div><label class="f">المبلغ المعتاد</label><input type="text" inputmode="decimal" id="rc_amt" value="${r.expectedAmount}"></div></div>
-    <label class="f"><input type="checkbox" id="rc_com" ${r.isCommitment ? 'checked' : ''}> التزام (يدخل «الالتزامات المعروفة» والقادمة في التوقع)</label>
+    <label class="f"><input type="checkbox" id="rc_com" data-was="${E.recIsFlagged(st, r) ? '1' : '0'}" ${E.recIsFlagged(st, r) ? 'checked' : ''}> التزام دائم (ينحفظ على ${r.subjectType === 'merchant' ? 'المحل' : 'المستفيد'} نفسه، ويدخل «الالتزامات الدائمة» والقادمة في التوقع)</label>
     <label class="f"><input type="checkbox" id="rc_res" ${r.reserve ? 'checked' : ''}> احجز له (ينخصم من السيولة بقيمة دفعته القادمة)</label>
     <div class="btns" style="margin-top:12px"><button class="btn p" data-action="recSave" data-id="${r.id}">${r.status === 'confirmed' ? 'حفظ' : 'أكّد'}</button><button class="btn" ${drillAttr(r.evidenceTxIds, 'عمليات ' + E.subjectName(st, r))}>العمليات</button>${r.status === 'confirmed' ? `<button class="btn r" data-action="recDismiss" data-id="${r.id}">مو متكرر</button>` : ''}</div>`);
 }
@@ -3001,6 +3410,8 @@ function vSavings() {
   const MODE = { none: 'يحتاج دورة مكتملة وحدة على الأقل عشان يقارن.', compare: 'عندك دورة مكتملة وحدة: مقارنة فقط، بدون رقم فرصة.', preliminary: 'دورتان مكتملتان: تقدير أولي — التاريخ قصير، والرقم ممكن يتغير كثير.', median: 'المرجع الطبيعي = وسيط آخر 3 دورات مكتملة لكل تصنيف.' };
   h += `<div class="banner ${so.mode === 'median' ? 'i' : 'w'}">${MODE[so.mode]}</div>`;
   if (so.lowConfidence && so.isForecast) h += `<div class="banner w">توقع بثقة منخفضة — بيانات الفترة قليلة</div>`;
+  // 1.7.0: «غير محدد»: الكمالي اللي ما حددت يدخل فرص التوفير أو لا، والصرف اللي ما حددت ضرورته
+  h += undefinedBanner('nec', so.target, 'من صرف الدورة ما حددت ضرورته (فرص التوفير تحسب الكمالي بس)') + undefinedBanner('save', so.target, 'كمالي ما حددت يدخل فرص التوفير أو لا');
   if (so.total != null) h += `<div class="card"><h2>فرصة التوفير ${so.isForecast ? '<span class="fc">تقديري</span>' : ''}</h2><div class="bigv">${money(so.total)}</div><p class="small muted">مجموع التجاوزات الموجبة بس: كل تصنيف كمالي ومؤهل للتوفير ${so.isForecast ? '(توقعه لنهاية الدورة)' : '(فعلي)'} − الطبيعي له. التصنيف الأقل من طبيعته صفر، وما يعوّض غيره. التبرعات ما تدخل أبدًا.</p></div>`;
   h += `<div class="card"><h2>${fperiod(so.target)}</h2>${so.rows.length ? `<div class="list">${so.rows.map(r => `<div class="it" data-action="savDrill" data-cat="${esc(r.categoryId)}">${icCircle(catUi(r.categoryId === '__none' ? null : r.categoryId), 's')}<div class="m"><div class="t">${esc(bucketName(r.categoryId))}${r.opportunity > 0 ? ` <span class="b w">فرصة ${fmt(r.opportunity)}</span>` : ''}</div>
     <div class="s">${so.isForecast ? `الفعلي ${fmt(r.actual)}${r.upcoming ? ` + التزامات ${fmt(r.upcoming)}` : ''} ← التوقع ${fmt(r.forecast)}` : `الفعلي ${fmt(r.actual)}`}${r.normal != null ? ` · الطبيعي ${fmt(r.normal)}` : ''}</div>
@@ -3014,6 +3425,7 @@ function vSavings() {
 function vNecessity() {
   const st = store(), p = S.period, nb = E.necessityBreakdown(st, p);
   let h = periodBox(p, nb.total, { nav: true });
+  h += undefinedBanner('nec', p, 'ما حددت ضرورتها (ضروري أو كمالي)'); // 1.7.0
   h += `<div class="card rows">${['essential', 'discretionary', 'undefined'].map(k => rowR(`<span class="dot" style="background:${NEC_C[k]}"></span>`, NEC_L[k], money(nb[k].amount), `data-action="necDrill" data-v="${k}"`, `${nb[k].pct}%${k === 'undefined' ? ' · ما نخمّنه' : ''}`)).join('')}</div>`;
   h += `<div class="grid3">${['essential', 'discretionary', 'undefined'].map(k => `<div class="card"><h2 class="soft">أعلى ${NEC_L[k]}</h2>${nb[k].categories.length ? `<div class="list">${nb[k].categories.slice(0, 5).map(c => `<div class="it" data-action="necDrill" data-v="${k}" data-cat="${esc(c.categoryId)}">${icCircle(catUi(c.categoryId === '__none' ? null : c.categoryId), 's')}<div class="m"><div class="t">${esc(bucketName(c.categoryId))}</div></div><span class="num">${fmt(c.amount)}</span></div>`).join('')}</div>` : '<div class="muted small">لا يوجد</div>'}</div>`).join('')}</div>`;
   const year = Number(p.end.slice(0, 4)), tm = E.necessityTrendMonths(st, year), tc = E.necessityTrendCycles(st, today0(), 6);
@@ -3163,19 +3575,29 @@ function methods150() {
   <li><b>الاسترداد</b> ينخصم من أثر العملية الأصلية مرة وحدة، على فترتها، ويبقى بتاريخ وصوله.</li>
   <li><b>المجموعات</b>: العملية كاملة، أو الأغراض اللي عمليتها مو في نفس المجموعة. العملية في مجموعتين تنحسب في كل وحدة، ومجاميع المجموعات ما تنجمع.</li>
   <li><b>الحجوزات</b>: حجز يدوي مربوط بالتزام متكرر يغني عن حجز الالتزام نفسه.</li></ul>
-  <h3>الأغراض والمنتجات (1.6.0)</h3><p><b>التصنيفات قائمة وحدة</b> للفواتير والأغراض: تصنيف الغرض رئيسي أو فرعي من نفس القائمة. تصنيفات المنتجات القديمة صارت فرعية (خضار وفواكه، لحوم ودواجن، ألبان وبيض، مخبوزات، مشروبات، مجمدات، حلويات ووجبات خفيفة ← تحت «بقالة»؛ منظفات وأدوات منزلية ← «منزل»؛ أدوية وصحة ← «صحة › أدوية»؛ عناية شخصية، أطفال، إلكترونيات، ملابس، قرطاسية ← «تسوق»؛ أخرى ← «أخرى»)، واللي أضفتها أنت تختار مكانها. الحذف ما يحذف غرض: ينتقل لتصنيف تختاره، أو لرئيسي الفرعي المحذوف.</p>
+  <h3>الأغراض والمنتجات (1.6.0)</h3><p><b>التصنيفات قائمة وحدة</b> للفواتير والأغراض: تصنيف الغرض رئيسي أو فرعي من نفس القائمة. تصنيفات المنتجات القديمة صارت فرعية (خضار وفواكه، لحوم ودواجن، ألبان وبيض، مخبوزات، مشروبات، مجمدات، حلويات ووجبات خفيفة ← تحت «بقالة»؛ منظفات وأدوات منزلية ← «منزل»؛ أدوية وصحة ← «صحة › أدوية»؛ عناية شخصية، أطفال، إلكترونيات، ملابس، قرطاسية ← «تسوق»؛ أخرى ← «أخرى»)، واللي أضفتها أنت تختار مكانها. الحذف ما يحذف غرض: ينتقل لتصنيف تختاره، أو لرئيسي الفرعي المحذوف (وإذا ما له مكان يصير «مثل الفاتورة»). <b>(1.7.0) الغرض يتبع الفاتورة</b>: الغرض اللي ما اخترت له تصنيف بنفسك تصنيفه = تصنيف فاتورته وقت العرض (وغرض السحب النقدي = تصنيف جزئه، وبدون جزء = تصنيف السحب)، ويتغير معها لو صنفتها بعدين أو غيرت تصنيفها. اللي اخترت له تصنيف بيدك ثابت. «مثل الفاتورة» في اختيار تصنيف الغرض يرجّعه يتبعها. مع التحديث: الأغراض اللي كانت بدون تصنيف، أو تصنيفها نفس تصنيف فاتورتها وقتها، صارت تتبع الفاتورة. صفحة «المنتجات» وحدود «حسب المنتجات» تقرأ التصنيف الحالي.</p>
   <p><b>صف الغرض</b>: الاسم، وتحته الكمية · السعر · المجموع · إيموجي التصنيف · نجمة التقييم. الكمية × السعر = المجموع، ولو كتبت المجموع يطلع السعر = المجموع ÷ الكمية. تصنيف الغرض الافتراضي = تصنيف الفاتورة. «كل الباقي»: المجموع = غير المفصّل من الفاتورة، والسعر = المجموع ÷ الكمية. «⋯» فيها الخصم (علامة معلوماتية) والملاحظة والمجموعات وجزء السحب والحذف. الصفوف تنحفظ مع «حفظ» دفعة وحدة، ويتحقق السقف للمجموع. <b>الاقتراح</b>: تكتب «طما» يطلع «طماطم»، واختياره يعبّي التصنيف والسعر والتقييم من آخر مرة، والكمية تبقى (1 افتراضيًا) والمجموع = الكمية × السعر، وكلها تنعدل. <b>التقييم</b> اختياري من 1 إلى 5، والنجمة تنعبّى بنسبته (4 = 80%). صفحة المنتج: متوسط تقييماته وآخر تقييم.</p>
   <p>سقف الأغراض = الأصل إذا الرسوم مفصولة ومعروفة، وإلا الإجمالي؛ وللسحب صافي السحب بعد المعاد، والغرض المربوط بجزء ما يتجاوز قيمة الجزء. «غير مفصّل» = السقف − مجموع الأغراض، ينحسب وقت العرض وما ينحفظ.</p>
   <p><b>أرقام الصرف ما تتغير بالأغراض</b>: تبقى على تصنيف الفاتورة. <b>تحليل المنتجات</b> لكل تصنيف = الأغراض المصنفة فيه + «غير مفصّل» من فواتير التصنيف (من كل عملية تقبل أغراض: شراء، مصروف نقدي، سحب، تحويل لشخص، خارج غير معروف). فالمجموع الكلي = صرف هذي العمليات ما عدا الرسوم المفصولة (الرسوم مو جزء من الفاتورة، وتبقى في «رسوم» في الصرف)، والتوزيع على التصنيفات <b>ممكن يختلف</b> عن «صرفياتك» لأن الغرض ينحسب على تصنيفه هو (مثلًا منظفات من فاتورة بقالة تطلع تحت «منزل» في المنتجات، وتبقى «بقالة» في الصرف). السحب المقسّم: غير مفصّل كل جزء على تصنيف الجزء. نفس القاعدة في المقارنات والسنوي والمدن (مسار المنتجات).</p>
   <p><b>الاسترداد والأغراض</b>: تحدد المبلغ لكل غرض رجعته فينقص هو بس؛ اللي ما تحدده ينوزع «توزيع تقديري» بالنسبة على الباقي من الفاتورة (الأغراض وغير المفصّل)؛ الاسترداد الكامل يلغي كل الأغراض. إذا صارت الأغراض أكبر من سقف العملية (مثل لما يفصل الكشف الرسوم بعدين) تتقلص بالنسبة في التحليل.</p>
   <h3>المدينة</h3><p>المدينة تخص العملية مو التاجر. الاختصار يرسل اسم المدينة بس (بدون إحداثيات) كاقتراح، وما يصير معتمد إلا بموافقتك أو بالاعتماد التلقائي. <b>الاعتماد التلقائي (1.6.1)</b>: إذا موقع الجوال وقت العملية (من الاختصار) = مدينتك الحالية، تنعتمد تلقائيًا، للعمليات الجديدة بس (اللي توصل من الجلب أو اللصق، ومعها المدينة اللي توصل متأخر لرسالتها)؛ العمليات القديمة، واللي تنعاد قراءتها، والمعلّقة في المراجعة (تكرار محتمل)، تبقى اقتراح. والعملية الأونلاين تبقى اقتراح لأن موقعك مو مكان المتجر: وسيلة الدفع أونلاين، أو في الرسالة كلمة من «وسيلة الدفع: أونلاين» حتى لو الدفع Apple Pay (مثل اشتراكات Apple)، أو اسم المحل على شكل موقع (مثل APPLE.COM/BILL)، لأي نوع عملية (شراء أو سداد فاتورة…). بعد الاعتماد ما تتغير إلا بيدك، حتى لو غيّرت مدينتك الحالية بعدين. «تجاهل الموقع لهذه العملية»: الموقع مو مهم لها، فتشيل علامة «بدون مدينة» وتنحسب «غير محددة» في تحليل المدن. ترتيب الثقة: المعتمدة ← اقتراح الموقع ← مدينتك الحالية (اقتراح احتياطي فقط) ← غير معروفة. اقتراح جديد ما يغيّر مدينة معتمدة. لما تعتمد مدينة غير مدينتك الحالية يسألك: تجعلها الحالية؟ («لا تسألني الآن» = ما يسألك لمدة يوم). الأسماء تتوحد بالرقم الثابت والأسماء البديلة، والمدينة الجديدة من الموقع تنضاف بدل ما تنتجاهل. «استخدام موقعي الحالي» في الإدخال اليدوي يلقى أقرب مدينة من جدول مدن على جهازك (مركز كل مدينة ونصف قطر تقريبي)، بدون أي خدمة خارجية، وما تنحفظ الإحداثيات. إذا اندمجت رسالة وكشف، مدينة الرسالة تبقى. <b>مدينة متأخرة</b>: الاختصار يرسل الرسالة أول ثم المدينة. إذا التطبيق سحب الرسالة قبل ما توصل مدينتها (مثلًا كان مفتوح وقتها)، الصندوق يحفظ المدينة مستقلة برقم الرسالة نفسه، والتطبيق يسحبها في الجلب الجاي ويربطها بنفس الرسالة وعمليتها (أو المعلّقة في المراجعة) كاقتراح موقع فقط: ما تغيّر مدينة معتمدة ولا اقتراح موجود. وبعد ما تنحفظ على جهازك يؤكد استلامها فتنحذف من الصندوق. تحديث مدينة ما انسحب ينحذف من الصندوق بعد 7 أيام.</p>
   <h3>تحليل المدن</h3><p>الافتراضي في شاشة المدن ومقارنة مدينتين والتنقل للعمليات: <b>المدن المعتمدة فقط</b>، وهو الرقم الرسمي. عملية لها اقتراح موقع ما اعتمدته تنحسب «غير محددة»، وما تدخل مدينتها إلا إذا اخترت «تضمين اقتراحات الموقع» (رقم تقديري). مدينتك الحالية ما تدخل التحليل أبدًا.</p>
-  <h3>الالتزامات والاشتراكات</h3><p>أربع مفاهيم مستقلة: التكرار، الضرورة، الالتزام، فرص التوفير. السلسلة: التصنيف ← الفرعي ← التاجر أو المستفيد (نفس المستوى) ← العملية. «الالتزامات المعروفة» = دفع أو تحويل لشخص متكرر + التزام. <b>الاكتشاف الآلي</b> (مقترح فقط): نفس التاجر أو المستفيد ونفس الحساب؛ شهري = فاصل 26–35 يوم و3 عمليات على الأقل، أسبوعي = 6–8 أيام و4 عمليات، سنوي = 350–380 يوم وعمليتين؛ كل مبلغ بين 60% و140% من الوسيط؛ وآخر عملية حديثة (شهري 45 يوم، أسبوعي 11، سنوي 400). المبلغ المعتاد = وسيط آخر 3. المرفوض ما يرجع يقترح. بعد تأكيده: عملياته القريبة المبلغ (70%–130% من المعتاد) تصير متكررة، والتزام إذا اخترت. القادم: من آخر عملية + التكرار، والمتأخر لين 7 أيام يبقى مستحق.</p>
-  <h3>معدل الإنفاق المتغير والتوقع</h3><p>الإنفاق المتغير = الإنفاق الحقيقي ناقص الالتزامات المتكررة المعروفة واستثناءاتك (تبدأ فاضية). السحب والخارج غير المعروف يبقون صرف. المعدلات: الدورة الحالية (المتغير ÷ الأيام اللي مضت)، آخر 7 أيام داخل الدورة، والأيام المنقضية (كل الصرف ÷ الأيام). <b>معدل التوقع</b>: 7 أيام أو أكثر = معدل الدورة الحالية؛ أقل = وسيط معدل آخر 3 دورات مكتملة (الدورة المكتملة = انتهت وبياناتك تغطيها من أولها)؛ ما فيه 3 = الدورة الحالية بثقة منخفضة. ما تنخلط أيام دورتين. <b>التوقع</b> = صرف حتى اليوم + الالتزامات المؤكدة المتبقية قبل نهاية الدورة + المعدل × الأيام الباقية (بدون اليوم). الفائض المتوقع = دخل الدورة − التوقع. كل رقم مستقبلي عليه «توقع».</p>
+  <h3>الالتزامات الدائمة والمتكررة</h3><p>أربع مفاهيم مستقلة: التكرار، الضرورة، الالتزام، فرص التوفير، وكلها تبدأ «غير محدد» (1.7.0). السلسلة: التصنيف ← الفرعي ← التاجر أو المستفيد (نفس المستوى) ← العملية، والأدق يغلب. <b>«الالتزامات الدائمة»</b> = شراء أو تحويل لشخص أو مصروف نقدي معلّم «التزام دائم» (مع رسومه)، بدون شرط التكرار. <b>(1.7.1) لكل جهة (محل أو مستفيد) خطة</b>:</p><ul>
+  <li><b>سؤال الاعتماد</b>: أول ما تصير الجهة التزام، يقترح آخر فاتورة ويسألك «نعتمد هالمبلغ كقيمة معتمدة لهذا الالتزام؟»: «نعم اعتمده»، «مبلغ ثاني» تكتبه، أو «قيمته متغيرة». <b>لين تجاوب ما تنحسب التزام</b> (لا في مجموع الالتزامات ولا في القادمة ولا تنبيه سعر)، ومبالغها مع «غير محدد» في صفحة الالتزامات. إذا آخر 3 دفعات لها متساوية بالضبط تنعتمد بدون سؤال (وتقدر تعدّل المبلغ بيدك). «مبلغ ثاني»: إذا المبلغ اللي كتبته يختلف عن آخر فاتورة بأكثر من الحد، يطلع لك تنبيه «تغيّر السعر» ويسألك وش كانت هالفاتورة (ما نفترض). مع التحديث: كل التزامات 1.7.0 تنسأل من جديد بآخر فاتورة (إلا اللي آخر 3 دفعات لها متساوية: تنعتمد بدون سؤال). واللي تنتظر تنحسب في التوقع صرف عادي لين تجاوب. دمج محلين ينقل الخطة المعتمدة وقراراتك للمحل الباقي.</li>
+  <li><b>مبلغ الدفعة</b> = اللي اندفع كامل: المبلغ مع رسومه.</li>
+  <li><b>نظام الدفعات</b>: شهري (الافتراضي: دفعة كل دورة) أو متغير (أكثر من دفعة في الدورة عادي). <b>القيمة</b>: ثابت أو متغير.</li>
+  <li><b>وش ينعرض</b>: شهري + ثابت = المبلغ المعتمد. شهري + متغير = متوسط آخر 3 دفعات (دفعة وحدة = مبلغها). دفعات متغيرة + ثابت = المعتمد لكل دفعة، ومتوسط الدورة بعد أول دورة كاملة. دفعات متغيرة + قيمة متغيرة = متوسط آخر 3 دورات كاملة، وما يطلع لين تكتمل دورة وحدة.</li>
+  <li><b>الدورة</b> = دورة الراتب (أو الشهر في وضع الشهر الميلادي). الدورة الكاملة = انتهت قبل اليوم، من دورة أول دفعة للالتزام؛ والدورة اللي ما فيها دفعة تنحسب صفر في المتوسط. الرقم 3 (عدد الدفعات أو الدورات في المتوسط) واحد لكل المتوسطات ويتغير من «المزيد ← الإعدادات».</li>
+  <li><b>تنبيه «تغيّر السعر»</b> (للقيمة الثابتة): آخر دفعة تختلف عن المعتمد بأكثر من الحد. الحد تختاره بالنسبة أو بالريال (الافتراضي 5%)، عام لكل الالتزامات من الإعدادات، وتخصص التزام لحاله من صفحته. الخيارات: «تحديث بالسعر» (آخر مبلغ يصير المعتمد)، «خله متغير»، «استثناء هالشهر» (المعتمد يبقى، والدفعة محسوبة كاملة في التزامات الدورة وفي المتوسط، ولو تكرر يسألك من جديد)، «دفعت حق شهرين (الماضي ما دفعته)»، «دفعت مقدم للشهر الجاي». إذا المبلغ قريب من ضعف المعتمد (بفرق لين 10%) يطلع الأخيرين أول ومعهم «المبلغ تقريبًا ضعف سعره».</li>
+  <li><b>التعثر والمقدم = تقسيم الدفعة على دورات</b>: الخانات تبدأ بالتساوي على دورتين (تعثر: الدورة اللي قبل ودورة الدفعة؛ مقدم: دورة الدفعة والجاية)، وتعدّل المبالغ وتزيد دورات. المجموع لازم يساوي مبلغ الدفعة. التقسيم في «سجل الالتزام» بس (أي دورة مدفوعة، والمتوسط): <b>صرفك الفعلي في كل الصفحات يبقى بتاريخ الدفع</b>. الدورة اللي غطتها دفعة مقدمة تعتبر مدفوعة («مدفوع مقدم») وما تنذكر في «القادمة». لو تغيّر مبلغ الدفعة بعد التقسيم (مثلًا الكشف أضاف رسومها) يتوزع بنفس النسب. ولو شلت العلامة عن دفعة يرجع يسألك عنها إذا مبلغها يختلف عن المعتمد.</li>
+  <li><b>أكثر من دفعة في نفس الدورة</b> (نظام شهري): علامة تنبيه على الالتزام كل مرة (الدورة الحالية واللي قبلها)، وتختار: «دفعاته متغيرة» (يتغير نظامه)، «تعثر من شهر سابق» (أول دفعة تنحسب للدورة اللي قبل)، «دفعة مقدمة للشهر الجاي» (آخر دفعة تنحسب للدورة الجاية)، أو «استثناء لهالشهر بس». وتقدر تعدّل تقسيم الدفعة بعدها. الدفعة اللي علّمتها «تعثر» أو «مقدم» ما تنعد (جاوبت عنها). والاستثناء محفوظ بالدفعات نفسها: لو جات دفعة زيادة في نفس الدورة يرجع ينبهك.</li>
+  <li><b>القيمة «ثابت» بعد «متغير»</b>: يرجع المبلغ المعتمد السابق (وإلا آخر فاتورة) وتعدله من خانته. والأرقام اللي تكتبها: «410,5» تنقرأ 410.5 (الفاصلة اللي بعدها رقم أو رقمين عشرية، واللي بعدها 3 أرقام آلاف).</li>
+  <li>المتكرر المؤكد لنفس الجهة يمشي على نفس المبلغ في التوقع والحجز (المعتمد، أو متوسط الدفعات إذا القيمة متغيرة).</li></ul><p> <b>الاكتشاف الآلي</b> (مقترح فقط): نفس التاجر أو المستفيد ونفس الحساب؛ شهري = فاصل 26–35 يوم و3 عمليات على الأقل، أسبوعي = 6–8 أيام و4 عمليات، سنوي = 350–380 يوم وعمليتين؛ كل مبلغ بين 60% و140% من الوسيط؛ وآخر عملية حديثة (شهري 45 يوم، أسبوعي 11، سنوي 400). المبلغ المعتاد = وسيط آخر 3. المرفوض ما يرجع يقترح. بعد تأكيده: عملياته القريبة المبلغ (70%–130% من المعتاد) تصير متكررة (للتكرار والتوقع)، و«نعم، التزام دائم» (1.7.0) تحفظ «التزام دائم» على المحل أو المستفيد نفسه فتشمل كل عملياته. القادم: من آخر عملية + التكرار، والمتأخر لين 7 أيام يبقى مستحق.</p>
+  <h3>معدل الإنفاق المتغير والتوقع</h3><p>الإنفاق المتغير = الإنفاق الحقيقي ناقص «الالتزامات الدائمة» واستثناءاتك (تبدأ فاضية). السحب والخارج غير المعروف يبقون صرف. المعدلات: الدورة الحالية (المتغير ÷ الأيام اللي مضت)، آخر 7 أيام داخل الدورة، والأيام المنقضية (كل الصرف ÷ الأيام). <b>معدل التوقع</b>: 7 أيام أو أكثر = معدل الدورة الحالية؛ أقل = وسيط معدل آخر 3 دورات مكتملة (الدورة المكتملة = انتهت وبياناتك تغطيها من أولها)؛ ما فيه 3 = الدورة الحالية بثقة منخفضة. ما تنخلط أيام دورتين. <b>التوقع</b> = صرف حتى اليوم + الالتزامات المؤكدة المتبقية قبل نهاية الدورة + المعدل × الأيام الباقية (بدون اليوم). الفائض المتوقع = دخل الدورة − التوقع. كل رقم مستقبلي عليه «توقع».</p>
   <h3>الأرصدة والسيولة</h3><p>كل رصيد معروف ينحفظ في سجل (الرصيد، وقته، مصدره) وما ينمسح؛ حذف كشف يعلّم رصيده ملغى. رصيد رسالة الحساب الجاري يُستخدم إذا: الحساب معروف (مو مؤقت)، الرسالة انقرأت كاملة وما لها مراجعة، فيها كلمة «الرصيد»، لها وقت (من الرسالة أو وقت وصولها للاختصار)، وأحدث من رصيد الكشف. رسائل البطاقة الائتمانية ما يُؤخذ منها رصيد (المتاح مو سيولة). <b>السيولة القابلة للصرف</b> = الحسابات القابلة للصرف (الجاري والمحفظة تلقائيًا) + النقد − مستحق البطاقات − الأموال المحجوزة. رصيد الحساب = آخر سجل + العمليات بعده؛ مستحق البطاقة = آخر كشف + المشتريات بعده − السداد والاستردادات بعده. الادخار ما يدخل، والحساب غير المحدد يظهر «سيولة غير محددة»، والرصيد الدائن في البطاقة منفصل. السحب المستبعد ما يزيد النقد.</p>
-  <h3>فرص التوفير</h3><p>تدخل الأجزاء الكمالية والمؤهلة للتوفير بس، والتبرعات أبدًا. لكل تصنيف: الفعلي (أو التوقع لنهاية الدورة الحالية) − الطبيعي؛ الموجب فرصة، والسالب صفر وما يعوّض غيره. الطبيعي: 3 دورات مكتملة أو أكثر = وسيط آخر 3؛ دورتان = تقدير أولي بتحذير؛ دورة = مقارنة بس. سيناريوهات 10% و20% و30% منفصلة.</p>
-  <h3>الضروري والكمالي، السنوي، المقارنات</h3><p>الضرورة لكل جزء من الإنفاق بالسلسلة (أجزاء السحب بضرورة تصنيفها، الرسوم ضرورية)، واللي ما له ضرورة «غير محدد» ما نخمّنه. السنوي من يناير لديسمبر. المقارنات: فترتين (الفرق والنسبة والمتوسط اليومي = الإجمالي ÷ أيام الفترة، وللفترة المفتوحة الأيام اللي مضت)، مدينتين (المجموع، العدد، متوسط العملية)، وعبر الفترات (أسبوع، شهر، دورة، والمتوسط من المكتملة). المسار مالي أو منتجات، ما ينخلطون؛ مسار المنتجات = الأغراض + غير المفصّل (نفس قاعدة تحليل المنتجات).</p>
-  <h3>التنبيهات</h3><p>مركز واحد، وكل تنبيه ينحسب من البيانات: حد صرف (80% أو نسبتك، و100%)، ميزانية مجموعة، التزام خلال 3 أيام، اشتراك محتمل للمراجعة، ارتفاع غير معتاد (تصنيف حتى اليوم أكثر من 150% من وسيط نفس الأيام في آخر 3 دورات، وبفرق 100 ريال على الأقل)، توقع يتجاوز المعتاد (أكثر من 110% من وسيط آخر 3 دورات، وبفرق 200)، وسيولة أقل من الالتزامات القادمة اللي ما لها حجز. «إخفاء» و«ذكرني» ينحفظون بمفتاح التنبيه، فما يتكرر.</p>
+  <h3>فرص التوفير</h3><p>تدخل الأجزاء الكمالية والمؤهلة للتوفير بس، والتبرعات أبدًا. (1.7.0) الكمالي اللي ما حددت يدخل أو لا يطلع «X ريال غير محدد» مع «حدّدها». لكل تصنيف: الفعلي (أو التوقع لنهاية الدورة الحالية) − الطبيعي؛ الموجب فرصة، والسالب صفر وما يعوّض غيره. الطبيعي: 3 دورات مكتملة أو أكثر = وسيط آخر 3؛ دورتان = تقدير أولي بتحذير؛ دورة = مقارنة بس. سيناريوهات 10% و20% و30% منفصلة.</p>
+  <h3>الضروري والكمالي، السنوي، المقارنات</h3><p>الضرورة لكل جزء من الإنفاق بالسلسلة (أجزاء السحب بضرورة تصنيفها، والرسوم من 1.7.0 بضرورة عمليتها)، واللي ما له ضرورة «غير محدد» ما نخمّنه، ويطلع «X ريال غير محدد» مع «حدّدها»: قائمة التصنيفات اللي صرفها غير محدد في الفترة، وجنب كل وحدة أزرار سريعة (تنحفظ على التصنيف). السنوي من يناير لديسمبر. المقارنات: فترتين (الفرق والنسبة والمتوسط اليومي = الإجمالي ÷ أيام الفترة، وللفترة المفتوحة الأيام اللي مضت)، مدينتين (المجموع، العدد، متوسط العملية)، وعبر الفترات (أسبوع، شهر، دورة، والمتوسط من المكتملة). المسار مالي أو منتجات، ما ينخلطون؛ مسار المنتجات = الأغراض + غير المفصّل (نفس قاعدة تحليل المنتجات).</p>
+  <h3>التنبيهات</h3><p>مركز واحد، وكل تنبيه ينحسب من البيانات: حد صرف (80% أو نسبتك، و100%)، ميزانية مجموعة، التزام خلال 3 أيام، اشتراك محتمل للمراجعة، (1.7.1) التزام ينتظر اعتماد مبلغه، تغيّر سعر التزام، أكثر من دفعة لالتزام في نفس الدورة، ارتفاع غير معتاد (تصنيف حتى اليوم أكثر من 150% من وسيط نفس الأيام في آخر 3 دورات، وبفرق 100 ريال على الأقل)، توقع يتجاوز المعتاد (أكثر من 110% من وسيط آخر 3 دورات، وبفرق 200)، وسيولة أقل من الالتزامات القادمة اللي ما لها حجز. «إخفاء» و«ذكرني» ينحفظون بمفتاح التنبيه، فما يتكرر.</p>
   <h3>التتبع</h3><p>كل رقم في التحليل ينضغط ويفتح العمليات (أو الأغراض) اللي كوّنته، وأرقام التوقع تعرض مكوناتها.</p>`;
 }
 
@@ -3267,11 +3689,11 @@ Object.assign(A, {
   },
   cashReturnUnlink: async (el) => { E.unlinkCashReturn(store(), el.dataset.id); await persist('فك ربط مبلغ معاد'); render(); afterTx(el.dataset.id); },
   // الالتزامات
-  recConfirm: async (el) => { E.confirmRecurring(store(), el.dataset.id, { isCommitment: el.dataset.c === '1' }); await persist('تأكيد متكرر'); render(); if (el.dataset.tx) afterTx(el.dataset.tx); toast(el.dataset.c === '1' ? 'صار التزام مؤكد' : 'صار متكرر مؤكد (مو التزام)'); },
+  recConfirm: async (el) => { E.confirmRecurring(store(), el.dataset.id, el.dataset.c === '1' ? { isCommitment: true } : {}); E.syncCommitPlans(store()); await persist('تأكيد متكرر'); render(); if (el.dataset.tx) afterTx(el.dataset.tx); toast(el.dataset.c === '1' ? 'صار التزام دائم' : 'صار متكرر مؤكد (للتوقع)'); },
   recDismiss: async (el) => { E.dismissRecurring(store(), el.dataset.id); await persist('مو متكرر'); render(); if (el.dataset.tx) afterTx(el.dataset.tx); else closeSheet(); toast('تمام، ما يرجع يقترحه'); },
   recRestore: async (el) => { const r = store().get('recurring', el.dataset.id); if (!r) return; r.status = 'suggested'; store().put('recurring', r); store().touch(); await persist('رجوع مقترح'); render(); },
   recEdit: (el) => sheetRecurring(el.dataset.id),
-  recSave: async (el) => { const amt = E.parseNum($('rc_amt').value); E.confirmRecurring(store(), el.dataset.id, { cadence: $('rc_cad').value, expectedAmount: amt, isCommitment: $('rc_com').checked, reserve: $('rc_res').checked }); await persist('التزام متكرر'); closeSheet(); render(); toast('انحفظ'); },
+  recSave: async (el) => { const amt = E.parseNum($('rc_amt').value), com = $('rc_com').checked, was = $('rc_com').dataset.was === '1'; E.confirmRecurring(store(), el.dataset.id, Object.assign({ cadence: $('rc_cad').value, expectedAmount: amt, reserve: $('rc_res').checked }, com !== was ? { isCommitment: com, explicit: true } : {})); E.syncCommitPlans(store()); await persist('التزام متكرر'); closeSheet(); render(); toast('انحفظ'); },
   // الحجوزات
   resEdit: (el) => sheetReserve(el.dataset.id || null),
   resSave: async (el) => { const r = E.saveReserve(store(), { id: el.dataset.id || null, name: $('rs_name').value, amount: $('rs_amt').value, dueDate: $('rs_due').value || null, recurringId: $('rs_rec').value || null, active: $('rs_on').checked }); if (r.error) return toast(r.error === 'name' ? 'اكتب الاسم' : 'المبلغ غير صحيح'); await persist('حجز'); closeSheet(); render(); toast('انحفظ'); },
@@ -3305,6 +3727,8 @@ Object.assign(A, {
     if (k === 'rise') { const c = E.currentCycle(store()); if (c) S.period = c; return go('txs', { filters: { kind: 'all', categoryId: ref.categoryId } }); }
     if (k === 'forecast') return go('forecast');
     if (k === 'liquidity') return go('liquidity');
+    if (k === 'commitPrice' || k === 'commitApprove' || k === 'commitMulti') { go('commitments'); return sheetCommit(ref.commitKey); } // 1.7.1
+    if (k === 'periodCity') return go('ignore');
   },
   alertDismiss: async (el) => { E.dismissAlert(store(), el.dataset.id); await persist(null, { noStep: true }); render(); },
   alertSnooze: async (el) => { E.snoozeAlert(store(), el.dataset.id, Number(el.dataset.d) || 1); await persist(null, { noStep: true }); render(); toast('يرجع يذكرك بعد ' + (el.dataset.d === '7' ? 'أسبوع' : 'يوم')); },
@@ -3377,7 +3801,9 @@ function finishRate(v) { $('sheet2').innerHTML = ''; const r = S.rateResolve; S.
    صف لكل غرض: الاسم، وتحته الكمية · السعر · المجموع · إيموجي التصنيف · نجمة التقييم. «⋯» للخصم والملاحظة والمجموعات وجزء السحب والحذف.
    الصفوف مسودة (S.items) لين تضغط «حفظ» أو «تم»، وتنحفظ دفعة وحدة. */
 function itemRowFrom(i) {
-  return { k: 'r' + (S.itemSeq = (S.itemSeq || 0) + 1), id: i.id, name: i.name, qty: String(i.qty), unitPrice: String(i.unitPrice), total: String(i.total), cat: i.productCategoryId || null, catAuto: false,
+  // 1.7.0: catAuto = «يتبع الفاتورة» (catFollow)، والغرض بدون تصنيف يتبعها
+  const follow = !!i.catFollow || !i.productCategoryId;
+  return { k: 'r' + (S.itemSeq = (S.itemSeq || 0) + 1), id: i.id, name: i.name, qty: String(i.qty), unitPrice: String(i.unitPrice), total: String(i.total), cat: follow ? null : i.productCategoryId, catAuto: follow, catWas: follow,
     rating: i.rating || null, discount: !!i.discount, note: i.note || '', partId: i.partId || null, groupIds: (i.groupIds || []).slice(), dirty: false, del: false, more: false };
 }
 function blankItemRow() { return { k: 'r' + (S.itemSeq = (S.itemSeq || 0) + 1), id: null, name: '', qty: '1', unitPrice: '', total: '', cat: null, catAuto: true, rating: null, discount: false, note: '', partId: null, groupIds: [], dirty: false, del: false, more: false }; }
@@ -3385,8 +3811,8 @@ function itemsState(t) {
   if (!S.items || S.items.txId !== t.id) S.items = { txId: t.id, rows: (t.items || []).map(itemRowFrom), open: false, err: null };
   return S.items;
 }
-const invoiceCat = (t) => t.subcategoryId || t.categoryId || null; // تصنيف الغرض الافتراضي = تصنيف الفاتورة
-const rowCat = (t, r) => r.catAuto ? invoiceCat(t) : r.cat;
+// 1.7.0: الغرض اللي ما اخترت تصنيفه «يتبع الفاتورة» (أو جزء السحب اللي هو منه) ويتغير معها
+const rowCat = (t, r) => r.catAuto ? E.invoiceCatOf(t, r.partId) : r.cat;
 const itemRow = (k) => S.items ? S.items.rows.find(r => r.k === k) : null;
 const itemsDirty = () => !!(S.items && S.items.rows.some(r => r.dirty || (r.del && r.id)));
 function itemsLeft(t, exceptK) {
@@ -3429,7 +3855,7 @@ function itemRowHtml(t, r, o, parts) {
       <button type="button" class="itbtn" data-action="itCat" data-k="${r.k}" aria-label="تصنيف الغرض: ${esc(pcName(cat))}" style="color:${u.color};background:${tint(u.color)}">${glyph(u)}</button>
       <button type="button" class="itbtn" data-action="itStar" data-k="${r.k}" aria-label="التقييم">${starHtml(r.rating)}</button>
     </div>
-    <div class="itsub"><span>${esc(pcName(cat))}${r.catAuto && cat ? ' (تصنيف الفاتورة)' : ''}</span>${info.length ? ' · ' + info.join(' · ') : ''}</div>
+    <div class="itsub"><span>${esc(pcName(cat))}${r.catAuto ? ' (مثل الفاتورة)' : ''}</span>${info.length ? ' · ' + info.join(' · ') : ''}</div>
     ${r.more ? `<div class="itx">
       <label style="display:flex;gap:8px;align-items:center;font-size:13.5px"><input type="checkbox" data-itf="discount" data-k="${r.k}" ${r.discount ? 'checked' : ''}> عليه خصم (علامة بس، ما تعتبر توفير)</label>
       <input type="text" data-itf="note" data-k="${r.k}" value="${v(r.note)}" placeholder="ملاحظة على الغرض">
@@ -3471,7 +3897,7 @@ function itemRowsForSave(t) {
     if (r.del) { if (r.id) out.push({ _k: r.k, id: r.id, del: true }); return; }
     const empty = !String(r.name || '').trim() && !E.parseNum(r.total) && !E.parseNum(r.unitPrice);
     if ((!r.id && empty) || (r.id && !r.dirty)) return;
-    out.push({ _k: r.k, id: r.id, name: r.name, qty: r.qty, unitPrice: r.unitPrice || null, total: r.total || null, productCategoryId: rowCat(t, r), rating: r.rating || null, discount: r.discount, note: r.note, partId: r.partId, groupIds: r.groupIds });
+    out.push({ _k: r.k, id: r.id, name: r.name, qty: r.qty, unitPrice: r.unitPrice || null, total: r.total || null, productCategoryId: r.catAuto ? null : r.cat, catFollow: !!r.catAuto, rating: r.rating || null, discount: r.discount, note: r.note, partId: r.partId, groupIds: r.groupIds });
   });
   return out;
 }
@@ -3632,25 +4058,46 @@ async function flowSave(el, later) {
   return ok !== false;
 }
 
-/* ---------- فترات التجاهل ---------- */
+/* ---------- الفترات (1.7.0، كانت «فترات التجاهل») ---------- */
+function periodParts(p) {
+  const st = store(), out = [];
+  if (p.cityId) out.push(`<span class="b city">📍 ${esc(cityName(p.cityId))}${p.cityMode === 'all' ? ' · كل العمليات' : ' · اللي بدون مدينة'}</span>`);
+  if (p.groupId) { const g = st.get('groups', p.groupId); if (g) out.push(`<span class="b grp">🏷️ ${esc(g.name)}</span>`); }
+  const ig = [p.city ? 'المدينة' : '', p.category ? 'التصنيف' : ''].filter(Boolean).join(' و');
+  if (ig) out.push(`<span class="b n">تجاهل ${ig}</span>`);
+  return out.join('');
+}
 function vIgnore() {
-  const list = settings().ignorePeriods || [];
-  const kinds = (p) => [p.city ? 'المدينة' : '', p.category ? 'التصنيف' : ''].filter(Boolean).join(' و');
-  let h = `<div class="card"><h2>فترات التجاهل <span class="sp"></span><button class="btn p" data-action="ignEdit">+ فترة</button></h2>
-    <p class="small muted">من تاريخ لتاريخ، تختار المدينة و/أو التصنيف. داخل الفترة تختفي علامات «بدون مدينة» و«بدون تصنيف» وما تطلع في «بيانات تحتاج قرارك». الأرقام ما تتغير، والفلتر يعرضها ومعها «متجاهلة».</p>
-    ${list.length ? `<div class="list">${list.map(p => `<div class="it" data-action="ignEdit" data-id="${p.id}"><div class="m"><div class="t"><span class="num">${fdate(p.from, true)}</span> ← <span class="num">${fdate(p.to, true)}</span></div><div class="s">تجاهل ${kinds(p)}${p.note ? ' · ' + esc(p.note) : ''}</div></div>${ico('chevL', 'chev')}</div>`).join('')}</div>` : '<div class="muted">ما فيه فترات.</div>'}</div>`;
+  const st = store(), list = settings().ignorePeriods || [];
+  let h = `<div class="card"><h2>الفترات <span class="sp"></span><button class="btn p" data-action="ignEdit">+ فترة</button></h2>
+    <p class="small muted">من تاريخ لتاريخ، وتختار وش يصير فيها: <b>مدينة</b> (مثل سفرة) للمشتريات والسحب والمصروف النقدي، و/أو <b>مجموعة</b> لكل صرفها، و/أو <b>تجاهل</b> علامات «بدون مدينة» و«بدون تصنيف». اللي يوصل بعدين داخل الفترة ياخذها تلقائيًا، وحذف الفترة يرجّع اللي جا منها بس.</p>
+    ${list.length ? `<div class="list">${list.map(p => { const cf = p.cityId ? E.periodConflicts(st, p) : [];
+      return `<div class="it" data-action="ignEdit" data-id="${p.id}"><div class="m"><div class="t"><span class="num">${fdate(p.from, true)}</span> ← <span class="num">${fdate(p.to, true)}</span></div><div class="badges">${periodParts(p)}</div>${p.note ? `<div class="s">${esc(p.note)}</div>` : ''}
+        ${cf.length ? `<div class="small warn-t" style="margin-top:4px">${cnt(cf.length, 'op')} موقعها مختلف (الجوال سجّل مدينة ثانية): <a data-action="perConflicts" data-id="${p.id}">طبّق مدينة الفترة عليها كلها</a> · <a ${drillAttr(cf.map(t => t.id), 'موقعها مختلف عن ' + cityName(p.cityId))}>راجعها وحدة وحدة</a></div>` : ''}</div>${ico('chevL', 'chev')}</div>`; }).join('')}</div>` : '<div class="muted">ما فيه فترات.</div>'}</div>`;
   return h;
 }
 function sheetIgnore(id) {
-  const p = id ? (settings().ignorePeriods || []).find(x => x.id === id) : { from: '', to: E.todayISO(), city: true, category: false, note: '' };
-  if (!p) return;
-  openSheet(`<h3>${id ? 'تعديل فترة التجاهل' : 'فترة تجاهل جديدة'}<span class="sp"></span><button class="close" data-action="closeSheet">×</button></h3>
+  const st = store(), cur = id ? (settings().ignorePeriods || []).find(x => x.id === id) : null;
+  if (id && !cur) return;
+  const p = S.igDraft && S.igDraft.id === (id || null) ? S.igDraft : (S.igDraft = Object.assign({ id: id || null, from: '', to: E.todayISO(), cityId: null, groupId: null, city: false, category: false, note: '' }, cur ? JSON.parse(JSON.stringify(cur)) : {}, { id: id || null }));
+  const groups = st.all('groups').filter(g => g.active !== false);
+  openSheet(`<h3>${id ? 'تعديل الفترة' : 'فترة جديدة'}<span class="sp"></span><button class="close" data-action="igClose">×</button></h3>
     <div class="grid2"><div><label class="f">من</label><input type="date" id="ig_from" value="${esc(p.from)}"></div><div><label class="f">إلى</label><input type="date" id="ig_to" value="${esc(p.to)}"></div></div>
-    <label class="f">وش تتجاهل؟</label>
-    <label class="f" style="font-weight:500"><input type="checkbox" id="ig_city" ${p.city ? 'checked' : ''}> المدينة (علامة «بدون مدينة»)</label>
-    <label class="f" style="font-weight:500"><input type="checkbox" id="ig_cat" ${p.category ? 'checked' : ''}> التصنيف («بدون تصنيف» و«غير مصنف» و«تصنيف مؤقت»)</label>
-    <label class="f">ملاحظة (اختياري)</label><input type="text" id="ig_note" value="${esc(p.note || '')}" placeholder="مثل: قبل ما أبدأ أسجل المدن">
+    <div class="fxsec"><div class="fxh">المدينة</div><div class="btns"><button type="button" class="btn" data-action="igCity">📍 ${p.cityId ? esc(cityName(p.cityId)) : 'اختر مدينة'}</button>${p.cityId ? `<button type="button" class="btn" data-action="igCityClear" aria-label="بدون مدينة">×</button>` : ''}</div>
+      <p class="small muted" style="margin:6px 0 0">للمشتريات والسحب والمصروف النقدي بس (مو الأونلاين ولا التحويلات لأشخاص ولا الرسوم). اللي موقع جوالك سجّل لها مدينة ثانية ما تتغير.</p></div>
+    <div class="fxsec"><div class="fxh">المجموعة</div><select id="ig_grp"><option value="">بدون</option>${groups.map(g => `<option value="${g.id}" ${g.id === p.groupId ? 'selected' : ''}>${esc(((g.emoji || '') + ' ' + g.name).trim())}</option>`).join('')}</select>
+      <p class="small muted" style="margin:6px 0 0">كل صرفها يدخل المجموعة (مشتريات، سحب، نقدي، تحويلات لأشخاص، رسوم)، مو الدخل ولا التحويل بين حساباتك ولا سداد البطاقات. العملية اللي تشيل منها المجموعة بيدك ما ترجع لها.${groups.length ? '' : ' <a data-action="go" data-view="groups">أضف مجموعة</a>'}</p></div>
+    <div class="fxsec"><div class="fxh">التجاهل</div>
+      <label class="f" style="font-weight:500"><input type="checkbox" id="ig_city" ${p.city ? 'checked' : ''}> علامة «بدون مدينة»</label>
+      <label class="f" style="font-weight:500"><input type="checkbox" id="ig_cat" ${p.category ? 'checked' : ''}> علامات التصنيف («بدون تصنيف» و«نوعها غير معروف» و«تحويلات لأشخاص ما صنفتها»)</label>
+      <p class="small muted" style="margin:4px 0 0">داخل الفترة تختفي هالعلامات وما تنحسب في «يحتاج منك». الأرقام ما تتغير.</p></div>
+    <label class="f">ملاحظة (اختياري)</label><input type="text" id="ig_note" value="${esc(p.note || '')}" placeholder="مثل: سفرة جدة">
     <div class="btns" style="margin-top:14px"><button class="btn p" data-action="ignSave" data-id="${id || ''}">حفظ</button>${id ? `<button class="btn r" data-action="ignDel" data-id="${id}">${ico('trash')} حذف</button>` : ''}</div>`);
+}
+function igSync() {
+  const p = S.igDraft; if (!p || !$('ig_from')) return p;
+  Object.assign(p, { from: $('ig_from').value, to: $('ig_to').value, groupId: $('ig_grp').value || null, city: $('ig_city').checked, category: $('ig_cat').checked, note: $('ig_note').value });
+  return p;
 }
 
 /* ---------- مكان تصنيفاتك القديمة (بعد التحديث) ---------- */
@@ -3685,7 +4132,7 @@ function productRowHtml(x) {
 }
 function itemLineHtml(r) {
   const st = store(), it = r.item, pr = it.productId ? st.get('products', it.productId) : null; void pr;
-  return `<div class="it" data-action="openTx" data-id="${r.tx.id}">${icCircle(catUi(it.productCategoryId || '__none'), 's')}<div class="m"><div class="t">${esc(it.name)}${it.rating ? ' ' + starHtml(it.rating, 'sm') : ''}</div><div class="s">${esc(txTitle(r.tx))} · ${fdate(r.date, true)} · <span class="num">${fmt(it.qty).replace(/\.00$/, '')} × ${fmt(it.unitPrice)}</span>${r.allocated ? ` · مسترجع ${fmt(r.allocated)}` : ''}${r.estimated ? ` · <span class="warn-t">تقديري −${fmt(r.estimated)}</span>` : ''}</div></div><span class="num">${fmt(r.net)}</span></div>`;
+  return `<div class="it" data-action="openTx" data-id="${r.tx.id}">${icCircle(catUi(E.itemCatId(r.tx, it) || '__none'), 's')}<div class="m"><div class="t">${esc(it.name)}${it.rating ? ' ' + starHtml(it.rating, 'sm') : ''}</div><div class="s">${esc(txTitle(r.tx))} · ${fdate(r.date, true)} · <span class="num">${fmt(it.qty).replace(/\.00$/, '')} × ${fmt(it.unitPrice)}</span>${r.allocated ? ` · مسترجع ${fmt(r.allocated)}` : ''}${r.estimated ? ` · <span class="warn-t">تقديري −${fmt(r.estimated)}</span>` : ''}</div></div><span class="num">${fmt(r.net)}</span></div>`;
 }
 function vItems160() {
   const st = store(), f = S.itemsF || {}, per = f.allTime ? null : (f.period || S.period);
@@ -3732,15 +4179,15 @@ function vItems160() {
 function limBasisNote(prod) {
   return prod ? 'المصروف = الأغراض المصنفة في هذا التصنيف + «غير مفصّل» من فواتيره (مثل تحليل المنتجات). يقبل رئيسي أو فرعي.' : 'المصروف = نفس رقم «صرفياتك» لهذا التصنيف (على التصنيف الرئيسي).';
 }
-const reviewCount = () => openReviews().length + E.unreviewedTxs(store()).length + E.shopChoiceTxs(store()).length;
+const reviewCount = () => groupedReviews().length + pendingFormats().length + E.unreviewedTxs(store()).length + E.shopChoiceTxs(store()).length;
 // «متجاهلة» تطلع بس لما تفلتر على نفس الشي
 function ignoredFilterOn(kind) {
   if (S.view !== 'txs') return false;
   const f = S.filters || {};
-  return kind === 'city' ? !!f.noCity : ['uncategorized', 'temporary', 'unclassified_out', 'unclassified_in', 'unclassified_all'].includes(f.kind);
+  return kind === 'city' ? !!f.noCity : ['uncategorized', 'temporary', 'unclassified_out', 'unclassified_in', 'unclassified_all'].includes(f.kind) || (f.types || []).includes('Unknown');
 }
 
-Object.assign(TITLES, { ignore: 'فترات التجاهل' });
+Object.assign(TITLES, { ignore: 'الفترات' });
 Object.assign(NAV_OF, { ignore: 'more' });
 Object.assign(V150, { ignore: vIgnore });
 
@@ -3757,10 +4204,11 @@ Object.assign(A, {
   },
   itCat: async (el) => {
     const k = el.dataset.k, r = itemRow(k), t = S.items && store().get('transactions', S.items.txId); if (!r || !t) return;
-    const cur = rowCat(t, r), pair = cur ? E.itemCatPair(store(), cur) : { cat: null, sub: null };
-    const res = await pickCategory({ cat: pair.cat === '__none' ? null : pair.cat, sub: pair.sub });
+    const cur = rowCat(t, r), pair = cur ? E.itemCatPair(store(), cur) : { cat: null, sub: null }, inv = E.invoiceCatOf(t, r.partId);
+    const res = await pickCategory({ cat: pair.cat === '__none' ? null : pair.cat, sub: pair.sub }, { follow: { on: !!r.catAuto, label: inv ? pcName(inv) : 'بدون تصنيف' } });
     const r2 = itemRow(k); if (!res || !r2) return;
-    r2.cat = res.sub || res.cat || null; r2.catAuto = false; r2.dirty = true; rerenderItems();
+    if (res.follow || !(res.sub || res.cat)) { r2.cat = null; r2.catAuto = true; } else { r2.cat = res.sub || res.cat; r2.catAuto = false; }
+    r2.dirty = true; rerenderItems();
   },
   itStar: async (el) => {
     const k = el.dataset.k, r = itemRow(k); if (!r) return;
@@ -3875,14 +4323,40 @@ Object.assign(A, {
     startFlow(ids, { cards: nb.cards });
   },
   newBarX: () => { hideNewBar(); toast('تلقاها في «المراجعة» تحت «عمليات ما راجعتها»'); },
-  // فترات التجاهل
-  ignEdit: (el) => sheetIgnore(el.dataset.id || null),
+  // الفترات (1.7.0)
+  ignEdit: (el) => { S.igDraft = null; sheetIgnore(el.dataset.id || null); },
+  igClose: () => { S.igDraft = null; closeSheet(null); },
+  igCity: async () => { const p = igSync(); const c = await pickCity({ cur: p.cityId }); if (c) p.cityId = c; sheetIgnore(p.id); },
+  igCityClear: () => { const p = igSync(); p.cityId = null; sheetIgnore(p.id); },
   ignSave: async (el) => {
-    const r = E.saveIgnorePeriod(store(), { id: el.dataset.id || null, from: $('ig_from').value, to: $('ig_to').value, city: $('ig_city').checked, category: $('ig_cat').checked, note: $('ig_note').value });
-    if (r.error) return toast(r.error === 'order' ? 'تاريخ البداية بعد النهاية' : r.error === 'kind' ? 'اختر المدينة أو التصنيف' : 'حدد التاريخين');
-    await persist('فترة تجاهل'); closeSheet(); render(); toast('انحفظت. الأرقام ما تغيرت');
+    const p = igSync(), id = el.dataset.id || null;
+    if (!p.from || !p.to) return toast('حدد التاريخين');
+    if (p.from > p.to) return toast('تاريخ البداية بعد النهاية');
+    if (!p.cityId && !p.groupId && !p.city && !p.category) return toast('اختر مدينة أو مجموعة أو تجاهل');
+    let mode = null;
+    if (p.cityId) {
+      mode = await ask(`<h3>مدينة الفترة: ${esc(cityName(p.cityId))}<span class="sp"></span><button class="close" data-action="answer" data-val="">×</button></h3><div class="list">
+        <div class="it" data-action="answer" data-val="noCity"><div class="m"><div class="t">اللي بدون مدينة بس</div><div class="s">اللي لها مدينة ما تتغير.</div></div></div>
+        <div class="it" data-action="answer" data-val="all"><div class="m"><div class="t">كل العمليات</div><div class="s">حتى اللي حطيت مدينتها بيدك. ترجع لقيمتها لو حذفت الفترة. (اللي موقع جوالك سجّل لها مدينة ثانية ما تتغير في الحالتين.)</div></div></div></div>`);
+      if (!mode) return sheetIgnore(id);
+    }
+    const r = E.savePeriod(store(), Object.assign({}, p, { id, cityMode: mode }));
+    if (r.error) { sheetIgnore(id); return toast(r.error === 'order' ? 'تاريخ البداية بعد النهاية' : r.error === 'kind' ? 'اختر مدينة أو مجموعة أو تجاهل' : 'حدد التاريخين'); }
+    S.igDraft = null; await persist(id ? 'تعديل فترة' : 'فترة جديدة'); closeSheet(); render();
+    const bits = [r.cityApplied ? `المدينة على ${cnt(r.cityApplied, 'op')}` : '', r.groupApplied ? `المجموعة على ${cnt(r.groupApplied, 'op')}` : '', r.conflicts ? `${cnt(r.conflicts, 'op')} موقعها مختلف (تحت)` : ''].filter(Boolean);
+    toast('انحفظت' + (bits.length ? ': ' + bits.join('، ') : ''), 6000);
   },
-  ignDel: async (el) => { E.deleteIgnorePeriod(store(), el.dataset.id); await persist('حذف فترة تجاهل'); closeSheet(); render(); },
+  ignDel: async (el) => {
+    if (!await confirmBox('حذف الفترة', 'اللي جا منها يرجع مثل ما كان (المدينة والمجموعة)، وتعديلاتك اليدوية تبقى.', 'حذف', true)) return;
+    const r = E.deletePeriod(store(), el.dataset.id); S.igDraft = null; await persist('حذف فترة'); closeSheet(); render(); toast(r && r.reverted ? `انحذفت، ورجعت ${cnt(r.reverted, 'op')}` : 'انحذفت');
+  },
+  perConflicts: async (el, ev) => {
+    if (ev) ev.stopPropagation();
+    const p = (settings().ignorePeriods || []).find(x => x.id === el.dataset.id); if (!p) return;
+    const n = E.periodConflicts(store(), p).length;
+    if (!await confirmBox('مدينة الفترة', `${cnt(n, 'op')} سجّل الجوال لها مدينة غير «${esc(cityName(p.cityId))}». تبي تحط لها مدينة الفترة كلها؟ ترجع لو حذفت الفترة.`, 'طبّقها')) return;
+    const k = E.applyPeriodToConflicts(store(), p.id); await persist('مدينة الفترة على المختلفة'); render(); toast(`تمام: ${cnt(k, 'op')}`);
+  },
   // مكان التصنيفات
   placeSave: async () => {
     const st = store(), s = settings(); let n = 0; const left = [], clash = [];
@@ -3929,7 +4403,7 @@ function swChanges() {
 function vSmsWords() {
   const st = store(), W = swState(), vs = E.smsWordVersions(st), groups = SR().WORD_GROUPS;
   const defW = SR().defaultWords();
-  let h = `<div class="card"><h2>كلمات قراءة الرسائل</h2><p class="small muted">التطبيق يعرف نوع الرسالة ووسيلة الدفع واسم المحل من كلمات. رسائل الإنماء المعروفة لها قراءة ثابتة، والصيغ اللي علّمتها لها قراءتها، وهذي الكلمات لأي رسالة ثانية. الحروف الكبيرة والصغيرة سوا، وأ/ا/إ/آ وة/ه وى/ي سوا، والكلمة الإنجليزية لازم تكون بداية كلمة.</p>
+  let h = `<div class="card"><h2>كلمات قراءة الرسائل</h2><p class="small muted">من 1.7.1 الرسالة ما تنقرأ إلا بصيغة معتمدة (صفحة «الصيغ»). هذي الكلمات للاقتراح بس: يعبّي منها التطبيق نوع العملية واسم المحل لما تعرّف صيغة جديدة، ولوسيلة الدفع (Apple Pay وأونلاين) إذا الصيغة ما حددتها. الحروف الكبيرة والصغيرة سوا، وأ/ا/إ/آ وة/ه وى/ي سوا، والكلمة الإنجليزية لازم تكون بداية كلمة.</p>
     <p class="small">لما تعدّل تحدد «من تاريخ»: الرسائل من هذا التاريخ وبعده تنقرأ بالكلمات الجديدة، واللي قبله بالنسخة السابقة. وقبل الحفظ تشوف وش يتأثر وتختار.</p></div>`;
   h += `<div class="card"><h2>النسخ</h2><div class="list">
     <div class="it" data-action="swView" data-id=""><div class="m"><div class="t">الافتراضية</div><div class="s">${vs.length ? `طريقة قراءة الرسائل قبل ${fdate(vs[0].from, true)}` : 'كل الرسائل (ما عدّلت شي للحين)'}</div></div>${ico('chevL', 'chev')}</div>
@@ -4105,17 +4579,17 @@ function bankRows() {
     .sort((a, b) => (a.r.ignored - b.r.ignored) || b.last.localeCompare(a.last));
 }
 function bankSub(x) {
-  const fams = Object.keys(x.r.trusted || {}).map(f => FAM_L()[f] || f);
+  const st = store(), n = E.smsFormats(st, 'approved').filter(t => t.sender && E.bankOf(st, t.sender) === x.r.key).length;
   return [[x.r.raw].concat(x.aliases.map(a => a.raw)).map(esc).join('، '), cnt(x.n, 'msg'),
-    x.r.ignored ? '<span class="warn-t">متجاهل: رسائله ما تنحسب</span>' : fams.length ? 'معتمد: ' + esc(fams.join('، ')) : '<span class="warn-t">جديد: أول رسالة من كل نوع تنتظرك</span>'].join(' · ');
+    x.r.ignored ? '<span class="warn-t">متجاهل: رسائله ما تنحسب</span>' : n ? (n === 1 ? 'صيغة معتمدة وحدة' : n + ' صيغ معتمدة') : '<span class="warn-t">ما له صيغ معتمدة للحين</span>'].join(' · ');
 }
 function vBanks() {
   const rows = bankRows();
-  let h = `<div class="card"><h2>البنوك</h2><p class="small muted">كل مرسل وصلت منه رسائل. سمّ البنك، وشوف الأنواع اللي اعتمدتها منه وأشكال تواريخه والصيغ اللي علّمتها. أول رسالة من كل نوع من بنك (أو نوع) ما اعتمدته تنتظرك في «المراجعة» تشوف وش قرأ منها. «مو بنك» يتجاهل رسائل المرسل (مثل STC لما يرسل تأكيد شراء بعد رسالة البنك).</p></div>`;
+  let h = `<div class="card"><h2>البنوك</h2><p class="small muted">كل مرسل وصلت منه رسائل. سمّ البنك، وشوف صيغه المعتمدة وأشكال تواريخه. أي رسالة منه شكلها جديد تنتظرك في «المراجعة» تعرّف صيغتها. «مو بنك» يتجاهل رسائل المرسل (مثل STC لما يرسل تأكيد شراء بعد رسالة البنك).</p></div>`;
   // الاختصار لازم يرسل اسم المرسل: بدونه الرسالة ما تنحسب على بنك وتمشي مثل قبل
   const recent = store().all('messages').filter(m => (m.source || 'paste') !== 'paste').sort((a, b) => String(b.receivedAt || '').localeCompare(String(a.receivedAt || ''))).slice(0, 20);
   const noSender = recent.filter(m => !m.sender).length;
-  if (noSender) h += `<div class="banner w" style="display:block"><div><b>${cnt(noSender, 'msg')} من آخر رسائل الصندوق وصلت بدون اسم المرسل.</b> هذي ما تنحسب على بنك وتمشي مثل قبل (بدون «بنك جديد» ولا أشكال تاريخ لكل بنك). عشان تشتغل هالميزة، لازم الاختصار يرسل اسم المرسل مع الرسالة.</div></div>`;
+  if (noSender) h += `<div class="banner w" style="display:block"><div><b>${cnt(noSender, 'msg')} من آخر رسائل الصندوق وصلت بدون اسم المرسل.</b> هذي ما تنحسب على بنك (صيغها وأشكال تواريخها عامة لكل البنوك). الأفضل إن الاختصار يرسل اسم المرسل مع الرسالة.</div></div>`;
   h += rows.length ? `<div class="card"><div class="list">${rows.map(x => `<div class="it" data-action="bankOpen" data-k="${esc(x.r.key)}">${icCircle({ color: x.r.ignored ? PAL.gray : PAL.aqua, icon: 'bank' }, 's')}<div class="m"><div class="t">${esc(x.r.name || x.r.raw)}</div><div class="s">${bankSub(x)}</div></div>${ico('chevL', 'chev')}</div>`).join('')}</div></div>`
     : `<div class="card empty"><p>ما وصلت رسائل من الاختصار للحين.</p></div>`;
   return h;
@@ -4123,55 +4597,32 @@ function vBanks() {
 function sheetBank(key) {
   const st = store(), k = E.bankOf(st, key), r = E.bankRec(st, k); if (!r) return;
   const x = bankRows().find(y => y.r.key === k) || { n: 0, aliases: [] }, others = bankRows().filter(y => y.r.key !== k);
-  const fams = Object.keys(r.trusted || {});
   const shapes = Object.entries(settings().smsDateShapes || {}).filter(([sk]) => sk.startsWith(k + '§'));
-  const tpls = st.all('templates').filter(t => t.kind === 'sms' && t.sender && E.bankOf(st, t.sender) === k);
+  const tpls = E.smsFormats(st, 'approved').filter(t => t.sender && E.bankOf(st, t.sender) === k);
+  const pendN = E.smsFormats(st, 'pending').filter(t => t.sender && E.bankOf(st, t.sender) === k).length;
   const OL = SR().ORDER_L;
   openSheet(`<h3>${esc(r.name || r.raw)}<span class="sp"></span><button class="close" data-action="closeSheet">×</button></h3>
     <label class="f">اسم البنك</label><div class="btns" style="flex-wrap:nowrap"><input type="text" id="bk_name" value="${esc(r.name || '')}" placeholder="مثل: الإنماء، الراجحي، الأهلي" style="flex:1" maxlength="40"><button class="btn" data-action="bankNameSave" data-k="${esc(k)}">حفظ</button></div>
     <h3 style="margin-top:14px;font-size:15px">اسم المرسل في الرسائل</h3>
     <div class="list"><div class="it" style="cursor:default"><div class="m"><div class="t">${esc(r.raw)}</div><div class="s">${cnt(x.n, 'msg')}</div></div></div>
     ${x.aliases.map(a => `<div class="it" style="cursor:default"><div class="m"><div class="t">${esc(a.raw)}</div><div class="s">مدموج في هذا البنك</div></div><button class="btn" data-action="bankUnmerge" data-k="${esc(a.key)}">فك الدمج</button></div>`).join('')}</div>
-    ${others.length ? `<p class="small muted" style="margin-top:8px">لو نفس البنك يرسل باسم ثاني (مثلًا غيّر اسم المرسل)، ادمجهم: هذا يصير اسم ثاني للبنك اللي تختاره، بنفس الاعتماد وأشكال التاريخ والصيغ.</p>
+    ${others.length ? `<p class="small muted" style="margin-top:8px">لو نفس البنك يرسل باسم ثاني (مثلًا غيّر اسم المرسل)، ادمجهم: هذا يصير اسم ثاني للبنك اللي تختاره، بنفس الصيغ وأشكال التاريخ.</p>
       <div class="btns" style="flex-wrap:nowrap"><select id="bk_merge" style="flex:1">${others.map(y => `<option value="${esc(y.r.key)}">${esc(y.r.name || y.r.raw)}</option>`).join('')}</select><button class="btn" data-action="bankMerge" data-k="${esc(k)}">ادمجه فيه</button></div>` : ''}
-    <h3 style="margin-top:14px;font-size:15px">الأنواع المعتمدة</h3>
-    <p class="small muted">رسائل هالأنواع تنحفظ مباشرة. أي نوع ثاني، أول رسالة منه تنتظرك.</p>
-    <div class="swchips">${fams.length ? fams.map(f => `<span class="swc">${esc(FAM_L()[f] || f)}<button type="button" data-action="bankUntrust" data-k="${esc(k)}" data-f="${esc(f)}" aria-label="إلغاء الاعتماد">×</button></span>`).join('') : '<span class="small warn-t">ما اعتمدت منه شي للحين</span>'}</div>
     <h3 style="margin-top:14px;font-size:15px">أشكال التاريخ</h3>
     ${shapes.length ? `<div class="list">${shapes.map(([sk, v]) => `<div class="it" data-action="shapeEdit" data-sig="${esc(sk)}"><div class="m"><div class="t">${shapeSampleHtml(v.sample || '', (SR().findDateToken(v.sample || '') || {}).raw)}</div><div class="s">${OL[v.order] || v.order}</div></div>${ico('chevL', 'chev')}</div>`).join('')}</div>` : '<p class="small muted">ما فيه للحين. أول رسالة بشكل تاريخ جديد يسألك عنه.</p>'}
-    <h3 style="margin-top:14px;font-size:15px">الصيغ اللي علّمتها</h3>
-    ${tpls.length ? `<div class="list">${tpls.map(t => `<div class="it" style="cursor:default"><div class="m"><div class="t">${esc(t.name || (FAM_L()[t.family] || ''))}</div><div class="s">${esc(FAM_L()[t.family] || t.family || '')} · ${Object.keys(t.fields || {}).map(f => FIELD_L[f] || f).map(esc).join('، ')}</div></div><button class="btn r" data-action="tplDel" data-id="${t.id}" data-k="${esc(k)}">${ico('trash')}</button></div>`).join('')}</div>` : '<p class="small muted">ما فيه. تعلّمه صيغة من «المراجعة» لما ما يعرف يقرأ رسالة.</p>'}
+    <h3 style="margin-top:14px;font-size:15px">الصيغ المعتمدة</h3>
+    ${tpls.length ? `<div class="list">${tpls.map(t => `<div class="it" data-action="fmtOpen" data-id="${t.id}"><div class="m"><div class="t">${esc(t.name || '')}</div><div class="s">${t.role === 'tx' ? Object.keys(t.spans || {}).map(f => FIELD_L[f] || f).map(esc).join('، ') : 'معلومات'}</div></div>${ico('chevL', 'chev')}</div>`).join('')}</div>` : '<p class="small muted">ما فيه للحين. أول رسالة منه تنتظرك في «المراجعة» تعرّف صيغتها.</p>'}
+    ${pendN ? `<p class="small warn-t" style="margin-top:6px">${pendN === 1 ? 'شكل واحد ينتظر' : pendN + ' أشكال تنتظر'} اعتمادك. <a data-action="go" data-view="formats">افتحها</a></p>` : ''}
     <div class="btns" style="margin-top:14px">${r.ignored ? `<button class="btn p" data-action="bankIgnore" data-k="${esc(k)}" data-v="0">إلغاء التجاهل</button>` : `<button class="btn r" data-action="bankIgnore" data-k="${esc(k)}" data-v="1">مو بنك: تجاهل رسائله</button>`}</div>
     ${r.ignored ? `<p class="small muted">رسائله تنحفظ «من مرسل متجاهل» بنصها وبدون عمليات. رسائل الرمز تنحذف بدون نص مثل دايم.</p>` : ''}`);
 }
-// بطاقة «بنك جديد» في المراجعة: وش قرأ من الرسالة، وسؤال التاريخ لو يحتاج
-function newBankCard(r, m) {
-  const st = store(), i = r.info || {}, fam = FAM_L()[r.family] || r.family, bank = E.bankLabel(st, m && m.sender) || '—';
-  const name = i.merchantRaw || i.beneficiaryRaw || i.counterpartyName || i.billerRaw || null, last4 = i.instrumentLast4 || i.accountLast4 || null;
-  const row = (l, v) => `<div style="display:flex;gap:8px;margin:3px 0"><span class="muted" style="min-width:92px">${l}</span><b style="flex:1;min-width:0;overflow-wrap:anywhere"><bdi>${v}</bdi></b></div>`;
-  let dateHtml = '';
-  const A = r.dateAsk, OL = SR().ORDER_L;
-  if (A) {
-    const why = A.reason === 'new' ? `شكل تاريخ جديد من هالبنك: <b>${shapeSampleHtml(A.sample, A.token)}</b>. اختر التاريخ الصحيح، والترتيب ينحفظ لرسائل هالبنك.`
-      : A.reason === 'old' ? 'التاريخ اللي طلع أقدم من وقت وصول الرسالة بأكثر من يومين. اختر التاريخ الصحيح لها هي بس.'
-      : A.reason === 'future' ? 'التاريخ اللي طلع بعد وقت وصول الرسالة. اختر التاريخ الصحيح لها هي بس.'
-      : 'الترتيب المحفوظ ما يعطي تاريخ صحيح لهذي الرسالة. اختر تاريخها هي بس.';
-    dateHtml = `<div class="small" style="margin-top:8px">${why}</div><div class="kvbox" style="margin-top:6px">${(A.candidates || []).map((c, n) => `<label class="f" style="margin:6px 0"><input type="radio" name="nb_${r.id}" value="${c.order}" ${n === 0 && (A.candidates || []).length === 1 ? 'checked' : ''}> <b>${fdate(c.date, true)}</b> <span class="small muted">· ${OL[c.order]}</span></label>`).join('')}</div>
-      ${A.reason !== 'new' ? `<label class="f">أو حدد التاريخ بنفسك</label><input type="date" id="nbdate_${r.id}" max="${E.todayISO()}">` : ''}`;
-  }
-  const body = `<div class="small">أول رسالة «${esc(fam)}» من <b>${esc(bank)}</b>. هذا اللي قريته منها، تأكد قبل ما أحفظها:</div>
-    <div class="kvbox small" style="margin-top:6px">${row('النوع', esc(fam))}${row('المبلغ', i.grossAmount != null ? esc(fmt(i.grossAmount)) + (i.foreignAmount ? ` (${esc(fmt(i.foreignAmount))} ${esc(i.foreignCurrency || '')})` : '') : '—')}${row('الاسم', name ? esc(name) : '—')}${row('البطاقة أو الحساب', last4 ? '…' + esc(last4) : '—')}${/purchase|refund/.test(r.family || '') ? row('وسيلة الدفع', esc(METHOD_TXT[i.paymentMethod || 'POS'] || i.paymentMethod || 'نقاط بيع')) : ''}${i.balanceAfter != null ? row('الرصيد', esc(fmt(i.balanceAfter))) : ''}${i.feeAmount ? row('الرسوم', esc(fmt(i.feeAmount))) : ''}${r.date ? row('التاريخ', esc(fdate(r.date, true)) + (i.time ? ' ' + esc(ftime(i.time)) : '')) : ''}</div>${dateHtml}
-    <div class="small muted" style="margin-top:6px">«صحيح» يعتمد قراءة «${esc(fam)}» من هالبنك، ورسائله الجاية من نفس النوع تنحفظ مباشرة. إذا فيه شي غلط، «علّم الصيغة» وحدد الحقول بنفسك.</div>`;
-  const btns = `<button class="btn p" data-action="rvTrust" data-id="${r.id}">صحيح، اعتمد القراءة لهالبنك</button><button class="btn" data-action="teachSms" data-id="${r.id}">علّم الصيغة</button><button class="btn" data-action="rvMsg" data-id="${r.id}" data-v="ignore">تجاهل الرسالة</button>`;
-  return { body, btns };
-}
-const IGN_SENDER_KINDS = new Set(['sms_new_bank', 'sms_new_bank_info', 'sms_unknown', 'sms_unparsed', 'sms_no_account']);
+const IGN_SENDER_KINDS = new Set(['sms_new_bank', 'sms_new_bank_info', 'sms_unknown', 'sms_unparsed', 'sms_no_account', 'sms_new_shape']);
 // اللصق: «من أي بنك؟»
 function pasteBankField() {
   const rows = bankRows().filter(x => !x.r.ignored);
   return `<label class="f">من أي بنك؟</label><select id="smsBank" data-change="pasteBankSel"><option value="">ما أدري</option>${rows.map(x => `<option value="${esc(x.r.key)}">${esc(x.r.name || x.r.raw)}</option>`).join('')}<option value="__other">بنك ثاني (اكتب اسم المرسل)</option></select>
     <input type="text" id="smsSender" class="hide" placeholder="اسم المرسل، مثل alinma" style="margin-top:6px">
-    <div class="small muted" style="margin-top:4px">إذا اخترت البنك، الرسائل تنقرأ بصيغه وأشكال تواريخه. «ما أدري» = مثل قبل.</div>`;
+    <div class="small muted" style="margin-top:4px">إذا اخترت البنك، الرسائل تنقرأ بصيغه المعتمدة وأشكال تواريخه. «ما أدري» = تجرّب صيغ كل البنوك.</div>`;
 }
 function pasteSender() {
   const v = $('smsBank') ? $('smsBank').value : '';
@@ -4200,7 +4651,7 @@ Object.assign(A, {
   bankNameSave: async (el) => { E.setBankName(store(), el.dataset.k, $('bk_name').value); await persist('اسم بنك'); render(); sheetBank(el.dataset.k); toast('انحفظ'); },
   bankMerge: async (el) => {
     const st = store(), from = el.dataset.k, into = $('bk_merge') && $('bk_merge').value; if (!into) return;
-    const ok = await confirmBox('دمج', `<b>${esc(E.bankLabel(st, from))}</b> يصير اسم ثاني لـ <b>${esc(E.bankLabel(st, into))}</b>: نفس الاسم والأنواع المعتمدة وأشكال التاريخ والصيغ. تقدر تفك الدمج بعدين.`, 'ادمج', false);
+    const ok = await confirmBox('دمج', `<b>${esc(E.bankLabel(st, from))}</b> يصير اسم ثاني لـ <b>${esc(E.bankLabel(st, into))}</b>: نفس الاسم والصيغ وأشكال التاريخ. تقدر تفك الدمج بعدين.`, 'ادمج', false);
     if (!ok) return;
     const res = E.mergeBanks(st, from, into); let plan = null;
     if (res && res.reprocess.length) { plan = await E.reprocessMessages(st, res.reprocess); if (plan) E.commitSms(st, plan, { markReview: true }); }
@@ -4211,44 +4662,461 @@ Object.assign(A, {
     if (r.reprocess && r.reprocess.length) { plan = await E.reprocessMessages(st, r.reprocess); if (plan) E.commitSms(st, plan, { markReview: true }); }
     await persist('فك دمج بنك'); render(); sheetBank(r.from); toast('انفك الدمج' + (plan ? '، ' + smsSummaryText(plan.smsSummary) : ''));
   },
-  bankUntrust: async (el) => {
-    const st = store(), f = el.dataset.f, label = E.bankLabel(st, el.dataset.k);
-    const ok = await confirmBox('إلغاء الاعتماد', `أول رسالة «${esc(FAM_L()[f] || f)}» جاية من ${esc(label)} بتنتظرك في «المراجعة» تتأكد من قراءتها. العمليات المحفوظة ما تتغير.`, 'إلغاء الاعتماد', true);
-    if (!ok) return;
-    E.untrustFamily(st, el.dataset.k, f); await persist('إلغاء اعتماد نوع'); render(); sheetBank(el.dataset.k);
-  },
   bankIgnore: async (el) => {
     const st = store(), k = el.dataset.k;
     if (el.dataset.v === '1') { closeSheet(null); if (await ignoreSender(k)) sheetBank(k); return; }
     const r = E.setSenderIgnored(st, k, false); let plan = null;
-    if (r && r.reprocess.length && await confirmBox('إعادة قراءة رسائله', `عندك ${cnt(r.reprocess.length, 'msg')} منه انحفظت «من مرسل متجاهل». تعيد قراءتها الحين؟ تمر بنفس الخطوات: أول رسالة من كل نوع ما اعتمدته تنتظرك في «المراجعة».`, 'أعد قراءتها', false)) {
+    if (r && r.reprocess.length && await confirmBox('إعادة قراءة رسائله', `عندك ${cnt(r.reprocess.length, 'msg')} منه انحفظت «من مرسل متجاهل». تعيد قراءتها الحين؟ اللي لها صيغة معتمدة تنحفظ، والباقي ينتظرك في «المراجعة».`, 'أعد قراءتها', false)) {
       plan = await E.reprocessMessages(st, r.reprocess); if (plan) E.commitSms(st, plan, { markReview: true });
     }
     await persist('إلغاء تجاهل مرسل'); render(); sheetBank(k); toast(plan ? smsSummaryText(plan.smsSummary) : 'انلغى التجاهل');
   },
-  tplDel: async (el) => {
-    const st = store(), t = st.get('templates', el.dataset.id); if (!t) return;
-    if (!await confirmBox('حذف الصيغة', 'الرسائل الجاية بهالشكل تنقرأ بالقارئ العام (أو تطلب تعليم من جديد). العمليات المحفوظة ما تتغير.', 'حذف', true)) return;
-    st.remove('templates', t.id); await persist('حذف صيغة رسالة'); render(); sheetBank(el.dataset.k);
-  },
-  rvTrust: async (el) => {
-    const st = store(), r = st.get('reviews', el.dataset.id); if (!r) return;
-    const pick = document.querySelector(`input[name="nb_${r.id}"]:checked`), own = $('nbdate_' + r.id);
-    let sel = null;
-    if (r.dateAsk) {
-      if (pick) sel = { order: pick.value };
-      else if (own && own.value) { if (own.value > E.todayISO()) return toast('التاريخ في المستقبل'); sel = { date: own.value }; }
-      else return toast('اختر التاريخ الصحيح');
-    }
-    const res = E.approveBankReading(st, r.id, sel);
-    if (!res || res.error) return toast(res && res.error === 'date' ? 'اختر التاريخ الصحيح' : 'ما انحفظ');
-    const plan = await E.reprocessMessages(st, res.reprocess, res.forceDate ? { forceDate: res.forceDate } : {});
-    if (plan) E.commitSms(st, plan, { markReview: true });
-    await persist('اعتماد قراءة بنك'); render();
-    toast(`اعتمدت «${FAM_L()[res.family] || res.family}» من ${E.bankLabel(st, res.bank)}${plan ? '، ' + smsSummaryText(plan.smsSummary) : ''}`, 6000);
-  },
   rvIgnoreSender: async (el) => { const st = store(), r = st.get('reviews', el.dataset.id), m = r && st.get('messages', r.messageId); if (!m || !m.sender) return; await ignoreSender(E.bankOf(st, m.sender)); },
   pasteBankSel: (el) => { if ($('smsSender')) $('smsSender').classList.toggle('hide', el.value !== '__other'); },
+});
+
+/* ================= 1.7.1: الصيغ الثابتة للرسائل ================= */
+// بعد حفظ صيغة (تعريف، تعديل، اعتماد شكل): الرسائل المنتظرة اللي تطابقها تنعالج، وإذا فيه رسائل سابقة بتتغير قراءتها يسألك عن النطاق
+async function finishFormat(res, label, back) {
+  const st = store(); let plan = null;
+  if (res.waiting.length) { plan = await E.reprocessMessages(st, res.waiting, {}); if (plan) E.commitSms(st, plan, { markReview: true }); }
+  E.detectRecurring(st);
+  await persist(label);
+  S.teachSms = null; if (back) goUp(back); else render();
+  const imp = res.template.role === 'tx' ? E.formatImpact(st, res.template) : { total: 0 };
+  toast(`${res.template.role === 'info' ? 'انحفظت صيغة معلومات' : /تعديل/.test(label || '') ? 'انحفظ تعديل الصيغة' : 'انعتمدت الصيغة'}${plan ? '، ' + smsSummaryText(plan.smsSummary) : ''}`, 5000);
+  if (imp.total) setTimeout(() => sheetFormatScope(res.template.id), 300);
+}
+const readRow = (l, v) => `<div style="display:flex;gap:8px;margin:3px 0"><span class="muted" style="min-width:92px">${l}</span><b style="flex:1;min-width:0;overflow-wrap:anywhere"><bdi>${v}</bdi></b></div>`;
+// كذا تنقرأ الرسالة المثال بهالصيغة
+function formatReadHtml(t) {
+  if (t.role !== 'tx') return '';
+  const i = SR().applyFormat(t, t.sample || ''); if (!i) return '';
+  const name = i.merchantRaw || i.beneficiaryRaw || i.counterpartyName || null;
+  const amt = i.feeOnTop ? `${esc(fmt(i.grossAmount))} <span class="small muted">= ${esc(fmt(i.amountRead))} + رسوم ${esc(fmt(i.feeAmount))}</span>` : esc(fmt(i.grossAmount)) + (i.feeAmount ? ` <span class="small muted">(منها رسوم ${esc(fmt(i.feeAmount))})</span>` : '');
+  return `<div class="kvbox small" style="margin-top:6px">${readRow('النوع', esc(FAM_L()[t.family] || t.family || ''))}${readRow('المبلغ المحسوب', amt)}${name ? readRow('الاسم', esc(name)) : ''}${i.instrumentLast4 ? readRow('البطاقة', '…' + esc(i.instrumentLast4)) : ''}${i.accountLast4 ? readRow('الحساب', '…' + esc(i.accountLast4)) : ''}${i.balanceAfter != null ? readRow('الرصيد', esc(fmt(i.balanceAfter))) : ''}${i.transactionDate ? readRow('التاريخ', esc(fdate(i.transactionDate, true)) + (i.time ? ' ' + esc(ftime(i.time)) : '')) : ''}</div>`;
+}
+const fmtBank = (t) => t.sender ? (E.bankLabel(store(), t.sender) || t.sender) : 'بدون بنك (ملصوقة)';
+const sampleBox = (t) => `<div class="raw" style="margin-top:6px">${rawHtml(t.sample || '')}</div>`;
+function pendingCard(t) {
+  const n = t.count || 1, amt = t.role === 'info' && t.hasAmount ? SR().extractAmount(t.sample || '') : null;
+  const btns = t.role === 'tx'
+    ? `<button class="btn p" data-action="fmtApprove" data-id="${t.id}">اعتمد</button><button class="btn" data-action="fmtEdit" data-id="${t.id}">عدّل</button><button class="btn" data-action="fmtToInfo" data-id="${t.id}">هذي معلومات</button><button class="btn" data-action="fmtDismiss" data-id="${t.id}">تجاهل الشكل</button>`
+    : (t.hasAmount // فيها مبلغ: الأقرب إنها عملية، فزر التعريف هو الأساسي
+      ? `<button class="btn p" data-action="fmtEdit" data-id="${t.id}">عرّفها عملية</button><button class="btn" data-action="fmtApprove" data-id="${t.id}">اعتمدها معلومات</button><button class="btn" data-action="fmtDismiss" data-id="${t.id}">تجاهل الشكل</button>`
+      : `<button class="btn p" data-action="fmtApprove" data-id="${t.id}">اعتمدها معلومات</button><button class="btn" data-action="fmtEdit" data-id="${t.id}">عرّفها عملية</button><button class="btn" data-action="fmtDismiss" data-id="${t.id}">تجاهل الشكل</button>`);
+  return `<div class="rv" id="pf_${t.id}"><div class="rvh"><b>${esc(fmtBank(t))}</b> <span class="b ${t.role === 'tx' ? 'g' : 'n'}">${t.role === 'tx' ? 'عملية' : 'معلومات'}</span><span class="sp" style="flex:1"></span><span class="small muted">${cnt(n, 'msg')}</span></div>
+    ${sampleBox(t)}
+    ${t.role === 'tx' ? `<div class="small muted" style="margin-top:8px">كذا تنقرأ (نفس قراءتها السابقة):</div>${formatReadHtml(t)}${t.feeTopHint ? '<div class="small warn-t" style="margin-top:6px">المبلغ + الرسوم يساوي رقم ثالث مكتوب في الرسالة: يمكن الرسوم «فوق المبلغ». لو كذا اضغط «عدّل».</div>' : ''}`
+      : `<div class="small muted" style="margin-top:8px">كانت تنحفظ «معلومات» بدون عملية.${t.hasAmount ? ` <span class="warn-t">فيها مبلغ${amt ? ' ' + fmt(amt.value) : ''}: لو هي عملية اضغط «عرّفها عملية».</span>` : ''}</div>`}
+    <div class="btns" style="margin-top:10px">${btns}</div></div>`;
+}
+function formatCounts() {
+  const st = store();
+  return st.cached('fmtCounts', () => { const m = new Map(), fs = E.smsFormats(st, 'approved'), R = SR(); st.all('messages').forEach(x => { if (!x.text) return; const f = fs.find(t => !(t.sender && x.sender && E.bankOf(st, t.sender) !== E.bankOf(st, x.sender)) && R.matchFormat(t, x.text)); if (f) m.set(f.id, (m.get(f.id) || 0) + 1); }); return m; });
+}
+function vFormats() {
+  const st = store(), pend = pendingFormats().sort((a, b) => Number(b.role === 'tx') - Number(a.role === 'tx') || (b.count || 1) - (a.count || 1)), appr = E.smsFormats(st, 'approved'), counts = formatCounts();
+  let h = `<div class="card"><h2>الصيغ الثابتة</h2><p class="small muted">التطبيق ما يخمّن: الرسالة تنقرأ بس إذا طابقت صيغة معتمدة بالضبط (نفس السطور ونفس الكلام الثابت). أي شكل جديد يروح «المراجعة» وتعرّفه: نوع العملية والمتغيرات (المبلغ، التاريخ، المحل…)، وبعدها الرسائل اللي بنفس الشكل تمشي لحالها. رسائل الرموز تنحذف تلقائي وما ينحفظ نصها.</p></div>`;
+  if (pend.length) h += `<div class="card" id="fmtPend"><h2>أشكال من رسائلك السابقة تنتظر اعتمادك (${pend.length})</h2><p class="small muted">كل شكل معه مثال وقراءته. اعتمده، أو عدّله، أو تجاهله. لين تعتمد الشكل، رسائله الجديدة تنتظر في «المراجعة».</p>${pend.map(pendingCard).join('')}</div>`;
+  const banks = new Map(); appr.forEach(t => { const k = t.sender ? E.bankOf(st, t.sender) : ''; if (!banks.has(k)) banks.set(k, []); banks.get(k).push(t); });
+  banks.forEach((list, k) => {
+    list.sort((a, b) => Number(b.role === 'tx') - Number(a.role === 'tx') || (counts.get(b.id) || 0) - (counts.get(a.id) || 0));
+    h += `<div class="card"><h2>${esc(k ? (E.bankLabel(st, k) || k) : 'بدون بنك')} <span class="sp"></span><span class="muted">${list.length}</span></h2><div class="list">${list.map(t => `<div class="it" data-action="fmtOpen" data-id="${t.id}">${icCircle({ color: t.role === 'tx' ? PAL.green : PAL.gray, icon: t.role === 'tx' ? 'msg' : 'note' }, 's')}<div class="m"><div class="t">${esc(t.name || '')}</div><div class="s" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis"><bdi>${esc(String(t.sample || '').split('\n')[0])}</bdi></div><div class="s">${t.role === 'tx' ? Object.keys(t.spans || {}).map(f => FIELD_L[f] || f).map(esc).join('، ') : 'تنحفظ معلومات بدون عملية'} · ${cnt(counts.get(t.id) || 0, 'msg')}</div></div>${ico('chevL', 'chev')}</div>`).join('')}</div></div>`;
+  });
+  if (!appr.length && !pend.length) h += `<div class="card empty"><p>ما فيه صيغ للحين. أول رسالة توصل تنتظرك في «المراجعة» تعرّف صيغتها.</p></div>`;
+  return h;
+}
+function sheetFormat(id) {
+  const st = store(), t = st.get('templates', id); if (!E.isFormat(t)) return closeSheet(null);
+  const n = formatCounts().get(t.id) || 0;
+  openSheet(`<h3>${esc(t.name || '')}<span class="sp"></span><button class="close" data-action="closeSheet">×</button></h3>
+    <div class="small muted">${esc(fmtBank(t))} · ${t.role === 'tx' ? 'عملية' : 'معلومات'} · ${cnt(n, 'msg')} تطابقها</div>
+    <label class="f">مثال</label>${sampleBox(t)}
+    ${t.role === 'tx' ? `<label class="f">كذا تنقرأ</label>${formatReadHtml(t)}
+      <dl class="kv" style="margin-top:8px"><dt>المتغيرات</dt><dd>${Object.keys(t.spans || {}).map(f => FIELD_L[f] || f).map(esc).join('، ') || '—'}${(t.skips || []).length ? ' · نص يتغير' : ''}</dd>${t.feeMode ? `<dt>الرسوم</dt><dd>${t.feeMode === 'top' ? 'فوق المبلغ' : 'داخل المبلغ'}</dd>` : ''}</dl>` : '<p class="small muted" style="margin-top:8px">الرسائل اللي بهالشكل تنحفظ «معلومات» بدون عملية وبدون سؤال.</p>'}
+    <div class="btns" style="margin-top:12px"><button class="btn p" data-action="fmtEdit" data-id="${t.id}">${t.role === 'tx' ? 'عدّل' : 'عرّفها عملية'}</button><button class="btn r" data-action="fmtDelete" data-id="${t.id}">حذف الصيغة</button></div>`);
+}
+// رسائل سابقة تطابق الصيغة وقراءتها بتتغير: من الحين وطالع / على الكل / من تاريخ
+function sheetFormatScope(id) {
+  const st = store(), t = st.get('templates', id); if (!E.isFormat(t)) return;
+  const imp = E.formatImpact(st, t); if (!imp.total) return;
+  const FL = { family: 'النوع', amount: 'المبلغ', name: 'الاسم', method: 'وسيلة الدفع', balance: 'الرصيد', fee: 'الرسوم', date: 'التاريخ' };
+  const rows = imp.infoToTx.map(x => ({ d: x.date, txt: `كانت «معلومات» ← عملية <span class="num">${fmt(x.after.amount)}</span>${x.after.name ? ` · <bdi>${esc(x.after.name)}</bdi>` : ''}` }))
+    .concat(imp.changes.map(x => ({ d: x.date, txt: `يتغير: ${x.fields.map(f => FL[f] || f).join('، ')}${x.fields.includes('amount') ? ` (<span class="num">${fmt(x.before.amount)}</span> ← <span class="num">${fmt(x.after.amount)}</span>)` : ''}${x.newDate ? ` (${fdate(x.oldDate, true)} ← ${fdate(x.newDate.date, true)})` : ''}${x.limited ? ' · مدموجة مع كشف: وسيلة الدفع والاسم بس' : ''}` })))
+    .sort((a, b) => String(b.d).localeCompare(String(a.d)));
+  openSheet(`<h3>الرسائل السابقة بنفس الشكل<span class="sp"></span><button class="close" data-action="closeSheet">×</button></h3>
+    <p class="small">الصيغة «${esc(t.name || '')}» تطابق <b>${cnt(imp.total, 'msg')}</b> سابقة قراءتها تختلف${imp.infoToTx.length ? `: ${imp.infoToTx.length === 1 ? 'وحدة' : imp.infoToTx.length === 2 ? 'ثنتين' : imp.infoToTx.length} ${imp.infoToTx.length === 1 ? 'كانت «معلومات» وبتصير عملية' : 'كانوا «معلومات» وبيصيرون عمليات'}` : ''}${imp.changes.length ? `${imp.infoToTx.length ? '، و' : ': '}${cnt(imp.changes.length, 'op')} بتتصحح` : ''}. الرسائل الجاية تمشي على الصيغة في كل الأحوال. والسابقة؟</p>
+    <div class="list" style="max-height:180px;overflow:auto">${rows.slice(0, 40).map(r => `<div class="it" style="cursor:default"><div class="m"><div class="t small">${fdate(r.d, true)}</div><div class="s">${r.txt}</div></div></div>`).join('')}</div>
+    <label class="f" style="margin-top:10px"><input type="radio" name="fs_mode" value="future" checked> من الحين وطالع (السابقة تبقى مثل ما هي)</label>
+    <label class="f"><input type="radio" name="fs_mode" value="all"> على الكل (${cnt(imp.total, 'msg')})</label>
+    <label class="f"><input type="radio" name="fs_mode" value="from" id="fs_from_r"> من تاريخ محدد:</label><input type="date" id="fs_from" data-change="fsFromPick" min="${imp.minDate || ''}" max="${E.todayISO()}" value="${imp.minDate || ''}">
+    <p class="small muted">التصحيح يمس اللي انقرأ من الرسالة بس (ومنه التاريخ إذا الصيغة تحدده): تصنيفك وأغراضك ومدينتك وملاحظاتك تبقى. والعملية ما تنحذف أبدًا.</p>
+    <div class="btns" style="margin-top:12px"><button class="btn p" data-action="fmtScopeApply" data-id="${t.id}">تطبيق</button></div>`);
+}
+// رسالة واحدة تظهر مرة بعد التحديث: وش ينتظرك
+function sheetNotice171(n) {
+  openSheet(`<h3>تحديث 1.7.1<span class="sp"></span><button class="close" data-action="closeSheet">×</button></h3>
+    ${n.shapes ? `<div class="rv"><b>الصيغ الثابتة للرسائل</b><div class="small" style="margin-top:4px">التطبيق ما عاد يخمّن قراءة الرسائل. جمعت رسائلك السابقة في <b>${n.shapes === 1 ? 'شكل واحد' : n.shapes === 2 ? 'شكلين' : n.shapes + ' أشكال'}</b> تنتظر اعتمادك (كل شكل مع مثال وقراءته). لين تعتمد الشكل، رسائله الجديدة تنتظر في «المراجعة».</div><div class="btns" style="margin-top:8px"><button class="btn p" data-action="noticeGo" data-view="formats">افتح الصيغ</button></div></div>` : `<div class="rv"><b>الصيغ الثابتة للرسائل</b><div class="small" style="margin-top:4px">التطبيق ما عاد يخمّن قراءة الرسائل: أي رسالة شكلها جديد تنتظرك في «المراجعة» تعرّف صيغتها مرة وحدة.</div></div>`}
+    ${n.asked ? `<div class="rv"><b>الالتزامات الدائمة</b><div class="small" style="margin-top:4px"><b>${n.asked === 1 ? 'التزام واحد ينتظر اعتماد مبلغه' : n.asked === 2 ? 'التزامين ينتظرون اعتماد مبالغهم' : n.asked + ' التزامات تنتظر اعتماد مبالغها'}</b> (يقترح آخر فاتورة). لين تجاوب ما تنحسب التزام، ومبالغها مع «غير محدد» (وفي التوقع تنحسب صرف عادي).${n.auto ? ` و${n.auto === 1 ? 'واحد انعتمد' : n.auto + ' انعتمدت'} تلقائي لأن آخر 3 دفعات متساوية.` : ''}</div><div class="btns" style="margin-top:8px"><button class="btn p" data-action="noticeGo" data-view="commitments">افتح الالتزامات</button></div></div>` : ''}
+    ${n.groups ? `<p class="small muted">و${cnt(n.groups, 'op')} (تحويل بين حساباتك أو سداد بطاقة) طلعت من مجموعة فترتها.</p>` : ''}`);
+}
+Object.assign(TITLES, { formats: 'الصيغ', teachsms: 'تعريف صيغة رسالة' });
+Object.assign(NAV_OF, { formats: 'more' });
+Object.assign(V150, { formats: vFormats });
+Object.assign(A, {
+  noticeGo: (el) => { closeSheet(null); go(el.dataset.view); },
+  fsFromPick: () => { if ($('fs_from_r')) $('fs_from_r').checked = true; }, // اخترت تاريخ = تبي «من تاريخ محدد»
+  teachName: (el) => { if (S.teachSms) S.teachSms.name = el.value; },
+  fmtOpen: (el) => sheetFormat(el.dataset.id),
+  fmtPendGo: (el) => { go('formats'); setTimeout(() => { const x = $('pf_' + el.dataset.id) || $('fmtPend'); if (x) x.scrollIntoView({ block: 'start' }); }, 80); },
+  fmtApprove: async (el) => {
+    const st = store(), res = E.approvePendingFormat(st, el.dataset.id); if (!res) return;
+    await finishFormat(res, res.template.role === 'info' ? 'اعتماد شكل معلومات' : 'اعتماد شكل رسالة', null);
+  },
+  // تعديل صيغة معتمدة، أو شكل معلّق (عملية أو معلومات ← عملية)
+  fmtEdit: (el) => {
+    const st = store(), t = st.get('templates', el.dataset.id); if (!E.isFormat(t) || !t.sample) return;
+    closeSheet(null);
+    teachStart({ mode: t.status === 'approved' && t.role === 'tx' ? 'edit' : 'pending', back: 'formats', text: t.sample, sender: t.sender, formatId: t.id, fmt: t });
+  },
+  fmtToInfo: async (el) => {
+    const st = store(), t = st.get('templates', el.dataset.id); if (!E.isFormat(t)) return;
+    const res = E.saveInfoFormat(st, { text: t.sample, sender: t.sender }, t.id); if (!res || res.error) return toast(res && res.error === 'otp' ? 'فيها رمز محتمل: ما تنحفظ لها صيغة معلومات' : 'ما قدرت أحفظها صيغة معلومات');
+    await finishFormat(res, 'شكل رسالة: معلومات', null);
+  },
+  fmtDismiss: async (el) => {
+    const st = store(), t = st.get('templates', el.dataset.id); if (!E.isFormat(t)) return;
+    if (!await confirmBox('تجاهل الشكل', 'ما ينحفظ له صيغة. لو وصلت رسالة بنفس الشكل بتطلع لك في «المراجعة» مثل أي شكل جديد. العمليات المحفوظة ما تتغير.', 'تجاهل', false)) return;
+    E.deleteSmsFormat(st, t.id); await persist('تجاهل شكل رسالة'); render();
+  },
+  fmtDelete: async (el) => {
+    const st = store(), t = st.get('templates', el.dataset.id); if (!E.isFormat(t)) return;
+    if (!await confirmBox('حذف الصيغة', 'الرسائل الجاية بهالشكل بتروح «المراجعة» وتسألك من جديد. العمليات المحفوظة ما تتغير.', 'حذف', true)) return;
+    E.deleteSmsFormat(st, t.id); await persist('حذف صيغة رسالة'); closeSheet(null); render(); toast('انحذفت الصيغة');
+  },
+  fmtScopeApply: async (el) => {
+    const st = store(), mode = (document.querySelector('input[name="fs_mode"]:checked') || {}).value || 'future', from = $('fs_from') ? $('fs_from').value : '';
+    if (mode === 'future') { closeSheet(null); return toast('السابقة تبقى مثل ما هي'); }
+    if (mode === 'from' && !/^\d{4}-\d{2}-\d{2}$/.test(from)) return toast('اختر التاريخ');
+    const r = await E.applyFormatScope(st, el.dataset.id, { mode, from }); if (r && r.busy) return; if (!r || r.error) return toast('ما قدرت أطبّقها على الرسائل السابقة. جرّب مرة ثانية');
+    E.detectRecurring(st);
+    await persist('تطبيق صيغة على رسائل سابقة'); closeSheet(null); render();
+    toast([r.created ? `${r.created === 1 ? 'عملية جديدة' : r.created + ' عمليات جديدة'} من رسائل كانت معلومات` : '', r.corrected ? `تصححت ${cnt(r.corrected, 'op')}` : '', r.reviews ? `${r.reviews} للمراجعة` : ''].filter(Boolean).join('، ') || 'ما تغيّر شي', 6000);
+  },
+});
+
+
+/* ================= 1.7.0 ================= */
+const CSS170 = `
+.top .undo-pill{padding:7px 12px;font-size:13px}
+.srch{display:flex;gap:8px;align-items:center}
+.srch input{flex:1;min-width:0}
+.fbtn{position:relative;flex:none;width:42px;height:42px;border-radius:12px;border:0;background:var(--chip);color:var(--ink-2);display:flex;align-items:center;justify-content:center;cursor:pointer}
+.fbtn.on{background:var(--pri-soft);color:var(--pri)}
+.fbtn .fcnt{position:absolute;top:-4px;inset-inline-start:-4px;background:var(--pri);color:#fff;border-radius:999px;font-size:11px;min-width:18px;height:18px;line-height:18px;text-align:center;font-weight:700;padding:0 4px}
+.tseg{display:flex;background:#E9EBF1;border-radius:14px;padding:3px;gap:2px;margin-top:10px}
+.tseg button{flex:1;min-width:0;border:0;background:none;padding:8px 2px;font-size:13.5px;cursor:pointer;border-radius:11px;font-weight:600;color:var(--ink-2);white-space:nowrap}
+.tseg button.on{background:#fff;color:var(--pri);box-shadow:0 1px 3px rgba(20,22,31,.08)}
+.needs{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.needs .chip{display:inline-flex;align-items:center;gap:6px;padding:7px 12px;font-size:13px}
+.needs .chip svg.i{width:17px;height:17px}
+.needs .chip.need{background:#FFF1DE;color:#9A5A00}
+.needs .chip.need.on{background:#E8890C;color:#fff}
+.needs .chip.nsub{background:#fff;border:1px solid var(--line)}
+.needs .chip.nsub.on{background:var(--pri);border-color:var(--pri);color:#fff}
+.fca-w{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:10px}
+.fca{display:inline-flex;align-items:center;gap:4px;background:var(--pri-soft);color:var(--pri-ink);border-radius:999px;padding:3px 4px 3px 10px;font-size:12.5px;font-weight:600;max-width:100%}
+.fca>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fca button{border:0;background:rgba(255,255,255,.7);color:var(--pri-ink);border-radius:50%;width:22px;height:22px;cursor:pointer;font-size:15px;line-height:20px;flex:none}
+.fca-all{font-size:12.5px;margin-inline-start:4px}
+.cntline{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:0 2px 6px}
+.cntline .selk{font-size:13px}
+.pamt{display:flex;flex-direction:column;align-items:flex-end;line-height:1.2}
+.pamt .of{font-size:11px;color:var(--ink-3);font-weight:500}
+.b.grp{background:#EAF6EE;color:#1F7A45}
+.b.city{background:#EAF1FF;color:#2F55B0}
+.b.w.city{background:#FFF1DE;color:#9A5A00}
+.fxsec{border-top:1px solid var(--line);padding-top:10px;margin-top:12px}
+.fxh{font-weight:700;font-size:14px;margin-bottom:8px}
+.chipw{display:flex;flex-wrap:wrap;gap:6px}
+.chipw .chip{padding:7px 12px;font-size:13px}
+.txblock.sug{border:1px dashed var(--pri);background:var(--pri-soft)}
+.card.undef .row{display:flex;align-items:center;gap:10px}
+.defrow .defb{display:flex;gap:6px;flex:none}
+.defrow .defb .btn{padding:7px 10px;font-size:13px}
+#txlist .tx{-webkit-touch-callout:none;-webkit-user-select:none;user-select:none}
+.sheet{overscroll-behavior:contain}
+.sheet.drag{transition:none!important}
+.sheet.snap{transition:transform .22s ease-out}
+.sheet.swipe{transition:transform .18s ease-out,opacity .18s ease-out}
+body.lock170{position:fixed;left:0;right:0;overflow:hidden}
+#main.sw170{transition:none}
+#main.sw170b{transition:transform .22s ease-out}
+.txpos{text-align:center;color:var(--ink-3);font-weight:600;font-size:13.5px}
+.hero .tools button.txtb{width:auto;border-radius:999px;padding:0 12px;font-size:13px;font-weight:600}
+.empty-day{padding:10px 0;text-align:center}
+.grid3c{display:grid;grid-template-columns:1fr;gap:0 10px}
+@media (min-width:520px){.grid3c{grid-template-columns:repeat(3,1fr)}}
+/* 1.7.1: اسم طويل بدون مسافات (محل أو كلمة في رسالة) ما يطلّع الصفحة عن عرضها */
+.rv .rvh>b{min-width:0;overflow-wrap:anywhere}
+.rv .small,.banner .small{overflow-wrap:anywhere}
+.it .m .t{overflow-wrap:anywhere}
+#sheet h3{overflow-wrap:anywhere;min-width:0}
+#sheet h3 .close{flex:none}
+.tok{max-width:100%;overflow-wrap:anywhere;white-space:normal;text-align:start}
+.fchip .v{overflow-wrap:anywhere}
+`;
+try { document.head.insertAdjacentHTML('beforeend', `<style id="css170">${CSS170}</style>`); } catch (e) { /* بدون DOM */ }
+
+// «تراجع» و«إعادة» كلمات بدل السهم، وكلها تسألك قبل
+try {
+  const ub = $('undoBtn');
+  if (ub) { ub.className = 'pill undo-pill hide'; ub.removeAttribute('style'); ub.textContent = 'تراجع'; ub.setAttribute('aria-label', 'تراجع'); ub.title = 'تراجع';
+    if (!$('redoBtn')) ub.insertAdjacentHTML('afterend', '<button class="pill undo-pill hide" id="redoBtn" data-action="redo" aria-label="إعادة" title="إعادة">إعادة</button>'); }
+} catch (e) { /* بدون DOM */ }
+
+// موضع العملية في القائمة اللي فتحتها منها: «3 من 20»
+function txNavText(id) { const N = S.txNav; if (!N || N.ids.length < 2) return ''; const i = N.ids.indexOf(id); return i < 0 ? '' : `${i + 1} من ${N.ids.length}`; }
+function captureTxNav(el, id) {
+  const scope = el && el.closest && el.closest('#sheet') ? $('sheet') : $('main');
+  const ids = []; if (scope) scope.querySelectorAll('[data-action="openTx"][data-id],[data-action="newOpen"][data-id]').forEach(x => { if (!ids.includes(x.dataset.id)) ids.push(x.dataset.id); });
+  S.txNav = ids.length > 1 && ids.includes(id) ? { ids } : null;
+}
+// الانتقال للعملية اللي بعدها أو قبلها (dir: +1 تحت، -1 فوق). العملية الجديدة: بدون ما تنعلّم «راجعتها»
+async function txNavGo(dir) {
+  const st = store();
+  if (S.flow && S.sheetTxId === S.flow.ids[S.flow.i]) {
+    const F = S.flow; let i = F.i + dir; while (i >= 0 && i < F.ids.length && !st.get('transactions', F.ids[i])) i += dir;
+    if (i < 0 || i >= F.ids.length) return false;
+    if (!await itemsLeaveOk()) return null;
+    S.items = null; F.i = i; sheetTx(F.ids[i]); return true;
+  }
+  const N = S.txNav; if (!N || !S.sheetTxId || !N.ids.includes(S.sheetTxId)) return null; // ما انفتحت من قائمة: ما فيه تنقل
+  let i = N.ids.indexOf(S.sheetTxId) + dir; while (i >= 0 && i < N.ids.length && !st.get('transactions', N.ids[i])) i += dir;
+  if (i < 0 || i >= N.ids.length) return false;
+  if (!await itemsLeaveOk()) return null;
+  S.items = null; sheetTx(N.ids[i]); return true;
+}
+
+// صرفياتك: السحب يمين/يسار يتنقل بين الأيام (وبين الأشهر في «سنوي»)، ويعبر للأسبوع أو الدورة أو السنة المجاورة. بدون يوم مختار: الفترة كلها
+function spendStep(dir) {
+  const st = store(), today = E.todayISO(), p = S.period; if (!p) return false;
+  const sel = S.selDay;
+  if (!sel) {
+    const np = E.shiftPeriod(st, p, dir); if (!np || np.start > today) return false;
+    S.period = np; return true;
+  }
+  if (p.kind === 'year') { // الأشهر
+    let [y, m] = sel.split('-').map(Number); m += dir; if (m > 12) { m = 1; y++; } if (m < 1) { m = 12; y--; }
+    const key = `${y}-${String(m).padStart(2, '0')}`;
+    if (key > today.slice(0, 7)) return false;
+    if (String(y) !== p.start.slice(0, 4)) { const np = E.shiftPeriod(st, p, dir); if (!np) return false; S.period = np; }
+    S.selDay = key; return true;
+  }
+  const d = E.addDays(sel, dir); if (d > today) return false;
+  if (d < p.start || d > p.end) { const np = E.shiftPeriod(st, p, dir); if (!np || np.start > today) return false; S.period = np; }
+  S.selDay = d; return true;
+}
+
+/* ---------- اللمس: قفل الخلفية، سحب النافذة لتحت، التنقل بين العمليات، صرفياتك، الضغط المطوّل للتحديد ---------- */
+const G = { t: null };
+function topSheetEl() { const s2 = document.querySelector('#sheet2 .sheet'); return s2 || document.querySelector('#sheet .sheet'); }
+function hScrollable(el, stop) { // عنصر يتحرك أفقيًا بنفسه: السحب فيه ما يتنقل
+  for (let x = el; x && x !== stop && x.nodeType === 1; x = x.parentElement) {
+    if (/^(INPUT|TEXTAREA|SELECT)$/.test(x.tagName)) return true;
+    if (x.scrollWidth > x.clientWidth + 2) { const ov = getComputedStyle(x).overflowX; if (ov === 'auto' || ov === 'scroll') return true; }
+  }
+  return false;
+}
+function lockBody(on) {
+  const b = document.body;
+  if (on && !b.classList.contains('lock170')) { G.scrollY = window.scrollY || 0; b.style.top = `-${G.scrollY}px`; b.classList.add('lock170'); }
+  else if (!on && b.classList.contains('lock170')) { b.classList.remove('lock170'); b.style.top = ''; window.scrollTo(0, G.scrollY || 0); }
+}
+try {
+  const obs = new MutationObserver(() => lockBody(!!($('sheet').innerHTML || $('sheet2').innerHTML)));
+  ['sheet', 'sheet2'].forEach(id => { const el = $(id); if (el) obs.observe(el, { childList: true }); });
+} catch (e) { /* بدون DOM */ }
+function closeTopSheet() {
+  const sh = topSheetEl(); if (!sh) return;
+  const x = sh.querySelector('h3 .close'); // نفس طريق ✕ (يسألك عن اللي ما انحفظ)
+  if (x) x.click(); else if (sh.closest('#sheet2')) { if (S.pickResolve) finishPick(null); else if (S.cityResolve) finishCity(null); else if (S.groupResolve) finishGroups(null); else if (S.rateResolve) finishRate(null); } else closeSheet(null);
+}
+document.addEventListener('touchstart', (ev) => {
+  if (!S.store || ev.touches.length !== 1) { G.t = null; return; }
+  const tp = ev.touches[0], target = ev.target, sh = topSheetEl();
+  const g = G.t = { x0: tp.clientX, y0: tp.clientY, t0: Date.now(), axis: null, dx: 0, dy: 0, target };
+  if (sh) {
+    if (!sh.contains(target)) { g.kind = 'bg'; return; }
+    g.kind = 'sheet'; g.sheet = sh; g.atTop = sh.scrollTop <= 0; g.hOk = !sh.closest('#sheet2') && S.sheetKind === 'tx' && !hScrollable(target, sh);
+    return;
+  }
+  if (target.closest('.nav') || target.closest('.fab') || target.closest('#toast')) { g.kind = null; return; }
+  if (S.view === 'spend' && !hScrollable(target, document.body)) g.kind = 'spend';
+  // الضغط المطوّل على عملية = يبدأ التحديد ويحددها
+  const row = S.view === 'txs' && !S.sel ? target.closest('#txlist .tx[data-id]') : null;
+  if (row) g.lp = setTimeout(() => { if (G.t !== g || g.axis) return; S.sel = new Set([row.dataset.id]); S.lpSuppress = Date.now() + 900; try { if (navigator.vibrate) navigator.vibrate(12); } catch (e) { /* */ } render(); toast('اختر العمليات، والأوامر تحت'); }, 550);
+}, { passive: true });
+document.addEventListener('touchmove', (ev) => {
+  const g = G.t; if (!g || ev.touches.length !== 1) return;
+  const tp = ev.touches[0]; g.dx = tp.clientX - g.x0; g.dy = tp.clientY - g.y0;
+  if (!g.axis && (Math.abs(g.dx) > 9 || Math.abs(g.dy) > 9)) {
+    g.axis = Math.abs(g.dx) > Math.abs(g.dy) * 1.4 ? 'h' : 'v';
+    if (g.lp) { clearTimeout(g.lp); g.lp = null; }
+    if (g.kind === 'sheet' && g.axis === 'v' && g.dy > 0 && g.atTop && g.sheet.scrollTop <= 0) g.pull = true;
+    if (g.kind === 'sheet' && g.axis === 'h' && g.hOk) g.swipe = true;
+    if (g.kind === 'spend' && g.axis === 'h') g.spend = true;
+  }
+  if (g.kind === 'bg') { ev.preventDefault(); return; } // الخلفية ما تتحرك
+  if (g.pull) { ev.preventDefault(); const d = Math.max(0, g.dy); g.sheet.classList.add('drag'); g.sheet.style.transform = `translateY(${d}px)`; return; }
+  if (g.swipe) { ev.preventDefault(); g.sheet.classList.add('drag'); g.sheet.style.transform = `translateX(${g.dx * 0.35}px)`; g.sheet.style.opacity = String(1 - Math.min(0.35, Math.abs(g.dx) / 900)); return; }
+  if (g.spend) { ev.preventDefault(); const m = $('main'); m.classList.add('sw170'); m.classList.remove('sw170b'); m.style.transform = `translateX(${g.dx}px)`; }
+}, { passive: false });
+function endGesture() {
+  const g = G.t; G.t = null; if (!g) return;
+  if (g.lp) { clearTimeout(g.lp); g.lp = null; }
+  const dt = Math.max(1, Date.now() - g.t0), fast = (Math.abs(g.axis === 'v' ? g.dy : g.dx) / dt) > 0.6;
+  if (g.pull) {
+    const sh = g.sheet, h = sh.getBoundingClientRect().height, go1 = g.dy > h / 4 || (fast && g.dy > 40);
+    sh.classList.remove('drag'); sh.classList.add('snap'); sh.style.transform = '';
+    setTimeout(() => sh.classList.remove('snap'), 260);
+    if (go1) closeTopSheet();
+    return;
+  }
+  if (g.swipe) {
+    const sh = g.sheet; sh.classList.remove('drag'); sh.classList.add('swipe'); sh.style.transform = ''; sh.style.opacity = '';
+    setTimeout(() => sh.classList.remove('swipe'), 220);
+    if (Math.abs(g.dx) > 70 || (fast && Math.abs(g.dx) > 40)) txNavGo(g.dx > 0 ? 1 : -1).then(ok => { if (ok === false) toast(g.dx > 0 ? 'هذي آخر وحدة' : 'هذي أول وحدة', 1400); });
+    return;
+  }
+  if (g.spend) {
+    const m = $('main'), w = window.innerWidth || 360, go1 = Math.abs(g.dx) > w / 2 || (fast && Math.abs(g.dx) > 50);
+    m.classList.remove('sw170'); m.classList.add('sw170b'); m.style.transform = '';
+    setTimeout(() => m.classList.remove('sw170b'), 260);
+    if (go1) { if (spendStep(g.dx > 0 ? 1 : -1)) render(); else toast(g.dx > 0 ? 'ما فيه أيام جاية' : 'ما فيه قبلها', 1400); }
+  }
+}
+document.addEventListener('touchend', endGesture, { passive: true });
+document.addEventListener('touchcancel', () => { const g = G.t; if (g && g.sheet) { g.sheet.classList.remove('drag'); g.sheet.style.transform = ''; g.sheet.style.opacity = ''; } const m = $('main'); if (m) m.style.transform = ''; if (g && g.lp) clearTimeout(g.lp); G.t = null; }, { passive: true });
+// الكمبيوتر: زر الفأرة اليمين على عملية = تحديد
+document.addEventListener('contextmenu', (ev) => {
+  if (!S.store || S.view !== 'txs' || S.sel) return;
+  const row = ev.target.closest('#txlist .tx[data-id]'); if (!row) return;
+  ev.preventDefault(); S.sel = new Set([row.dataset.id]); render();
+});
+
+/* ---------- الالتزامات الدائمة: الإعدادات ---------- */
+function commitSettingsCard() {
+  const c = E.commitCfg(store());
+  return `<div class="card"><h2>الالتزامات الدائمة</h2><p class="small muted">متى يطلع تنبيه «تغيّر السعر» (لكل الالتزامات، وتقدر تخصص التزام لحاله من صفحته)، وكم دفعة أو دورة يدخل في المتوسط.</p>
+    <div class="grid3c"><div><label class="f">حد التنبيه</label><select id="cc_mode"><option value="pct" ${c.alertMode === 'pct' ? 'selected' : ''}>بالنسبة (%)</option><option value="sar" ${c.alertMode === 'sar' ? 'selected' : ''}>بالريال</option></select></div>
+    <div><label class="f">قيمة الحد</label><input type="text" inputmode="decimal" id="cc_val" value="${c.alertValue}"></div>
+    <div><label class="f">المتوسط يُحسب من آخر</label><input type="number" id="cc_n" min="1" max="24" value="${c.n}"></div></div>
+    <p class="small muted">التنبيه يطلع لما آخر مبلغ يختلف عن المعتمد بأكثر من الحد. المتوسط: آخر ${c.n} ${c.n === 1 ? 'دفعة' : 'دفعات'} للالتزام الشهري اللي قيمته متغيرة، وآخر ${c.n} ${c.n === 1 ? 'دورة كاملة' : 'دورات كاملة'} للي دفعاته متغيرة. تنحفظ مع «حفظ الإعدادات» تحت.</p></div>`;
+}
+
+Object.assign(A, {
+  undo: async () => {
+    const st = store(), u = st.undoStack[st.undoStack.length - 1]; if (!u) return toast('ما فيه خطوة للتراجع');
+    if (!await confirmBox('تراجع', `تتراجع عن: <b>${esc(u.label)}</b>؟`, 'تراجع')) return;
+    const s2 = st.undo(); if (!s2) return; await persist(null, { noStep: true }); closeSheet(); render(); toast('تراجعت عن: ' + s2.label);
+  },
+  redo: async () => {
+    const st = store(), r = st.redoStack[st.redoStack.length - 1]; if (!r) return toast('ما فيه خطوة للإعادة');
+    if (!await confirmBox('إعادة', `تعيد: <b>${esc(r.label)}</b>؟`, 'إعادة')) return;
+    const s2 = st.redo(); if (!s2) return; await persist(null, { noStep: true }); closeSheet(); render(); toast('أعدت: ' + s2.label);
+  },
+  openTx: async (el) => {
+    if (S.lpSuppress && Date.now() < S.lpSuppress) return;
+    if (S.items && S.items.txId !== el.dataset.id && !await itemsLeaveOk()) return;
+    captureTxNav(el, el.dataset.id); sheetTx(el.dataset.id);
+  },
+  newOpen: (el) => { captureTxNav(el, el.dataset.id); sheetTx(el.dataset.id); },
+  selStart: () => { S.sel = new Set(); render(); },
+  toggleSel: (el) => { if (S.lpSuppress && Date.now() < S.lpSuppress) return; const id = el.dataset.id; if (S.sel.has(id)) S.sel.delete(id); else S.sel.add(id); refreshSel(); },
+  // الرسوم
+  feeAccept: async (el) => { const st = store(), t = st.get('transactions', el.dataset.id), c = t && E.feeSuggestion(st, t); if (!c) return; E.setCategory(st, t.id, c, null, 'this'); await persist('تصنيف رسوم'); render(); afterTx(t.id); toast('تصنفت «' + E.catName(st, c) + '»'); },
+  // الالتزامات الدائمة
+  commitOpen: (el) => { S.cmSplit = null; sheetCommit(el.dataset.k); },
+  commitPendGo: () => { closeSheet(null); go('commitments'); },
+  // سؤال الاعتماد: «نعم اعتمده» / «مبلغ ثاني» / «قيمته متغيرة»
+  commitApprove: async (el) => {
+    const k = el.dataset.k, v = el.dataset.v, r = E.commitApprove(store(), k, v, v === 'amount' ? ($('cm_amt') && $('cm_amt').value) : null);
+    if (!r) return; if (r.error) return toast('اكتب المبلغ');
+    await persist(v === 'variable' ? 'التزام قيمته متغيرة' : 'اعتماد مبلغ التزام'); render();
+    if ($('sheet').innerHTML) sheetCommit(k);
+    toast(v === 'variable' ? 'صار التزام قيمته متغيرة (يعرض المتوسط)' : `انعتمد ${fmt(r.amount)}، وصار ينحسب التزام`);
+  },
+  commitOther: (el) => { sheetCommit(el.dataset.k); setTimeout(() => { const i = $('cm_amt'); if (i) { i.focus(); i.scrollIntoView({ block: 'center' }); } }, 60); },
+  commitDecide: async (el) => {
+    const k = el.dataset.k, v = el.dataset.v;
+    if (v === 'fixed' || (v === 'variable' && el.classList.contains('on'))) { const c0 = E.commitmentOf(store(), k, today0()); if (c0 && c0.status === 'approved' && c0.value === v) return; } // هو كذا أصلًا
+    const r = E.commitPriceDecision(store(), k, v); if (!r) return;
+    await persist(v === 'update' ? 'تحديث سعر التزام' : v === 'variable' ? 'التزام قيمته متغيرة' : v === 'exception' ? 'استثناء سعر التزام' : 'التزام بمبلغ ثابت'); render();
+    if ($('sheet').innerHTML) sheetCommit(k);
+    toast(v === 'update' ? `صار المعتمد ${fmt(r.amount)}` : v === 'variable' ? 'صارت قيمته متغيرة: يعرض المتوسط وما يسألك عن السعر' : v === 'exception' ? 'استثناء: المعتمد على حاله، والدفعة محسوبة كاملة' : `صارت قيمته ثابتة (المعتمد ${fmt(r.amount)})`);
+  },
+  commitPay: async (el) => {
+    const k = el.dataset.k, c0 = E.commitmentOf(store(), k, today0()); if (c0 && (c0.pay === 'variable' ? 'variable' : 'monthly') === el.dataset.v) return; // هو كذا أصلًا
+    const r = E.setCommitPay(store(), k, el.dataset.v); if (!r) return;
+    await persist('نظام دفعات التزام'); render(); sheetCommit(k);
+    toast(r.pay === 'variable' ? 'دفعاته متغيرة: ينحسب بمتوسط الدورة' : 'نظامه شهري: دفعة كل دورة');
+  },
+  commitAmount: async (el) => { const r = E.commitPriceDecision(store(), el.dataset.k, 'amount', $('cm_amt') && $('cm_amt').value); if (!r || r.error) return toast('المبلغ غير صحيح'); await persist('مبلغ التزام'); render(); sheetCommit(el.dataset.k); toast('انحفظ'); },
+  commitAlertSave: async (el) => {
+    const k = el.dataset.k, mode = $('cm_almode').value, r = E.setCommitAlert(store(), k, mode === 'global' ? null : { mode, value: $('cm_alval').value });
+    if (!r) return; if (r.error) return toast(mode === 'pct' ? 'اكتب نسبة من 0.5 إلى 100' : 'اكتب مبلغ من 1 ريال');
+    await persist('حد تنبيه التزام'); render(); sheetCommit(k); toast(mode === 'global' ? 'يمشي على الحد العام' : 'انحفظ الحد الخاص');
+  },
+  // أكثر من دفعة في نفس الدورة: متغير / تعثر / مقدم / استثناء
+  commitMulti: async (el) => {
+    const k = el.dataset.k, v = el.dataset.v, r = E.commitMultiDecision(store(), k, v);
+    if (!r) return; if (r.error) return toast('ما لقيت دورة قبلها أو بعدها');
+    await persist(v === 'variable' ? 'التزام دفعاته متغيرة' : v === 'arrears' ? 'دفعة متعثرة من دورة سابقة' : v === 'advance' ? 'دفعة مقدمة لدورة جاية' : 'استثناء دفعات التزام'); render();
+    if ($('sheet').innerHTML) sheetCommit(k);
+    toast(v === 'variable' ? 'صارت دفعاته متغيرة' : v === 'arrears' ? 'أول دفعة انحسبت للدورة اللي قبل. تقدر تعدّل تقسيمها من صفحة الالتزام' : v === 'advance' ? 'آخر دفعة انحسبت للدورة الجاية. تقدر تعدّل تقسيمها من صفحة الالتزام' : 'استثناء لهالدورة بس', 6000);
+  },
+  // تقسيم دفعة: تعثر (حق شهرين) أو مقدم. الخانات تبدأ بالتساوي على دورتين
+  commitSplitOpen: (el) => {
+    const st = store(), k = el.dataset.k, id = el.dataset.id, kind = el.dataset.kind, L = E.commitLedger(st, k, today0()), x = L.byTx.get(id); if (!x) return;
+    const cur = x.split && x.mark && x.mark.kind === kind ? x.split.map(p => ({ k: p.k, amount: p.amount })) : null;
+    let rows = cur || E.defaultSplit(x.amount, kind, 2);
+    if (cur && rows.length === 1) rows = rows.concat({ k: 0, amount: 0 }).sort((a, b) => a.k - b.k); // دفعة منقولة كلها: نعرض دورتها كمان عشان تقدر تقسمها
+    S.cmSplit = { key: k, txId: id, kind, rows }; sheetCommitSplit();
+  },
+  cmSplitCalc: () => {
+    const X = S.cmSplit; if (!X) return;
+    document.querySelectorAll('.cmsp').forEach(i => { X.rows[+i.dataset.i].amount = i.value; });
+    const L = E.commitLedger(store(), X.key, today0()), x = L.byTx.get(X.txId), tot = E.round2(X.rows.reduce((a, r) => a + (Number(E.parseNum(r.amount)) || 0), 0));
+    if ($('cmsp_sum') && x) $('cmsp_sum').innerHTML = splitSumTxt(tot, x.amount);
+  },
+  commitSplitAdd: () => { const X = S.cmSplit; if (!X) return; const x = E.commitLedger(store(), X.key, today0()).byTx.get(X.txId); if (!x) return; X.rows = E.defaultSplit(x.amount, X.kind, X.rows.length + 1); sheetCommitSplit(); },
+  commitSplitLess: () => { const X = S.cmSplit; if (!X || X.rows.length <= 2) return; const x = E.commitLedger(store(), X.key, today0()).byTx.get(X.txId); if (!x) return; X.rows = E.defaultSplit(x.amount, X.kind, X.rows.length - 1); sheetCommitSplit(); },
+  commitSplitSave: async () => {
+    const X = S.cmSplit; if (!X) return;
+    document.querySelectorAll('.cmsp').forEach(i => { X.rows[+i.dataset.i].amount = i.value; });
+    const r = E.setCommitSplit(store(), X.key, X.txId, X.kind, X.rows);
+    if (!r) return; if (r.error === 'sum') return toast(`مجموع التقسيم ${fmt(r.total)} لازم يساوي مبلغ الدفعة ${fmt(r.amount)}`, 5000); if (r.error) return toast('التقسيم غير صحيح');
+    const k = X.key; S.cmSplit = null;
+    await persist(X.kind === 'arrears' ? 'تقسيم دفعة متعثرة' : 'تقسيم دفعة مقدمة'); render(); sheetCommit(k); toast('انحفظ التقسيم في سجل الالتزام');
+  },
+  commitMarkClear: async (el) => { const k = el.dataset.k; if (!E.clearCommitMark(store(), k, el.dataset.id)) return; await persist('إلغاء علامة دفعة'); render(); sheetCommit(k); toast('انلغت العلامة'); },
+  commitOff: async (el) => {
+    const st = store(), k = el.dataset.k, i = k.indexOf(':'), typ = k.slice(0, i), id = k.slice(i + 1), n = typ === 'merchant' ? 'merchants' : 'beneficiaries', o = st.get(n, id); if (!o) return;
+    if (!await confirmBox('مو التزام دائم', `عمليات «${esc(typ === 'merchant' ? E.merchantName(o) : o.name)}» ما تنحسب «التزام دائم» (حتى لو تصنيفها التزام). العملية نفسها تقدر تغيّرها لها.`, 'تمام')) return;
+    o.isCommitment = false; st.put(n, o); st.touch(); await persist('مو التزام دائم'); closeSheet(null); render();
+  },
+  // «غير محدد» ← «حدّدها»
+  defineOpen: (el) => { const [a, b] = String(el.dataset.pk || '').split('|'); const per = a && b ? { start: a, end: b, kind: 'custom' } : S.period; sheetDefine(el.dataset.f, per); },
+  defineSet: async (el) => {
+    const st = store(), X = S.defineCtx, D = X && DEFINE_F[X.field], c = st.get('categories', el.dataset.cat); if (!D || !c) return;
+    const v = el.dataset.v === 'true' ? true : el.dataset.v === 'false' ? false : el.dataset.v;
+    c[D.key] = v; st.put('categories', c); st.touch(); if (X.field === 'commit') E.syncCommitPlans(st);
+    await persist(`${D.title}: ${c.name}`); render(); sheetDefine(X.field, X.per);
+  },
+  needGo: (el) => { closeSheet(null); go('txs', { filters: { kind: 'all', need: el.dataset.k, allTime: true } }); },
+  pickFollow: () => finishPick({ follow: true }),
 });
 
 boot();

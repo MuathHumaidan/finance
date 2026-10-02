@@ -166,8 +166,9 @@ function detectRecurring(store, today) {
       if (last) { r.lastDate = txDate(last); r.nextDate = addCadence(r.lastDate, r.cadence, 1, r.anchorDay); r.evidenceTxIds = (r.evidenceTxIds || []).concat(last.id).slice(-6); r.updatedAt = now; store.put('recurring', r); updated++; }
     }
   });
-  if (created || updated) store.touch();
-  return { created, updated };
+  const plans = syncCommitPlans(store); // 1.7.1: خطة كل جهة التزام دائم جديدة (تنتظر جوابك، أو معتمدة إذا آخر 3 دفعات متساوية)
+  if (created || updated || plans) store.touch();
+  return { created, updated, plans };
 }
 function subjectName(store, r) {
   const o = r.subjectType === 'merchant' ? store.get('merchants', r.subjectId) : store.get('beneficiaries', r.subjectId);
@@ -181,7 +182,13 @@ function recurringOfTx(store, tx) {
 function confirmRecurring(store, id, opts) {
   const r = store.get('recurring', id); if (!r) return null; opts = opts || {};
   r.status = 'confirmed'; r.confirmedAt = new Date().toISOString();
-  if (opts.isCommitment !== undefined) r.isCommitment = !!opts.isCommitment;
+  // 1.7.0: «التزام دائم» ينحفظ على الجهة نفسها (التاجر أو المستفيد)، فيشمل كل عملياتها حتى لو تغيّر المبلغ.
+  // «نعم» = التزام دائم. «لا» تنحفظ بس إذا قلتها صراحة (مربع «التزام دائم» في نافذة المتكرر)، و«متكرر بس» ما يغيّر شي
+  if (opts.isCommitment === true || (opts.isCommitment === false && opts.explicit)) {
+    r.isCommitment = !!opts.isCommitment;
+    const o = r.subjectType === 'merchant' ? store.get('merchants', r.subjectId) : store.get('beneficiaries', r.subjectId);
+    if (o && o.isCommitment !== r.isCommitment) { o.isCommitment = r.isCommitment; store.put(r.subjectType === 'merchant' ? 'merchants' : 'beneficiaries', o); }
+  }
   if (opts.reserve !== undefined) r.reserve = !!opts.reserve;
   if (opts.cadence && CAD[opts.cadence] && opts.cadence !== r.cadence) { r.cadence = opts.cadence; r.userEdited = true; }
   if (opts.expectedAmount != null && opts.expectedAmount > 0 && round2(opts.expectedAmount) !== r.expectedAmount) { r.expectedAmount = round2(opts.expectedAmount); r.userEdited = true; }
@@ -192,7 +199,9 @@ function confirmRecurring(store, id, opts) {
 function recEvidence(store, r) {
   const groups = store.cached('recGroups', () => recurringCandidates(store)), list = groups.get(recKey(r)) || [];
   const lo = Number(r.amountMin || r.expectedAmount || 0) * 0.7, hi = Number(r.amountMax || r.expectedAmount || 0) * 1.3;
-  return list.filter(t => t.principalAmount >= lo - 0.004 && t.principalAmount <= hi + 0.004);
+  // 1.7.1: دفعة عليها قرارك في الالتزام (استثناء، تعثر، مقدم) هي دفعة المتكرر حتى لو مبلغها بعيد عن المعتاد
+  const plan = (store.settings.commitPlans || {})[r.subjectType + ':' + r.subjectId], marks = (plan && plan.marks) || {};
+  return list.filter(t => (t.principalAmount >= lo - 0.004 && t.principalAmount <= hi + 0.004) || !!marks[t.id]);
 }
 function liveLastDate(store, r) { if (!store) return r.lastDate; const ev = recEvidence(store, r); return ev.length ? txDate(ev[ev.length - 1]) : r.lastDate; }
 function dismissRecurring(store, id) { const r = store.get('recurring', id); if (!r) return null; r.status = 'dismissed'; r.dismissedAt = new Date().toISOString(); store.put('recurring', r); store.touch(); return r; }
@@ -204,19 +213,361 @@ function nextDue(r, today, store) {
   for (let k = 1; k < 800; k++) { const d = addCadence(last, r.cadence, k, ad); if (d >= addDays(today, -7)) return d; }
   return null;
 }
-// الالتزامات القادمة: المؤكدة والتزام فقط (المقترح ما يدخل)، من «from» إلى «to». المتأخر لين 7 أيام ينحسب مرة وحدة
+// 1.7.0: المتكرر المؤكد «التزام دائم» إذا آخر دفعة منه التزام دائم (بنفس سلسلة الأولوية: العملية ← الجهة ← الفرعي ← التصنيف)
+function recIsCommitment(store, r) {
+  const ev = recEvidence(store, r), last = ev[ev.length - 1] || store.get('transactions', (r.evidenceTxIds || []).slice(-1)[0]);
+  if (last) return isKnownCommitment(store, last);
+  const o = r.subjectType === 'merchant' ? store.get('merchants', r.subjectId) : store.get('beneficiaries', r.subjectId);
+  return o && typeof o.isCommitment === 'boolean' ? o.isCommitment : !!r.isCommitment;
+}
+// معلّم «التزام دائم» (حتى لو مبلغه ينتظر اعتمادك): لعلامة وخانة «التزام دائم» في صفحة المتكرر
+function recIsFlagged(store, r) {
+  const ev = recEvidence(store, r), last = ev[ev.length - 1] || store.get('transactions', (r.evidenceTxIds || []).slice(-1)[0]);
+  if (last) return E.isCommitFlagged(store, last);
+  const o = r.subjectType === 'merchant' ? store.get('merchants', r.subjectId) : store.get('beneficiaries', r.subjectId);
+  return o && typeof o.isCommitment === 'boolean' ? o.isCommitment : !!r.isCommitment;
+}
+// الالتزامات القادمة: المؤكدة والتزام دائم فقط (المقترح ما يدخل)، من «from» إلى «to». المتأخر لين 7 أيام ينحسب مرة وحدة
 function upcomingCommitments(store, from, to, today) {
   today = today || todayISO(); const out = [];
-  store.all('recurring').filter(r => r.status === 'confirmed' && r.isCommitment && r.lastDate && r.expectedAmount > 0).forEach(r => {
+  store.all('recurring').filter(r => r.status === 'confirmed' && r.lastDate && r.expectedAmount > 0 && recIsCommitment(store, r)).forEach(r => {
     let overdueTaken = false; const last = liveLastDate(store, r), ad = r.cadence === 'weekly' ? null : r.anchorDay;
+    // 1.7.1: دورة دفعتها مقدم («دفعة مقدمة») تعتبر مدفوعة، فما تنذكر في القادمة
+    const cm = commitmentOf(store, r.subjectType + ':' + r.subjectId, today), cov = cm ? cm.covered : null, C = cov && cov.size ? commitCycles(store, today) : null;
     for (let k = 1; k < 800; k++) {
       const d = addCadence(last, r.cadence, k, ad);
       if (d > to) break;
+      if (C) { const ci = cycleIdx(C, d); if (ci >= 0 && cov.has(C.list[ci].start)) continue; }
       if (d < from) { if (!overdueTaken && d >= addDays(today, -7) && from <= today) { out.push({ recurringId: r.id, rec: r, name: subjectName(store, r), date: d, amount: r.expectedAmount, overdue: true }); overdueTaken = true; } continue; }
       out.push({ recurringId: r.id, rec: r, name: subjectName(store, r), date: d, amount: r.expectedAmount, overdue: false });
     }
   });
   return out.sort((a, b) => a.date.localeCompare(b.date));
+}
+
+/* ---------- 2ب. الالتزامات الدائمة لكل جهة (1.7.1) ----------
+   الجهة = التاجر أو المستفيد اللي عملياته معلّمة «التزام دائم». لكل جهة خطة في settings.commitPlans[key]:
+   {v: 2, status: pending|approved, value: fixed|variable (القيمة), pay: monthly|variable (نظام الدفعات), amount (المبلغ المعتمد),
+    auto, at, ackTxId, alert: {mode, value}|null (حد تنبيه خاص), marks: {txId: {kind: exception|arrears|advance, split: [{k, amount}]}},
+    multi: {بداية الدورة: {kind: 'exception', n}}}.
+   سؤال الاعتماد: أول ما تصير الجهة التزام يقترح آخر فاتورة وتجاوب: «نعم اعتمده» / «مبلغ ثاني» / «قيمته متغيرة».
+     لين تجاوب (pending) ما تنحسب التزام، ومبالغها مع «غير محدد». آخر 3 دفعات متساوية بالضبط = يعتمد بدون سؤال.
+   وش ينعرض: شهري + ثابت = المعتمد · شهري + متغير = متوسط آخر N دفعات · دفعات متغيرة + ثابت = المعتمد لكل دفعة ومتوسط الدورة
+     بعد أول دورة كاملة · دفعات متغيرة + قيمة متغيرة = متوسط آخر N دورات كاملة (ما يطلع قبل اكتمال دورة).
+   مبلغ الدفعة = اللي اندفع كامل (مع رسومه). الدورة = دورة الراتب (أو الشهر في وضع الشهر الميلادي).
+   تنبيه «تغيّر السعر» (للقيمة الثابتة): آخر دفعة تختلف عن المعتمد بأكثر من الحد (نسبة أو ريال، عام أو خاص بالجهة).
+   دفعتين أو أكثر في نفس الدورة (نظام شهري) = علامة تنبيه، وتختار: متغير / تعثر من شهر سابق / دفعة مقدمة / استثناء.
+   التعثر والمقدم يقسمون الدفعة على دورات في «سجل الالتزام» بس: الصرف الفعلي يبقى بتاريخ الدفع. */
+const COMMIT_RANGE = { pct: [0.5, 100], sar: [1, 100000], n: [1, 24] };
+const ALERT_DEF = { pct: 5, sar: 10 };
+const inRange = (v, r) => v !== null && isFinite(v) && v >= r[0] && v <= r[1];
+function alertNorm(mode, value, fallback) {
+  const m = mode === 'sar' ? 'sar' : 'pct', v = Number(value);
+  return { mode: m, value: inRange(v, COMMIT_RANGE[m]) ? round2(v) : (fallback != null ? fallback : ALERT_DEF[m]) };
+}
+function commitCfg(store) {
+  const c = store.settings.commitCfg || {};
+  const al = alertNorm(c.alertMode, c.alertValue != null ? c.alertValue : (c.alertMode === 'sar' ? null : c.pct));
+  const n = Number(c.n != null ? c.n : c.months);
+  return { alertMode: al.mode, alertValue: al.value, n: inRange(n, COMMIT_RANGE.n) ? Math.round(n) : 3 };
+}
+// d = {alertMode, alertValue, n}. الرقم الغلط ما ينقبل: يبقى السابق (ولو تغيّر النوع والرقم غلط: الافتراضي للنوع الجديد)
+function setCommitCfg(store, d) {
+  const s = store.settings, cur = commitCfg(store), nx = Object.assign({}, cur); d = d || {};
+  const mode = d.alertMode === 'sar' || d.alertMode === 'pct' ? d.alertMode : cur.alertMode;
+  const raw = d.alertValue === undefined || d.alertValue === null || d.alertValue === '' ? null : Number(E.parseNum(d.alertValue));
+  nx.alertMode = mode;
+  nx.alertValue = raw !== null && inRange(raw, COMMIT_RANGE[mode]) ? round2(raw) : (mode === cur.alertMode ? cur.alertValue : ALERT_DEF[mode]);
+  if (d.n !== undefined && d.n !== null && d.n !== '') { const v = Number(E.parseNum(d.n)); if (inRange(v, COMMIT_RANGE.n)) nx.n = Math.round(v); }
+  s.commitCfg = nx; store.put('settings', s); store.touch(); return commitCfg(store);
+}
+const subjKey = (t) => t.merchantId ? 'merchant:' + t.merchantId : t.beneficiaryId ? 'beneficiary:' + t.beneficiaryId : null;
+// مبلغ الدفعة: اللي اندفع كامل (المبلغ ورسومه)
+const payAmt = (t) => round2((t.principalAmount || 0) + E.feeOf(t));
+function commitmentGroups(store) {
+  return store.cached('commitGroups', () => {
+    const m = new Map(), none = [];
+    store.all('transactions').forEach(t => {
+      if (isExcluded(store, t) || !E.isCommitFlagged(store, t)) return;
+      const k = subjKey(t); if (!k) { none.push(t); return; }
+      if (!m.has(k)) m.set(k, []); m.get(k).push(t);
+    });
+    m.forEach(l => l.sort((a, b) => (txDate(a) + (a.time || '')).localeCompare(txDate(b) + (b.time || ''))));
+    m.none = none;
+    return m;
+  });
+}
+function last3Equal(list) {
+  if (list.length < 3) return false;
+  const a = list.slice(-3).map(t => Math.round(payAmt(t) * 100));
+  return a[0] > 0 && a[0] === a[1] && a[1] === a[2];
+}
+const PLAN_DEF = () => ({ v: 2, status: 'pending', value: 'fixed', pay: 'monthly', amount: null, auto: false, ackTxId: null, alert: null, marks: {}, multi: {}, at: null });
+function normPlan(p) {
+  if (!p) return null;
+  if (p.v === 2) return Object.assign(PLAN_DEF(), p, { marks: Object.assign({}, p.marks || {}), multi: Object.assign({}, p.multi || {}) });
+  // خطة من 1.7.0 ما مرت على الترقية: معتمدة بمبلغها (الترقية تحولها)
+  return Object.assign(PLAN_DEF(), { v: 1, status: 'approved', value: p.mode === 'avg' ? 'variable' : 'fixed', amount: p.mode === 'avg' ? null : (p.amount != null ? p.amount : null), ackTxId: p.ackTxId || null, at: p.at || null });
+}
+// حالة كل جهة الحين. اللي تنتظر وآخر 3 دفعات لها متساوية = معتمدة تلقائيًا (حتى قبل ما تنحفظ)
+function commitStates(store) {
+  return store.cached('commitStates', () => {
+    const plans = store.settings.commitPlans || {}, m = new Map();
+    commitmentGroups(store).forEach((list, k) => {
+      let p = normPlan(plans[k]) || PLAN_DEF();
+      if (p.status !== 'approved') {
+        if (last3Equal(list)) p = Object.assign(p, { status: 'approved', value: 'fixed', amount: payAmt(list[list.length - 1]), auto: true, virtual: true });
+        else p.status = 'pending';
+      }
+      m.set(k, p);
+    });
+    return m;
+  });
+}
+function commitStateOf(store, key) { return commitStates(store).get(key) || normPlan((store.settings.commitPlans || {})[key]) || null; }
+// العملية المعلّمة «التزام دائم» تنحسب التزام؟ (جهتها معتمدة، أو ما لها جهة)
+function commitCounted(store, tx) {
+  const k = subjKey(tx); if (!k) return true;
+  const p = commitStateOf(store, k); return !!(p && p.status === 'approved');
+}
+function planRec(store, key) {
+  const st = commitStateOf(store, key) || PLAN_DEF();
+  return { v: 2, status: st.status, value: st.value, pay: st.pay, amount: st.amount, prevAmount: st.prevAmount || null, auto: !!st.auto, ackTxId: st.ackTxId || null, alert: st.alert || null,
+    marks: Object.assign({}, st.marks || {}), multi: Object.assign({}, st.multi || {}), at: st.at || null };
+}
+function putPlan(store, key, p) {
+  const s = store.settings, plans = Object.assign({}, s.commitPlans || {});
+  p.at = new Date().toISOString(); plans[key] = p; s.commitPlans = plans; store.put('settings', s);
+}
+// الجهات الجديدة تنحفظ خطتها (تنتظر أو معتمدة تلقائيًا)، واللي تنتظر وصارت آخر 3 دفعات لها متساوية تنعتمد
+function syncCommitPlans(store) {
+  const plans = store.settings.commitPlans || {}; let n = 0; const todo = [];
+  commitStates(store).forEach((st, k) => {
+    const rec = plans[k];
+    if (!rec || (rec.v === 2 && rec.status !== 'approved' && st.status === 'approved')) todo.push([k, st]);
+  });
+  todo.forEach(([k, st]) => {
+    const rec = plans[k] && plans[k].v === 2 ? Object.assign(PLAN_DEF(), plans[k]) : PLAN_DEF();
+    if (st.status === 'approved') { const list = commitmentGroups(store).get(k) || []; Object.assign(rec, { status: 'approved', value: 'fixed', amount: st.amount, auto: true, ackTxId: list.length ? list[list.length - 1].id : null }); }
+    putPlan(store, k, rec); n++;
+  });
+  return n;
+}
+/* الدورات اللي ينحسب عليها الالتزام: دورات الراتب (أو الشهور)، وقبلها 6 شهور تقريبية للتعثر القديم، وبعدها سنة للمقدم */
+function commitCycles(store, today) {
+  return store.cached('commitCycles:' + today, () => {
+    const cs = listCycles(store, addDays(today, 400)).slice().reverse();
+    if (cs.length) { let st = cs[0].start; for (let j = 0; j < 6; j++) { const ps = addCadence(st, 'monthly', -1); cs.unshift({ start: ps, end: addDays(st, -1), kind: 'cycle', approx: true }); st = ps; } }
+    const idx = new Map(); cs.forEach((c, i) => idx.set(c.start, i));
+    return { list: cs, idx };
+  });
+}
+function cycleIdx(C, date) { const l = C.list; for (let i = 0; i < l.length; i++) if (l[i].start <= date && l[i].end >= date) return i; return -1; }
+function validSplit(split, amt) {
+  if (!Array.isArray(split) || !split.length) return false;
+  const ks = new Set(); let tot = 0;
+  for (const p of split) { if (!p || !Number.isInteger(p.k) || ks.has(p.k) || !(Number(p.amount) >= 0)) return false; ks.add(p.k); tot += Number(p.amount); }
+  return Math.abs(tot - amt) <= 0.005 && split.some(p => p.amount > 0);
+}
+// تقسيم محفوظ ومبلغ الدفعة تغيّر بعده (مثلًا الكشف أضاف رسومها): يتوزع بنفس النسب بدل ما يضيع قرارك
+function fitSplit(split, amt) {
+  if (validSplit(split, amt)) return split;
+  if (!Array.isArray(split) || !split.length || !(amt > 0)) return null;
+  const ks = new Set(); let tot = 0;
+  for (const p of split) { if (!p || !Number.isInteger(p.k) || ks.has(p.k) || !(Number(p.amount) >= 0)) return null; ks.add(p.k); tot += Number(p.amount); }
+  if (!(tot > 0)) return null;
+  const out = split.map(p => ({ k: p.k, amount: round2(Number(p.amount) * amt / tot) })), big = out.reduce((a, b) => (b.amount > a.amount ? b : a), out[0]);
+  big.amount = round2(big.amount + (amt - sum(out, q => q.amount)));
+  return out;
+}
+/* سجل الالتزام: كل دفعة على دورتها. الدفعة المقسومة (تعثر أو مقدم) تتوزع على دوراتها. */
+function commitLedger(store, key, today) {
+  today = today || todayISO();
+  return store.cached('commitLedger:' + key + ':' + today, () => {
+    const list = commitmentGroups(store).get(key) || [], st = commitStateOf(store, key) || PLAN_DEF(), C = commitCycles(store, today);
+    const entries = [], byTx = new Map();
+    list.forEach(t => {
+      const d = txDate(t), i = cycleIdx(C, d), amt = payAmt(t), mk = (st.marks || {})[t.id] || null;
+      const split = mk && mk.split ? fitSplit(mk.split, amt) : null, mine = [];
+      // دورة خارج القائمة (بيانات قديمة انحذفت مثلًا): تنحسب على أقرب دورة موجودة بدل ما تضيع
+      if (split) split.forEach(p => { if (!(p.amount > 0)) return; const c = i >= 0 ? C.list[Math.max(0, Math.min(C.list.length - 1, i + p.k))] : null; mine.push({ txId: t.id, date: d, k: p.k, cycleStart: c ? c.start : null, amount: round2(p.amount), kind: mk.kind }); });
+      else mine.push({ txId: t.id, date: d, k: 0, cycleStart: i >= 0 ? C.list[i].start : null, amount: amt, kind: mk && !mk.split ? mk.kind : 'normal' });
+      mine.forEach(e => entries.push(e));
+      byTx.set(t.id, { tx: t, date: d, idx: i, amount: amt, mark: mk, split, pieces: mine });
+    });
+    entries.sort((a, b) => String(a.cycleStart || '').localeCompare(String(b.cycleStart || '')) || a.date.localeCompare(b.date));
+    return { list, entries, byTx, C };
+  });
+}
+function exceedsAlert(diffAbs, base, al) { return al.mode === 'sar' ? diffAbs > al.value + 0.004 : (base > 0 && diffAbs / base * 100 > al.value + 1e-9); }
+function commitAlertOf(store, key) { const p = commitStateOf(store, key), cfg = commitCfg(store); return p && p.alert ? alertNorm(p.alert.mode, p.alert.value) : { mode: cfg.alertMode, value: cfg.alertValue }; }
+function commitItem(store, k, list, cfg, today) {
+  const p = commitStateOf(store, k) || PLAN_DEF(), L = commitLedger(store, k, today), C = L.C, last = list[list.length - 1], i0 = k.indexOf(':'), st = k.slice(0, i0), id = k.slice(i0 + 1);
+  const lastAmt = payAmt(last), curIdx = cycleIdx(C, today), marks = p.marks || {};
+  const byCycle = new Map(), notes = new Map();
+  L.entries.forEach(e => { if (!e.cycleStart) return; byCycle.set(e.cycleStart, round2((byCycle.get(e.cycleStart) || 0) + e.amount)); if (!notes.has(e.cycleStart)) notes.set(e.cycleStart, []); notes.get(e.cycleStart).push(e); });
+  const idxs = L.entries.filter(e => e.cycleStart).map(e => C.idx.get(e.cycleStart)), firstIdx = idxs.length ? Math.min.apply(null, idxs) : -1, lastIdx = idxs.length ? Math.max.apply(null, idxs) : -1;
+  const complete = []; if (firstIdx >= 0) for (let j = firstIdx; j < C.list.length && C.list[j].end < today; j++) complete.push(C.list[j]);
+  const useC = complete.slice(-cfg.n), cycleAvg = useC.length ? round2(sum(useC, c => byCycle.get(c.start) || 0) / useC.length) : null;
+  const lastN = L.entries.slice(-cfg.n), payAvg = lastN.length ? round2(sum(lastN, e => e.amount) / lastN.length) : null;
+  const approved = p.status === 'approved';
+  let shown = null, shownKind = 'none', perCycle = null;
+  if (approved) {
+    if (p.pay === 'variable') {
+      if (p.value === 'fixed') { shown = p.amount; shownKind = 'approved'; perCycle = cycleAvg; }
+      else { shown = cycleAvg; shownKind = cycleAvg == null ? 'none' : 'avgCycle'; }
+    } else if (p.value === 'variable') { shown = payAvg; shownKind = 'avgPay'; }
+    else { shown = p.amount; shownKind = 'approved'; }
+  }
+  const al = p.alert ? alertNorm(p.alert.mode, p.alert.value) : { mode: cfg.alertMode, value: cfg.alertValue };
+  const diffAbs = approved && p.value === 'fixed' && p.amount > 0 ? round2(lastAmt - p.amount) : null;
+  const changed = diffAbs != null && last.id !== p.ackTxId && !marks[last.id] && exceedsAlert(Math.abs(diffAbs), p.amount, al);
+  const nearDouble = !!(changed && p.amount > 0 && Math.abs(lastAmt - 2 * p.amount) <= 0.2 * p.amount);
+  // أكثر من دفعة في نفس الدورة (نظام شهري): الدورة الحالية ثم اللي قبلها. الدفعة المنقولة كلها لدورة ثانية ما تنعد
+  let multi = null;
+  if (approved && p.pay !== 'variable' && curIdx >= 0) {
+    for (const j of [curIdx, curIdx - 1]) {
+      if (j < 0 || multi) continue;
+      const c = C.list[j], ids = [];
+      // الدفعة اللي علّمتها «تعثر» أو «مقدم» جاوبت عنها (حتى لو جزء منها باقي في دورتها): ما تنعد
+      L.byTx.forEach((x, txId) => { if (x.idx === j && !(x.mark && (x.mark.kind === 'arrears' || x.mark.kind === 'advance'))) ids.push(txId); });
+      // «استثناء»: محفوظ بالدفعات نفسها. لو جات دفعة جديدة غيرها يرجع يسأل
+      const okIds = new Set(); Object.values(p.multi || {}).forEach(x => { if (x && x.kind === 'exception') (x.ids || []).forEach(q => okIds.add(q)); });
+      if (ids.length >= 2 && !ids.every(q => okIds.has(q))) multi = { cycleStart: c.start, cycleEnd: c.end, count: ids.length, txIds: ids, current: j === curIdx };
+    }
+  }
+  // سجل الدورات: من آخر دورة فيها شي (أو الحالية) ورجوع 6 دورات
+  const hi = Math.max(curIdx, lastIdx), cyclesView = [];
+  if (hi >= 0 && firstIdx >= 0) for (let j = hi; j >= Math.max(firstIdx, hi - 5); j--) {
+    const c = C.list[j], es = notes.get(c.start) || [];
+    cyclesView.push({ start: c.start, end: c.end, amount: byCycle.get(c.start) || 0, entries: es, open: j === curIdx, future: j > curIdx, approx: !!c.approx });
+  }
+  const covered = new Set(L.entries.filter(e => e.kind === 'advance' && e.k > 0 && e.cycleStart).map(e => e.cycleStart));
+  return { key: k, subjectType: st, subjectId: id, name: subjectName(store, { subjectType: st, subjectId: id }), count: list.length,
+    last: { id: last.id, amount: lastAmt, date: txDate(last) }, plan: p, status: p.status, pay: p.pay, value: p.value, auto: !!p.auto,
+    approved: p.value === 'fixed' ? p.amount : null, shown, shownKind, perCycle, payAvg, cycleAvg, cyclesUsed: useC.length, paysUsed: lastN.length, completeCycles: complete.length,
+    suggest: lastAmt, alert: al, alertOwn: !!p.alert, changed, diffAbs, diffPct: diffAbs != null && p.amount ? round2(diffAbs / p.amount * 100) : null, nearDouble,
+    multi, cycles: cyclesView, covered, txIds: list.map(t => t.id) };
+}
+function commitmentList(store, today) {
+  today = today || todayISO();
+  return store.cached('commitList:' + today, () => {
+    const cfg = commitCfg(store), out = [];
+    commitmentGroups(store).forEach((list, k) => out.push(commitItem(store, k, list, cfg, today)));
+    const rank = (c) => c.status !== 'approved' ? 0 : (c.changed || c.multi) ? 1 : 2;
+    return out.sort((a, b) => rank(a) - rank(b) || b.last.date.localeCompare(a.last.date));
+  });
+}
+function commitmentOf(store, key, today) { return commitmentList(store, today).find(c => c.key === key) || null; }
+// المتكرر المؤكد لنفس الجهة يمشي على نفس المبلغ (التوقع والحجز)
+function syncRecurringAmount(store, key, amt0) {
+  if (!(amt0 > 0)) return;
+  const i = key.indexOf(':'), st = key.slice(0, i), id = key.slice(i + 1);
+  store.all('recurring').filter(r => r.status === 'confirmed' && r.subjectType === st && r.subjectId === id).forEach(r => {
+    const amt = round2(amt0);
+    r.expectedAmount = amt; r.amountMin = round2(Math.min(Number(r.amountMin || amt), amt)); r.amountMax = round2(Math.max(Number(r.amountMax || amt), amt)); r.userEdited = true; r.updatedAt = new Date().toISOString(); store.put('recurring', r);
+  });
+}
+function syncRecFor(store, key) {
+  const c = commitmentOf(store, key); if (!c || c.status !== 'approved' || c.pay === 'variable') return;
+  syncRecurringAmount(store, key, c.value === 'fixed' ? c.approved : c.payAvg);
+}
+const lastOf = (store, key) => { const l = commitmentGroups(store).get(key); return l && l.length ? l[l.length - 1] : null; };
+// سؤال الاعتماد. how: approve = آخر فاتورة · amount = مبلغ تكتبه · variable = قيمته متغيرة
+function commitApprove(store, key, how, amount) {
+  const last = lastOf(store, key); if (!last) return null;
+  const p = planRec(store, key);
+  if (how === 'approve') { p.value = 'fixed'; p.amount = payAmt(last); }
+  else if (how === 'amount') { const a = E.parseNum(amount); if (!(round2(a) > 0)) return { error: 'amount' }; p.value = 'fixed'; p.amount = round2(a); }
+  else if (how === 'variable') { p.value = 'variable'; p.amount = null; }
+  else return null;
+  // «مبلغ ثاني»: آخر فاتورة ما تعتبر مجاوب عنها. لو تختلف عن المبلغ اللي كتبته بأكثر من الحد يطلع تنبيه «تغيّر السعر» ويسألك وش كانت (ما نفترض)
+  p.status = 'approved'; p.auto = false; p.ackTxId = how === 'amount' ? null : last.id;
+  putPlan(store, key, p); syncRecFor(store, key); store.touch(); return p;
+}
+// how: update = «تحديث بالسعر» · variable = «قيمته متغيرة» · fixed = رجّعه ثابت · amount = مبلغ تكتبه · exception = «استثناء هالشهر»
+function commitPriceDecision(store, key, how, amount) {
+  const last = lastOf(store, key); if (!last) return null;
+  const p = planRec(store, key);
+  if (how === 'variable') { if (p.value === 'variable' && p.status === 'approved') return p; if (p.amount > 0) p.prevAmount = p.amount; p.value = 'variable'; p.amount = null; }
+  else if (how === 'update') { p.value = 'fixed'; p.amount = payAmt(last); }
+  // «ثابت»: لو هو ثابت أصلًا ما يتغير شي. من متغير إلى ثابت: يرجع مبلغه المعتمد السابق (وإلا آخر فاتورة)، وما يعتبر جواب عن آخر دفعة
+  else if (how === 'fixed') { if (p.value === 'fixed' && p.amount > 0 && p.status === 'approved') return p; p.value = 'fixed'; if (!(p.amount > 0)) p.amount = p.prevAmount > 0 ? p.prevAmount : payAmt(last); }
+  else if (how === 'amount') { const a = E.parseNum(amount); if (!(round2(a) > 0)) return { error: 'amount' }; p.value = 'fixed'; p.amount = round2(a); }
+  else if (how === 'exception') { if (p.status !== 'approved' || !(p.amount > 0)) return null; p.marks[last.id] = { kind: 'exception', at: new Date().toISOString() }; }
+  else return null;
+  // تعديل المبلغ بيدك (أو ترجيعه ثابت) ما يغيّر اللي جاوبت عنه: لو آخر دفعة ما جاوبت عنها وتختلف عن المبلغ يبقى التنبيه
+  p.status = 'approved'; p.auto = false; if (how !== 'amount' && how !== 'fixed') p.ackTxId = last.id;
+  putPlan(store, key, p); syncRecFor(store, key); store.touch(); return p;
+}
+function setCommitPay(store, key, pay) {
+  if (!lastOf(store, key) || (pay !== 'monthly' && pay !== 'variable')) return null;
+  const p = planRec(store, key); p.pay = pay; putPlan(store, key, p); syncRecFor(store, key); store.touch(); return p;
+}
+// حد تنبيه خاص بالجهة. d = null: مثل العام
+function setCommitAlert(store, key, d) {
+  if (!lastOf(store, key)) return null;
+  const p = planRec(store, key);
+  if (!d) p.alert = null;
+  else { const mode = d.mode === 'sar' ? 'sar' : 'pct', v = Number(E.parseNum(d.value)); if (!inRange(v, COMMIT_RANGE[mode])) return { error: 'value' }; p.alert = { mode, value: round2(v) }; }
+  putPlan(store, key, p); store.touch(); return p;
+}
+// تقسيم مقترح: بالتساوي على عدد الدورات (الباقي من التقريب على آخر وحدة). arrears: الدورات السابقة ثم الحالية · advance: الحالية ثم الجاية
+function defaultSplit(amt, kind, months) {
+  const m = Math.max(2, Math.min(12, Math.round(months || 2))), each = Math.floor(amt / m * 100) / 100, out = [];
+  for (let j = 0; j < m; j++) out.push({ k: kind === 'arrears' ? j - (m - 1) : j, amount: j === m - 1 ? round2(amt - each * (m - 1)) : each });
+  return out;
+}
+// kind: arrears (تعثر: الدورات السابقة k ≤ 0) · advance (مقدم: الجاية k ≥ 0). المجموع لازم يساوي مبلغ الدفعة
+function setCommitSplit(store, key, txId, kind, split) {
+  const L = commitLedger(store, key), x = L.byTx.get(txId); if (!x || (kind !== 'arrears' && kind !== 'advance')) return null;
+  const clean = (split || []).map(p => ({ k: Math.round(Number(p.k)), amount: round2(Number(E.parseNum(p.amount)) || 0) })).filter(p => p.amount > 0);
+  if (!validSplit(clean, x.amount)) return { error: 'sum', amount: x.amount, total: round2(sum(clean, q => q.amount)) };
+  if (clean.some(q => kind === 'arrears' ? q.k > 0 : q.k < 0) || clean.some(q => Math.abs(q.k) > 11)) return { error: 'range' };
+  if (x.idx < 0 || clean.some(q => !L.C.list[x.idx + q.k])) return { error: 'range' };
+  const p = planRec(store, key), last = lastOf(store, key);
+  p.marks[txId] = { kind, split: clean.sort((a, b) => a.k - b.k), at: new Date().toISOString() };
+  if (last && last.id === txId) p.ackTxId = txId;
+  putPlan(store, key, p); store.touch(); return p;
+}
+function clearCommitMark(store, key, txId) {
+  const p = planRec(store, key); if (!p.marks[txId]) return null;
+  delete p.marks[txId]; if (p.ackTxId === txId) p.ackTxId = null; // شلت العلامة: يرجع يسألك عنها لو مبلغها يختلف عن المعتمد
+  putPlan(store, key, p); store.touch(); return p;
+}
+// أكثر من دفعة في نفس الدورة. how: variable = نظام الدفعات متغير · arrears = أول دفعة للدورة السابقة · advance = آخر دفعة للدورة الجاية · exception = هالدورة بس
+function commitMultiDecision(store, key, how) {
+  const c = commitmentOf(store, key); if (!c || !c.multi) return null;
+  const p = planRec(store, key), L = commitLedger(store, key), ids = c.multi.txIds.slice().sort((a, b) => { const x = L.byTx.get(a), y = L.byTx.get(b); return (x.date + (x.tx.time || '')).localeCompare(y.date + (y.tx.time || '')); });
+  let txId = null;
+  if (how === 'variable') p.pay = 'variable';
+  else if (how === 'exception') p.multi[c.multi.cycleStart] = { kind: 'exception', n: c.multi.count, ids: c.multi.txIds.slice(), at: new Date().toISOString() };
+  else if (how === 'arrears' || how === 'advance') {
+    txId = how === 'arrears' ? ids[0] : ids[ids.length - 1];
+    const x = L.byTx.get(txId); if (!L.C.list[x.idx + (how === 'arrears' ? -1 : 1)]) return { error: 'range' };
+    p.marks[txId] = { kind: how, split: [{ k: how === 'arrears' ? -1 : 1, amount: x.amount }], at: new Date().toISOString() };
+  } else return null;
+  putPlan(store, key, p); syncRecFor(store, key); store.touch(); return { plan: p, txId };
+}
+
+/* ترقية 1.7.1 للالتزامات: إعداد التنبيه يصير {نوع الحد، قيمته، عدد المتوسط} (والمبلغ المبدئي من آخر N ينشال)،
+   والخطط: كل التزامات 1.7.0 تنسأل من جديد بآخر فاتورة وما تنحسب لين تجاوب (إلا إذا آخر 3 دفعات متساوية: تنعتمد بدون سؤال). */
+function migrateCommit171(store) {
+  const s = store.settings, c = s.commitCfg || {}, old = s.commitPlans || {}, out = { asked: 0, auto: 0, kept: 0 };
+  if (c.alertMode !== 'pct' && c.alertMode !== 'sar') {
+    const pct = Number(c.pct), n = Number(c.months);
+    s.commitCfg = { alertMode: 'pct', alertValue: inRange(pct, COMMIT_RANGE.pct) ? round2(pct) : 5, n: inRange(n, COMMIT_RANGE.n) ? Math.round(n) : 3 };
+  }
+  const plans = {};
+  Object.keys(old).forEach(k => {
+    const p = old[k]; if (!p) return;
+    if (p.v === 2) { plans[k] = p; return; }
+    plans[k] = PLAN_DEF(); // كل التزامات 1.7.0 تنسأل من جديد بآخر فاتورة (واللي آخر 3 دفعات لها متساوية تنعتمد تلقائي تحت)
+  });
+  s.commitPlans = plans; store.put('settings', s);
+  syncCommitPlans(store);
+  commitStates(store).forEach(st => { if (st.status !== 'approved') out.asked++; else if (st.auto) out.auto++; });
+  return out;
 }
 
 /* ---------- 3. توقع نهاية الدورة ----------
@@ -332,14 +683,32 @@ function setLiquidityClass(store, accountId, cls) {
 }
 
 /* ---------- 6. الضروري والكمالي ----------
-   الضرورة من سلسلة الأولوية لكل جزء من الإنفاق. أجزاء السحب المقسّم تاخذ ضرورة تصنيف الجزء، والرسوم ضرورة «رسوم».
-   اللي ما له ضرورة محددة يبقى «غير محدد» (ما نخمّن). */
-function partAttr(store, tx, p, field) {
+   الضرورة من سلسلة الأولوية لكل جزء من الإنفاق. أجزاء السحب المقسّم تاخذ ضرورة تصنيف الجزء، والرسوم (1.7.0) مع عمليتها.
+   اللي ما له ضرورة محددة يبقى «غير محدد» (ما نخمّن). raw = true: الالتزام وفرص التوفير غير المحددة ترجع null */
+function partAttr(store, tx, p, field, raw) {
   const a = spendAnchor(store, tx);
-  if (p.cat === 'fees') return catChain(store, 'fees', p.sub, field);
   // السحب النقدي: كل جزء (والباقي تحت «سحب نقدي» أو تصنيف السحب) ياخذ خصائص تصنيفه، إلا إذا حددتها للعملية نفسها
-  if (p.partId || a.transactionType === 'CashWithdrawal') { const tf = CHAIN[field][0]; if (has(a[tf])) return a[tf]; return catChain(store, p.cat === '__none' ? null : p.cat, p.sub, field); }
-  return effective(store, a, field);
+  if (p.partId || a.transactionType === 'CashWithdrawal') { const tf = CHAIN[field][0]; if (has(a[tf])) return a[tf]; return catChain(store, String(p.cat).startsWith('__') ? null : p.cat, p.sub, field, raw); }
+  return effective(store, a, field, raw);
+}
+// 1.7.0: «غير محدد» لكل خاصية (الضرورة، الالتزام، فرص التوفير): الإنفاق اللي ما تحددت خاصيته في أي مستوى، موزع على التصنيفات
+// 1.7.1: الالتزام اللي ينتظر «سؤال الاعتماد» مبالغه هنا كمان (pending)، لحالها عن التصنيفات: ينحل بجوابك على السؤال مو بتحديد التصنيف
+function undefinedSpend(store, period, field) {
+  const byCat = new Map(), ids = new Set(), pendKeys = new Set(); let total = 0, pending = 0;
+  store.all('transactions').forEach(t => {
+    if (!inSpendPeriod(store, t, period)) return;
+    spendParts(store, t).forEach(p => {
+      if (!(p.amt > 0)) return;
+      if (field === 'save' && partAttr(store, t, p, 'nec') !== 'discretionary') return; // فرص التوفير تخص الكمالي بس
+      const a = spendAnchor(store, t);
+      if (field === 'commit' && !['Payment', 'PersonTransfer', 'CashExpense'].includes(a.transactionType)) return;
+      const v = partAttr(store, t, p, field, true);
+      if (field === 'commit' && v === true && a.direction === 'out' && !commitCounted(store, a)) { total += p.amt; pending += p.amt; ids.add(t.id); pendKeys.add(subjKey(a)); return; }
+      if (v !== null && v !== undefined && v !== '' && !(field === 'nec' && v !== 'essential' && v !== 'discretionary')) return;
+      total += p.amt; ids.add(t.id); const k = p.cat; byCat.set(k, round2((byCat.get(k) || 0) + p.amt));
+    });
+  });
+  return { amount: round2(total), pending: round2(pending), pendingKeys: Array.from(pendKeys), txIds: Array.from(ids), categories: Array.from(byCat.entries()).map(([categoryId, amount]) => ({ categoryId, amount })).filter(x => x.amount > 0.004).sort((a, b) => b.amount - a.amount) };
 }
 const NEC = ['essential', 'discretionary', 'undefined'];
 function necOfPart(store, tx, p) { const v = partAttr(store, tx, p, 'nec'); return v === 'essential' || v === 'discretionary' ? v : 'undefined'; }
@@ -438,7 +807,7 @@ function itemRows(store, period, f) {
     if (f.cityId !== undefined) { const c = cityOf(store, t, f.cityMode).cityId || '__unknown'; if (c !== f.cityId) return; }
     const txIn = (g) => (t.groupIds || []).includes(g);
     if (!f.restOnly) itemNet(store, t).forEach(o => {
-      const it = o.item, cs = itemCatPair(store, it.productCategoryId);
+      const it = o.item, cs = itemCatPair(store, E.itemCatId(t, it)); // 1.7.0: الغرض اللي يتبع الفاتورة على تصنيفها الحالي
       if (!catOk(cs.cat, cs.sub)) return;
       if (f.productId && it.productId !== f.productId) return;
       if (f.groupId && !(it.groupIds || []).includes(f.groupId) && !txIn(f.groupId)) return;
@@ -561,14 +930,22 @@ function computeAlerts(store, today) {
     list.push({ id: `group:${g.id}:${s.level}`, kind: 'group', level: s.level === 'over' ? 'high' : 'mid', title: s.level === 'over' ? `تجاوزت ميزانية «${g.name}»` : `وصلت ${Math.floor(s.pct)}% من ميزانية «${g.name}»`, body: `${fm(s.spend)} من ${fm(s.budget)}`, ref: { groupId: g.id } });
   });
   upcomingCommitments(store, today, addDays(today, 3), today).forEach(u => list.push({ id: `due:${u.recurringId}:${u.date}`, kind: 'due', level: 'mid', title: u.overdue ? `التزام متأخر: ${u.name}` : `التزام قريب: ${u.name}`, body: `${fm(u.amount)} · ${u.date}`, ref: { recurringId: u.recurringId } }));
-  store.all('recurring').filter(r => r.status === 'suggested').forEach(r => list.push({ id: `rec:${r.id}`, kind: 'recurring', level: 'low', title: `اشتراك أو التزام محتمل: ${subjectName(store, r)}`, body: `${CAD_L[r.cadence] || r.cadence} · ${fm(r.expectedAmount)} تقريبًا`, ref: { recurringId: r.id } }));
+  store.all('recurring').filter(r => r.status === 'suggested').forEach(r => list.push({ id: `rec:${r.id}`, kind: 'recurring', level: 'low', title: `متكرر: ${subjectName(store, r)} — تضيفه التزام دائم؟`, body: `${CAD_L[r.cadence] || r.cadence} · ${fm(r.expectedAmount)} تقريبًا`, ref: { recurringId: r.id } }));
+  // 1.7.1: الالتزامات الدائمة: ينتظر اعتماد مبلغه · تغيّر سعره (أكثر من الحد عن المعتمد) · أكثر من دفعة في نفس الدورة
+  commitmentList(store, today).forEach(c => {
+    if (c.status !== 'approved') list.push({ id: `capprove:${c.key}`, kind: 'commitApprove', level: 'mid', title: `«${c.name}» ينتظر اعتماد مبلغه`, body: `آخر فاتورة ${fm(c.suggest)}. ما ينحسب التزام لين تجاوب`, ref: { commitKey: c.key } });
+    if (c.changed) list.push({ id: `cprice:${c.key}:${c.last.id}`, kind: 'commitPrice', level: 'mid', title: `تغيّر سعر «${c.name}»`, body: `آخر مبلغ ${fm(c.last.amount)}، والمعتمد ${fm(c.approved)}`, ref: { commitKey: c.key } });
+    if (c.multi) list.push({ id: `cmulti:${c.key}:${c.multi.cycleStart}:${c.multi.count}`, kind: 'commitMulti', level: 'mid', title: `أكثر من دفعة لـ«${c.name}» في نفس الدورة`, body: `${c.multi.count === 2 ? 'دفعتين' : c.multi.count + ' دفعات'} في الدورة اللي تبدأ ${c.multi.cycleStart}`, ref: { commitKey: c.key } });
+  });
+  // 1.7.0: «الفترات»: عمليات سجّل الجوال لها مدينة غير مدينة الفترة (ما تتغير إلا بقرارك)
+  (E.periodsList(store) || []).forEach(p => { if (!p.cityId) return; const n = E.periodConflicts(store, p).length; if (n) list.push({ id: `pcity:${p.id}:${n}`, kind: 'periodCity', level: 'low', title: `${n === 1 ? 'عملية' : n + ' عمليات'} موقعها مختلف عن مدينة الفترة`, body: `${p.from} ← ${p.to}`, ref: { periodId: p.id } }); });
   const hist = cur ? completeCycles(store, today, 3) : [];
   if (cur && hist.length >= 3) {
     const elapsed = daysBetween(cur.start, today) + 1;
     const curC = spendBetween(store, { start: cur.start, end: today }, allParts).byCat;
     const histC = hist.map(c => spendBetween(store, { start: c.start, end: minD(c.end, addDays(c.start, elapsed - 1)) }, allParts).byCat);
     curC.forEach((v, cat) => {
-      if (cat === '__none' || cat === 'fees') return;
+      if (cat === '__none') return; // 1.7.0: «رسوم» تصنيف عادي
       const med = median(histC.map(h => h.get(cat) || 0));
       if (v > med * 1.5 && v - med >= 100) list.push({ id: `rise:${cat}:${cur.start}`, kind: 'rise', level: 'mid', title: `ارتفاع غير معتاد في «${catName(cat)}»`, body: `${fm(v)} حتى اليوم، والمعتاد لنفس الأيام ${fm(med)}`, ref: { categoryId: cat } });
     });
@@ -592,9 +969,9 @@ function restoreAlert(store, id) { if (store.get('alertStates', id)) { store.rem
 
 Object.assign(E, {
   median, completeCycles, variableParts, spendBetween, addRateExclusion, removeRateExclusion, isRateExcluded, cycleRates, historyRates, forecastRate,
-  CAD, CAD_L, addCadence, detectRecurring, liveLastDate, subjectName, recurringOfTx, confirmRecurring, dismissRecurring, setRecurringReserve, nextDue, upcomingCommitments,
+  CAD, CAD_L, addCadence, detectRecurring, recIsCommitment, recIsFlagged, commitCfg, setCommitCfg, COMMIT_RANGE, commitmentGroups, commitStates, commitStateOf, commitCounted, commitLedger, commitCycles, syncCommitPlans, commitmentList, commitmentOf, commitApprove, commitPriceDecision, setCommitPay, setCommitAlert, defaultSplit, setCommitSplit, clearCommitMark, commitMultiDecision, commitAlertOf, payAmt, commitSubjKey: subjKey, migrateCommit171, syncRecurringAmount, liveLastDate, subjectName, recurringOfTx, confirmRecurring, dismissRecurring, setRecurringReserve, nextDue, upcomingCommitments,
   cycleForecast, saveReserve, deleteReserve, reservesTotal, liquidityClassOf, accountNow, cardNow, liquidity, setLiquidityClass,
-  partAttr, necOfPart, necessityBreakdown, necessityTrendMonths, necessityTrendCycles, monthPeriod, eligibleParts, savingsOpportunities,
+  partAttr, undefinedSpend, necOfPart, necessityBreakdown, necessityTrendMonths, necessityTrendCycles, monthPeriod, eligibleParts, savingsOpportunities,
   itemRows, productSpend, cityStats, citiesSummary, periodSummary, comparePeriodsFull, acrossPeriods, annualView,
   computeAlerts, dismissAlert, snoozeAlert, restoreAlert,
 });

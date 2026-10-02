@@ -113,6 +113,8 @@ function allAmounts(t) {
   }
   return out;
 }
+// 1.7.1: فيه أي مبلغ بعملة في النص؟ (حتى لو مو المبلغ الرئيسي، مثل «المبلغ المستحق»)
+function hasMoney(t) { const x = norm(t); return !!extractAmount(x) || allAmounts(x).some(a => a.value > 0) || /(?<![\d:/.\-])\d[\d,]*\.\d{2}(?![\d:/\-])/.test(x); }
 function normCur(c) {
   if (!c) return 'SAR';
   if (/^(SAR|SR|ر|ريال)/i.test(c)) return 'SAR';
@@ -240,7 +242,7 @@ function findDate(t) {
   let m, date = null, time = null;
   if ((m = t.match(/\b(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})\b/))) date = ymd(+m[1], +m[2], +m[3]);
   else if ((m = t.match(/\b(\d{1,2})[-/.](\d{1,2})[-/.](20\d{2}|\d{2})\b/))) { const y = m[3].length === 2 ? 2000 + +m[3] : +m[3]; date = ymd(y, +m[2], +m[1]) || ymd(y, +m[1], +m[2]); }
-  if ((m = t.match(/\b(\d{1,2}):(\d{2})(?::\d{2})?\s*(AM|PM|am|pm|ص|م)?(?![\d:])/))) {
+  if ((m = t.match(/\b(\d{1,2}):(\d{2})(?::\d{2})?(?:\s*(AM|PM|am|pm|ص|م)(?![\p{L}]))?(?![\d:])/u))) {
     let h = +m[1]; const mi = +m[2], ap = m[3];
     if (ap && /PM|pm|م/.test(ap) && h < 12) h += 12; if (ap && /AM|am|ص/.test(ap) && h === 12) h = 0;
     if (h < 24 && mi < 60) time = String(h).padStart(2, '0') + ':' + String(mi).padStart(2, '0');
@@ -364,7 +366,14 @@ function dateCands(v) {
 }
 // التواريخ المختلفة فعلًا (إذا أكثر من وحدة، المستخدم يختار)
 function dateChoices(v) { const seen = new Map(); dateCands(v).forEach(c => { if (!seen.has(c.date)) seen.set(c.date, c); }); return Array.from(seen.values()); }
-function parseDateOrder(v, order) { const cs = dateCands(v); if (!cs.length) return null; const f = cs.find(c => c.o === order); return (f || cs[0]).date; }
+function parseDateOrder(v, order, strict) { const cs = dateCands(v); if (!cs.length) return null; const f = cs.find(c => c.o === order); if (strict && order && !f) return null; return (f || cs[0]).date; }
+// شكل كتابة التاريخ (مكان السنة والفواصل): الصيغة الثابتة تقبل نفس الشكل بس
+function dateLayout(v) {
+  const m = norm(v).match(DATE_TOKEN); if (!m) return null;
+  if (!m[1]) return 'TXT';
+  const sep = (m[0].match(/[-/.]/) || ['-'])[0];
+  return (m[1].length === 4 ? 'Y' : 'n') + sep + 'n' + sep + (m[3].length === 4 ? 'Y' : 'n');
+}
 function parseTime(v) {
   const m = norm(v).match(TIME_TOKEN); if (!m) return null;
   let h = +m[1]; const mi = +m[2], ap = m[3];
@@ -388,17 +397,36 @@ function locateValue(t, key, val, taken) {
   const free = (a, b) => !taken.some(([x, y]) => a < y && b > x);
   const v = String(val == null ? '' : val).trim(); if (!v) return null;
   if (FIELD_TYPE[key] === 'number') {
-    const target = Number(v.replace(/,/g, '')); const g = /\d[\d,]*(?:\.\d+)?/g; let m;
-    while ((m = g.exec(t))) if (Number(m[0].replace(/,/g, '')) === target && free(m.index, m.index + m[0].length)) return [m.index, m.index + m[0].length];
-    return null;
+    // 1.7.1: الرقم اللي جنبه عملة أولى من رقم يشبهه (مثل آخر 4 أرقام البطاقة)، والرقم اللي يبدأ بصفر مو مبلغ
+    const target = Number(v.replace(/,/g, '')); const g = /\d[\d,]*(?:\.\d+)?/g; let m, first = null;
+    const CUR = '(?:sar|usd|eur|gbp|aed|kwd|bhd|qar|omr|egp|ريال|ر\\.س|ر\\.س\\.|دولار|درهم)';
+    const before = new RegExp(CUR + '[ \\t:]*$', 'i'), after = new RegExp('^[ \\t]*' + CUR, 'i');
+    while ((m = g.exec(t))) {
+      const a = m.index, b = a + m[0].length;
+      if (Number(m[0].replace(/,/g, '')) !== target || !free(a, b)) continue;
+      if (/^0\d/.test(m[0]) || /[\d*•]/.test(t[a - 1] || '') || /[*•]/.test(t[b] || '')) continue;
+      if (before.test(t.slice(Math.max(0, a - 12), a)) || after.test(t.slice(b, b + 12))) return [a, b];
+      if (!first) first = [a, b];
+    }
+    return first;
   }
   if (FIELD_TYPE[key] === 'last4') {
     const g = new RegExp('(?<!\\d)' + v.replace(/\D/g, '') + '(?!\\d)', 'g'); let m;
     while ((m = g.exec(t))) if (free(m.index, m.index + 4)) return [m.index, m.index + 4];
     return null;
   }
-  const i = t.toLowerCase().indexOf(v.toLowerCase());
-  return i >= 0 && free(i, i + v.length) ? [i, i + v.length] : null;
+  // 1.7.1: الاسم ممكن يتكرر داخل كلمة ثانية (مثل «Apple» داخل «Apple Pay»): نختار المكان اللي كلمة كاملة، وبعد «من/لدى/إلى»، وآخر السطر
+  const low = t.toLowerCase(), needle = v.toLowerCase(); let best = null, bs = -1, from = 0, i;
+  const edge = (c) => !c || !/[\p{L}\d]/u.test(c);
+  while ((i = low.indexOf(needle, from)) >= 0) {
+    from = i + 1; const b = i + v.length; if (!free(i, b)) continue;
+    let sc = 0;
+    if (edge(t[i - 1]) && edge(t[b])) sc += 2;
+    if (/(?:^|[\s:،,])(?:من|لدى|لدي|عند|إلى|الى|الي|لـ|المتجر|التاجر|المستفيد|from|to|at|merchant)[ \t]*:?[ \t]*$/i.test(t.slice(Math.max(0, i - 16), i))) sc += 3;
+    if (!t[b] || t[b] === '\n') sc += 1;
+    if (sc > bs) { bs = sc; best = [i, b]; }
+  }
+  return best;
 }
 // fields: لكل حقل إما {start,end} (من تحديد المستخدم في النص) أو القيمة كنص
 function learnTemplate(text, fields, meta) {
@@ -444,9 +472,9 @@ function learnTemplate(text, fields, meta) {
 }
 function valid(type, v, f) {
   v = String(v || '').trim();
-  if (type === 'date') return parseDateOrder(v, f && f.dateOrder);
+  if (type === 'date') { if (f && f.strict && f.datePat && dateLayout(v) !== f.datePat) return null; return parseDateOrder(v, f && f.dateOrder, !!(f && f.strict)); }
   if (type === 'time') return parseTime(v);
-  if (type === 'number') { const n = Number(v.replace(/,/g, '')); return /^\d[\d,]*(\.\d+)?$/.test(v) && n >= 0 ? n : null; }
+  if (type === 'number') { const n = Number(v.replace(/,/g, '')); return (f && f.strict ? /^(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?$/ : /^\d[\d,]*(\.\d+)?$/).test(v) && n >= 0 ? n : null; }
   if (type === 'last4') { const d = v.replace(/[^\d]/g, ''); return d.length === 4 ? d : null; }
   return v && v.length <= 80 ? v.replace(/^[\s:：\-–]+|[\s:：\-–.,،]+$/g, '') || null : null;
 }
@@ -522,6 +550,218 @@ function applyTemplate(tpl, text, W) {
   return out;
 }
 
-root.SmsReader = { WORD_GROUPS, wordKey, defaultWords, compileWords, DEFAULT_W, familyOf, methodByWords, onlineByWords, norm, splitMessages, splitDetails, segWarn, dateChoices, parseTime, methodOf, findDateToken, readDateOrder, ordersFor, ORDER_L, classify, extractAmount, parseGeneric, learnTemplate, applyTemplate, templateScore, findDate, wordsOf, OTP_STRONG, FAMILY_RULES };
+
+/* ---------- 1.7.1: الصيغ الثابتة (مطابقة صارمة، بدون تخمين) ----------
+   الصيغة = «هيكل» الرسالة سطر بسطر: نص ثابت + خانات المتغيرات اللي حددها المستخدم (المبلغ، التاريخ، المحل…).
+   الرسالة تطابق الصيغة بس إذا نفس عدد السطور ونفس النص الثابت بنفس الترتيب: سطر زايد أو كلمة ثابتة جديدة = شكل جديد.
+   الأرقام داخل النص الثابت ما تنحفظ: أي رقم يطابق أي رقم (№). ونجوم الإخفاء (• أو *) تطابق بعض.
+   parts: [[{l: نص ثابت} | {f: الحقل, t: نوعه}]]. «skip» = نص يتغير وما يهم (مثل رقم مرجع). */
+const NUM_MARK = '№';
+// الخانات: الرقم بفواصل آلاف صحيحة بس (1,250.50)، و«نص يتغير» = نفس عدد الكلمات اللي حددتها (ما يبلع جملة زايدة)
+const SLOT_SRC = {
+  number: '(\\d{1,3}(?:,\\d{3})+(?:\\.\\d+)?|\\d+(?:\\.\\d+)?)(?![\\d,]*\\d)',
+  last4: '(\\d{4})(?!\\d)',
+  date: '((?:\\d{1,4}[-/.]\\d{1,2}[-/.]\\d{1,4})|(?:\\d{1,2}[\\s\\-/]*(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*[\\s\\-/,]*\\d{2,4}))(?!\\d)',
+  time: '(\\d{1,2}:\\d{2}(?::\\d{2})?(?:\\s*(?:am|pm|صباحا|صباحًا|مساء|مساءً|ص|م)(?![\\p{L}]))?)',
+  text: '(\\S(?:.*?\\S)?)',
+};
+const skipSrc = (n) => '(?:\\S+' + (n > 1 ? '(?:\\s+\\S+){' + (n - 1) + '}' : '') + ')';
+const VALUE_IN = { number: /\d[\d,]*(?:\.\d+)?/, last4: /\d{4}(?!\d)/, date: DATE_TOKEN, time: TIME_TOKEN };
+const typeOfField = (k) => (k === 'skip' ? 'skip' : FIELD_TYPE[k] || null);
+const fmtLines = (t) => norm(t).split('\n').map(l => l.trim()).filter(Boolean);
+// النص الثابت: الأرقام = أي رقم (№)، ونجوم الإخفاء تتوحد. المسافة على طرف النص (جنب خانة) تنحفظ: لازم تكون موجودة في الرسالة
+function litNorm(x) { return String(x).replace(/\d[\d,.]*\d|\d/g, NUM_MARK).replace(/[•*]+/g, '•').replace(/\s+/g, ' '); }
+function litSrc(l) {
+  let out = '';
+  for (const ch of String(l)) {
+    if (ch === NUM_MARK) out += '(?<![\\d.,])\\d[\\d,.]*(?!\\d)';
+    else if (ch === '•') out += '[•*]+';
+    else if (ch === ' ') out += '\\s+';
+    else if (/[اأإآ]/.test(ch)) out += '[اأإآ]';
+    else if (/[ةه]/.test(ch)) out += '[ةه]';
+    else if (/[ىي]/.test(ch)) out += '[ىي]';
+    else out += escRe(ch);
+  }
+  return out;
+}
+// المتغيرات الرقمية والتاريخ والوقت: الخانة = الرقم نفسه داخل الكلمة المحددة، والباقي نص ثابت (مثل «**1234» أو «SAR250.00»)
+function refineSpan(t, sp) {
+  const type = typeOfField(sp.k); if (!type) return null;
+  if (type === 'text' || type === 'skip') return sp.b > sp.a ? sp : null;
+  const m = t.slice(sp.a, sp.b).match(VALUE_IN[type]); if (!m) return null;
+  const out = { k: sp.k, a: sp.a + m.index, b: sp.a + m.index + m[0].length };
+  // الوقت: «ص/م» أو AM/PM اللي بعده جزء منه (حتى لو كلمة لحالها)، عشان 10:54PM ما تنقرأ 10:54 الصبح
+  if (type === 'time' && !/(am|pm|صباحا|صباحًا|مساء|مساءً|ص|م)\s*$/i.test(m[0])) { const x = t.slice(out.b).match(/^[ \t]*(am|pm|صباحا|صباحًا|مساء|مساءً|ص|م)(?![\p{L}\d])/iu); if (x) out.b += x[0].length; }
+  return out;
+}
+function buildParts(t, spans) {
+  const out = []; let off = 0;
+  t.split('\n').forEach(line => {
+    const ls = off, le = off + line.length; off = le + 1;
+    if (!line.trim()) return;
+    const parts = []; let pos = ls;
+    spans.filter(sp => sp.a >= ls && sp.b <= le).forEach(sp => {
+      let lit = litNorm(t.slice(pos, sp.a)); if (!parts.length) lit = lit.replace(/^ +/, '');
+      if (lit) parts.push({ l: lit });
+      const type = typeOfField(sp.k), part = { f: sp.k, t: type };
+      if (type === 'skip') part.n = Math.max(1, t.slice(sp.a, sp.b).trim().split(/\s+/).length);
+      parts.push(part); pos = sp.b;
+    });
+    const tail = litNorm(t.slice(pos, le)).replace(/ +$/, ''); const tl = parts.length ? tail : tail.replace(/^ +/, ''); if (tl) parts.push({ l: tl });
+    out.push(parts);
+  });
+  return out;
+}
+// بصمة الشكل (للتجميع والمقارنة): النص الثابت بعد توحيد الحروف + نوع كل خانة
+function shapeSigOf(parts) {
+  return (parts || []).map(ps => ps.map(p => p.l != null ? p.l.trim().toLowerCase().replace(/[أإآ]/g, 'ا').replace(/ة/g, 'ه').replace(/ى/g, 'ي') : '{' + p.t + '}').filter(x => x !== '').join(' ')).join('\n');
+}
+const FMT_C = new Map();
+const FMT_MAX_LINE = 300, FMT_MAX_TEXT = 2400; // أطول من كذا مو رسالة بنكية عادية: ما تطابق أي صيغة (تروح المراجعة)
+function compileFormat(tpl) {
+  const key = JSON.stringify(tpl.parts || []);
+  if (!FMT_C.has(key)) {
+    if (FMT_C.size > 400) FMT_C.delete(FMT_C.keys().next().value);
+    FMT_C.set(key, (tpl.parts || []).map(ps => {
+      const keys = [], src = ps.map(p => { if (p.l != null) return litSrc(p.l); if (p.t === 'skip') return skipSrc(p.n || 1); keys.push(p.f); return SLOT_SRC[p.t] || SLOT_SRC.text; }).join('');
+      return { re: new RegExp('^' + src + '$', 'iu'), keys };
+    }));
+  }
+  return FMT_C.get(key);
+}
+const fmtLiteralLen = (tpl) => (tpl.parts || []).reduce((s, ps) => s + ps.reduce((a, p) => a + (p.l != null ? p.l.trim().length : 0), 0), 0);
+// يرجع قيم الخانات إذا الرسالة تطابق الصيغة بالضبط، وإلا null.
+// خانة النص (اسم المحل مثلًا) ما تبلع كلام زايد فيه مبلغ بعملة (مثل «رسوم SAR 5.00»)، والرسالة اللي فيها «مرفوضة/فشل» ما تطابق صيغة مثالها ما فيه: شكل جديد
+function matchFormat(tpl, text) {
+  if (!tpl || !Array.isArray(tpl.parts) || !tpl.parts.length) return null;
+  const t = norm(text); if (t.length > FMT_MAX_TEXT) return null;
+  const lines = fmtLines(t); if (lines.some(l => l.length > FMT_MAX_LINE)) return null;
+  let C; try { C = compileFormat(tpl); } catch (e) { return null; }
+  if (lines.length !== C.length) return null;
+  const vals = {};
+  try {
+    for (let i = 0; i < C.length; i++) { const m = C[i].re.exec(lines[i]); if (!m) return null; C[i].keys.forEach((k, j) => { vals[k] = m[j + 1]; }); }
+  } catch (e) { return null; }
+  for (const k of Object.keys(vals)) if (FIELD_TYPE[k] === 'text' && k !== 'method' && allAmounts(vals[k]).length) return null;
+  if (DECLINED.test(t) && !tpl.declined) return null;
+  return vals;
+}
+// مواضع متغيرات الصيغة داخل رسالة تطابقها (لصفحة التعديل: نفس تحديدك السابق على هالرسالة). null لو ما تطابق
+function formatSpansIn(tpl, text) {
+  const t = norm(text); if (!matchFormat(tpl, t)) return null;
+  const out = { spans: {}, skips: [] }; let off = 0, li = 0;
+  try {
+    for (const line of t.split('\n')) {
+      const ls = off; off += line.length + 1; if (!line.trim()) continue;
+      const ps = tpl.parts[li++], keys = [];
+      const src = ps.map(p => { if (p.l != null) return litSrc(p.l); keys.push(p.t === 'skip' ? 'skip' : p.f); return p.t === 'skip' ? '(' + skipSrc(p.n || 1) + ')' : (SLOT_SRC[p.t] || SLOT_SRC.text); }).join('');
+      const m = new RegExp('^' + src + '$', 'iud').exec(line); if (!m || !m.indices) return null;
+      keys.forEach((k, j) => { const ix = m.indices[j + 1]; if (!ix) return; const r = [ls + ix[0], ls + ix[1]]; if (k === 'skip') out.skips.push(r); else out.spans[k] = r; });
+    }
+  } catch (e) { return null; }
+  return out;
+}
+function applyFormat(tpl, text, W) {
+  const t = norm(text), vals = matchFormat(tpl, t); if (!vals) return null;
+  const out = { parser: 'format', templateId: tpl.id || null, family: tpl.family, direction: tpl.direction, currency: 'SAR', missing: [], via: {} };
+  Object.keys(vals).forEach(k => {
+    const type = FIELD_TYPE[k]; if (!type) return;
+    const v = valid(type, vals[k], { dateOrder: tpl.dateOrder, datePat: tpl.datePat || null, strict: true });
+    if (v == null) { out.missing.push(k); return; }
+    out.via[k] = 'format';
+    if (k === 'amount') out.grossAmount = v; else if (k === 'balance') out.balanceAfter = v; else if (k === 'fee') out.feeAmount = v;
+    else if (k === 'cardLast4') out.instrumentLast4 = v; else if (k === 'accountLast4') out.accountLast4 = v;
+    else if (k === 'merchant') out.merchantRaw = v; else if (k === 'beneficiary') out.beneficiaryRaw = v; else if (k === 'counterparty') out.counterpartyName = v;
+    else if (k === 'date') out.transactionDate = v;
+    else if (k === 'time') out.time = v;
+    else if (k === 'method') { out.methodRaw = v; out.paymentMethod = methodOf(v, W); }
+  });
+  // الرسوم «فوق المبلغ»: العملية تنحسب بالمبلغ + الرسوم. «داخل المبلغ»: المبلغ المحدد شاملها (ولو الرسوم أكبر من المبلغ فالقراءة غلط: مراجعة)
+  if (out.feeAmount != null && tpl.feeMode === 'top' && out.grossAmount > 0) { out.amountRead = out.grossAmount; out.grossAmount = Math.round((out.grossAmount + out.feeAmount) * 100) / 100; out.feeOnTop = true; }
+  else if (out.feeAmount != null && out.grossAmount > 0 && out.feeAmount > out.grossAmount + 0.001 && !out.missing.includes('fee')) { out.missing.push('fee'); }
+  if (!out.time && !(tpl.spans && tpl.spans.time)) out.time = findDate(t).time; // الوقت لو ما حددته: أول وقت مكتوب في الرسالة
+  out.ok = out.grossAmount > 0 && !!out.direction && !out.missing.length;
+  return out;
+}
+/* تعريف صيغة من مثال. fields: {الحقل: {start, end}} (مواضع في النص بعد norm)، meta: {role: tx|info, family, direction, bank, sender, skips: [{start,end}], dateOrder, feeMode} */
+function learnFormat(text, fields, meta) {
+  meta = meta || {}; fields = fields || {};
+  const t = norm(text), role = meta.role === 'info' ? 'info' : 'tx', raw = [], notFound = [];
+  Object.keys(FIELD_TYPE).forEach(k => { const f = fields[k]; if (!f || f.start == null) return; raw.push({ k, a: f.start, b: f.end }); });
+  (meta.skips || []).forEach(r => raw.push({ k: 'skip', a: r.start, b: r.end }));
+  const spans = [];
+  raw.forEach(sp => { const r = sp.a >= 0 && sp.b <= t.length && !t.slice(sp.a, sp.b).includes('\n') ? refineSpan(t, sp) : null; if (r) spans.push(r); else if (sp.k !== 'skip') notFound.push(sp.k); });
+  if (notFound.length) return { error: 'not_found', fields: notFound };
+  spans.sort((x, y) => x.a - y.a);
+  for (let i = 1; i < spans.length; i++) if (spans[i].a < spans[i - 1].b) return { error: 'overlap', fields: [spans[i - 1].k, spans[i].k] };
+  const of = (k) => spans.find(x => x.k === k);
+  if (t.length > FMT_MAX_TEXT || t.split('\n').some(l => l.length > FMT_MAX_LINE)) return { error: 'too_long' };
+  if (role === 'tx' && !of('amount')) return { error: 'no_amount' };
+  // المبلغ لازم يكون بالريال: لو العملة اللي جنبه أجنبية (USD 100) ما نحسبه ريال
+  if (role === 'tx') {
+    const A = of('amount'), ls = t.lastIndexOf('\n', A.a - 1) + 1, le0 = t.indexOf('\n', A.b), le = le0 < 0 ? t.length : le0;
+    const cb = t.slice(ls, A.a).match(new RegExp('(' + CUR + ')\\s*$', 'i')), ca = t.slice(A.b, le).match(new RegExp('^\\s*(' + CUR + ')', 'i'));
+    const cur = cb ? cb[1] : ca ? ca[1] : null;
+    if (cur && normCur(cur) !== 'SAR') return { error: 'amount_currency', currency: normCur(cur) };
+  }
+  let dateOrder = null, datePat = null;
+  if (of('date')) {
+    const ch = dateChoices(t.slice(of('date').a, of('date').b));
+    if (!ch.length) return { error: 'bad_date' };
+    datePat = dateLayout(t.slice(of('date').a, of('date').b));
+    dateOrder = meta.dateOrder && ch.some(c => c.o === meta.dateOrder) ? meta.dateOrder : (ch.length === 1 ? ch[0].o : null);
+    if (!dateOrder) return { error: 'date_order', choices: ch };
+  }
+  if (of('time') && !parseTime(t.slice(of('time').a, of('time').b))) return { error: 'bad_time' };
+  const feeMode = of('fee') ? (meta.feeMode === 'top' ? 'top' : meta.feeMode === 'in' ? 'in' : null) : null;
+  if (role === 'tx' && of('fee') && !feeMode) return { error: 'fee_mode' };
+  const parts = buildParts(t, spans);
+  if (!parts.length || !parts.some(ps => ps.some(p => p.l != null && /[\p{L}]{2,}/u.test(p.l)))) return { error: 'too_generic' };
+  const sp = {}, skips = [], fl = {};
+  spans.forEach(x => { if (x.k === 'skip') skips.push([x.a, x.b]); else { sp[x.k] = [x.a, x.b]; fl[x.k] = { type: FIELD_TYPE[x.k] }; } });
+  const tpl = { kind: 'sms', v: 3, version: 3, role, family: role === 'tx' ? meta.family : null, direction: role === 'tx' ? meta.direction : null, bank: meta.bank || null, sender: meta.sender || null,
+    feeMode, dateOrder, datePat, declined: DECLINED.test(t), parts, spans: sp, skips, fields: fl, sig: shapeSigOf(parts), lineCount: parts.length };
+  const vals = matchFormat(tpl, t); if (!vals) return { error: 'self_test_failed' };
+  let preview = null;
+  if (role === 'tx') {
+    preview = applyFormat(tpl, t);
+    const a = of('amount'), want = Number(t.slice(a.a, a.b).replace(/,/g, ''));
+    if (!preview || !preview.ok || !tpl.family || !tpl.direction || Math.abs((preview.amountRead != null ? preview.amountRead : preview.grossAmount) - want) > 0.001) return { error: 'self_test_failed' };
+  }
+  return { template: tpl, preview };
+}
+// اقتراح مبدئي للمتغيرات من قراءة مخمّنة (للتعبئة بس: المستخدم يصحح ويعتمد)
+function suggestSpans(text, info) {
+  const t = norm(text), taken = [], spans = {}, skips = [];
+  const put = (k, pos) => { if (pos && !taken.some(([x, y]) => pos[0] < y && pos[1] > x)) { spans[k] = pos; taken.push(pos); return true; } return false; };
+  const tok = findDateToken(t); if (tok) { const g = /(^|[^\d])(\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4})(?!\d)/g; let m; while ((m = g.exec(t))) { if (m[2] === tok.raw) { const a = m.index + m[1].length; put('date', [a, a + tok.raw.length]); break; } } }
+  { const g = /\d{1,2}:\d{2}(?::\d{2})?(?:[ \t]*(?:am|pm|صباحا|صباحًا|مساء|مساءً|ص|م)(?![\p{L}\d]))?/giu; let m; while ((m = g.exec(t))) { if (parseTime(m[0]) && put('time', [m.index, m.index + m[0].length])) break; } }
+  info = info || {};
+  const loc = (k, v) => { if (v == null || v === '') return; put(k, locateValue(t, k, v, taken)); };
+  loc('amount', info.amountRead != null ? info.amountRead : info.grossAmount);
+  if (info.feeAmount) loc('fee', info.feeAmount);
+  if (info.balanceAfter != null) loc('balance', info.balanceAfter);
+  loc('cardLast4', info.instrumentLast4); loc('accountLast4', info.accountLast4);
+  const nameKey = info.family === 'sms_transfer_out' ? 'beneficiary' : (info.family === 'sms_transfer_in' || info.family === 'salary') ? 'counterparty' : 'merchant';
+  const nameVal = nameKey === 'beneficiary' ? info.beneficiaryRaw : nameKey === 'counterparty' ? info.counterpartyName : info.merchantRaw;
+  if (nameVal) {
+    // الاسم المخمّن ممكن يبلع كلمة ثابتة بعده (مثل «BOOKING رسوم SAR 2.30»): نشيلها من الاقتراح
+    let pos = locateValue(t, nameKey, nameVal, taken);
+    if (pos) { const v = t.slice(pos[0], pos[1]), cut = v.match(/\s+(?:رسوم|الرسوم|عموله|عمولة|ضريبه|ضريبة|مبلغ|المبلغ|رصيد|الرصيد|fees?|vat|amount|balance)\s*:?$/i); if (cut && cut.index > 0 && new RegExp('^\\s*:?\\s*(?:' + CUR + '|\\d)', 'i').test(t.slice(pos[1]))) pos = [pos[0], pos[0] + cut.index]; }
+    put(nameKey, pos);
+  }
+  // أكواد فيها حروف وأرقام (مثل رقم مرجع): نص يتغير من رسالة لرسالة
+  { const g = /[A-Za-z0-9][A-Za-z0-9\-_/]{5,}/g; let m; while ((m = g.exec(t))) { const x = m[0]; if (/\d/.test(x) && /[A-Za-z]/.test(x)) { const pos = [m.index, m.index + x.length]; if (!taken.some(([a, b]) => pos[0] < b && pos[1] > a)) { skips.push(pos); taken.push(pos); } } } }
+  // الرسوم فوق المبلغ؟ إذا المبلغ + الرسوم = رقم ثالث مكتوب في الرسالة (مثل «المبلغ المستحق»)
+  let feeTop = null;
+  if (spans.amount && spans.fee) {
+    const num = (r) => Number(t.slice(r[0], r[1]).replace(/,/g, '')), tot = Math.round((num(spans.amount) + num(spans.fee)) * 100);
+    const g = /\d[\d,]*(?:\.\d+)?/g; let m;
+    while ((m = g.exec(t))) { if (m.index === spans.amount[0] || m.index === spans.fee[0]) continue; if (Math.round(Number(m[0].replace(/,/g, '')) * 100) === tot && tot > 0) { feeTop = [m.index, m.index + m[0].length]; break; } }
+  }
+  return { spans, skips, feeTop };
+}
+
+root.SmsReader = { WORD_GROUPS, wordKey, defaultWords, compileWords, DEFAULT_W, familyOf, methodByWords, onlineByWords, norm, splitMessages, splitDetails, segWarn, dateChoices, parseTime, methodOf, findDateToken, readDateOrder, ordersFor, ORDER_L, classify, extractAmount, parseGeneric, learnTemplate, applyTemplate, templateScore, learnFormat, matchFormat, formatSpansIn, applyFormat, suggestSpans, shapeSigOf, hasMoney, fmtLiteralLen, FIELD_TYPE, findDate, wordsOf, OTP_STRONG, FAMILY_RULES };
 if (typeof module !== 'undefined' && module.exports) module.exports = root.SmsReader;
 })(typeof globalThis !== 'undefined' ? globalThis : this);
