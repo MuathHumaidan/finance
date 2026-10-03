@@ -270,6 +270,8 @@ const DEFAULT_SETTINGS = {
   commitPlans: {}, commitCfg: { alertMode: 'pct', alertValue: 5, n: 3 }, migrated170: false, migrated170dates: false,
   // 1.7.1: الالتزامات (سؤال الاعتماد ونظام الدفعات)، والصيغ الثابتة للرسائل
   migrated171: false,
+  // 1.8.0: فرق المبلغ المقبول بين الرسالة والكشف (%) عشان يعتبره «يمكن نفس العملية»، والترقية
+  mergeNearPct: 3, migrated180: false,
 };
 
 class Store {
@@ -802,6 +804,10 @@ async function buildTx(store, plan, H, acc, info, line, sourceType, recordId) {
     foreignAmount: info.foreignAmount || null, foreignCurrency: info.foreignCurrency || null });
   tx.sourceLinks = [{ sourceType, importId: plan.id, sourceRecordId: recordId, rawDescription: sanitizeText(line.raw) }];
   tx._family = info.family; tx._row = line.rowIndex;
+  // 1.8.0: بنك بقالب متعلّم: «المحل» هو وصف السطر كامل، مو اسم محل مقروء. فما يعتبر اختلاف محل عند الدمج
+  if (info.family === 'generic') tx.descParty = true;
+  // تاريخ العملية معروف من السطر نفسه (مكتوب في الوصف، أو عمود لحاله في كشف البطاقة)، مو يوم القيد بس
+  if (info.time || line.transactionDate || (info.transactionDate && info.transactionDate !== (line.postingDate || info.postingDate)) || (info.family !== 'generic' && /(^|[^0-9])\d{1,2}[-\/]\d{1,2}[-\/]\d{4}(?![0-9])/.test(String(line.raw || '')))) tx.dateReal = true;
   const fee = info.feeAmount || 0, vat = info.vatAmount || 0;
   tx.feeAmount = fee; tx.vatAmount = vat; tx.principalAmount = round2(tx.grossAmount - fee - vat);
   if (fee || vat) tx.feeTaxBreakdownKnown = true;
@@ -904,7 +910,7 @@ async function buildTx(store, plan, H, acc, info, line, sourceType, recordId) {
       tx.cardPaymentStatus = 'unmatched'; tx.transferLinkStatus = 'one_sided';
       break;
     }
-    case 'card_statement_credit': tx.transactionType = 'Unknown'; tx.classificationStatus = 'unclassified'; tx.merchantRaw = cleanText(line.raw).slice(0, 60); break;
+    case 'card_statement_credit': tx.transactionType = 'Unknown'; tx.classificationStatus = 'unclassified'; tx.merchantRaw = sanitizeText(cleanText(line.raw)).slice(0, 60); break;
     case 'installment': {
       tx.transactionType = 'Payment'; tx.classificationStatus = 'confirmed';
       tx.merchantRaw = 'قسط تمويل ••' + info.loanRef.slice(-4);
@@ -966,10 +972,10 @@ async function buildTx(store, plan, H, acc, info, line, sourceType, recordId) {
       tx.merchantRaw = info.merchantRaw || null;
       const merchant = info.direction === 'out' && info.merchantRaw ? resolveMerchant(store, info.merchantRaw, plan.newMerchants) : null;
       if (merchant && (merchant.categoryId || merchant.suggestedCategoryId)) { tx.transactionType = 'Payment'; tx.classificationStatus = 'confirmed'; tx.merchantId = merchant.id; applyMerchantCategory(tx, merchant, null); }
-      else { tx.transactionType = 'Unknown'; tx.classificationStatus = 'unclassified'; if (merchant) tx.merchantId = merchant.id; if (!tx.merchantRaw) tx.merchantRaw = cleanText(line.raw).slice(0, 60); }
+      else { tx.transactionType = 'Unknown'; tx.classificationStatus = 'unclassified'; if (merchant) tx.merchantId = merchant.id; if (!tx.merchantRaw) tx.merchantRaw = sanitizeText(cleanText(line.raw)).slice(0, 60); }
       break;
     }
-    default: tx.transactionType = 'Unknown'; tx.classificationStatus = 'unclassified'; tx.merchantRaw = cleanText(line.raw).slice(0, 60);
+    default: tx.transactionType = 'Unknown'; tx.classificationStatus = 'unclassified'; tx.merchantRaw = sanitizeText(cleanText(line.raw)).slice(0, 60);
   }
   // تصنيف انحذف ما ينحط على عملية جديدة (بذور التجار والكلمات المفتاحية ثابتة في الكود)
   if (tx.categoryId || tx.subcategoryId) { const [lc, ls] = liveCat(store, tx.categoryId, tx.subcategoryId); if (lc !== tx.categoryId) tx.categorySource = null; tx.categoryId = lc; tx.subcategoryId = ls; }
@@ -1057,8 +1063,8 @@ async function prepareImport(store, file, opts) {
     let info;
     if (det.kind === 'alinma_card') info = interpretCardLine(line);
     else if (det.kind === 'alinma_account' || (det.kind === 'learned' && /إنماء|الانماء|alinma/i.test(det.template.bank || ''))) info = interpretAlinmaLine(line);
-    else info = { direction: (line.credit + line.debit) < 0 ? 'out' : 'in', grossAmount: round2(Math.abs(line.credit + line.debit)), postingDate: line.postingDate, transactionDate: line.postingDate, time: null, family: 'generic', merchantRaw: cleanText(line.raw).slice(0, 80) };
-    if (plan.kind === 'credit_card' && det.kind === 'learned') { info.family = info.direction === 'out' ? 'card_purchase' : 'card_statement_credit'; info.merchantRaw = cleanText(line.raw).slice(0, 80); }
+    else info = { direction: (line.credit + line.debit) < 0 ? 'out' : 'in', grossAmount: round2(Math.abs(line.credit + line.debit)), postingDate: line.postingDate, transactionDate: line.postingDate, time: null, family: 'generic', merchantRaw: sanitizeText(cleanText(line.raw)).slice(0, 80) }; // 1.8.0: الأرقام الطويلة تنخفي قبل ما يصير الوصف اسمًا
+    if (plan.kind === 'credit_card' && det.kind === 'learned') { info.family = info.direction === 'out' ? 'card_purchase' : 'card_statement_credit'; info.merchantRaw = sanitizeText(cleanText(line.raw)).slice(0, 80); }
 
     const tx = await buildTx(store, plan, H, acc, info, line, sourceType, 'row-' + line.rowIndex);
     plan.txs.push(tx);
@@ -1100,6 +1106,11 @@ async function prepareImport(store, file, opts) {
   // عمليات حذفتها قبل وجات مرة ثانية في هذا الملف: تبقى محذوفة إلا إذا اخترت «رجّعها»
   const autoIds = new Set(plan.matches.auto.map(a => a.newId));
   plan.deletedMatches = findDeletedMatches(store, plan.txs.filter(t => !autoIds.has(t.id)), alias);
+  // 1.8.0: مبلغ مختلف بفرق بسيط مع عملية من رسالة (نفس المحل والحساب وقريبة في التاريخ)، وكم تطابق تلقائي فيه اختلاف (للعرض في مراجعة الاستيراد)
+  { const allM = plan.matches.auto.concat(plan.matches.review), usedN = new Set(allM.map(x => x.newId).concat(Array.from(plan.deletedMatches.keys()))), usedE = new Set(allM.map(x => x.existingId));
+    plan.matches.near = findNearMatches(store, plan.txs, { sourceType, accountAlias: alias, planInstruments: plan.newInstruments }, usedN, usedE);
+    const byId = new Map(plan.txs.map(t => [t.id, t]));
+    plan.diffCount = plan.matches.auto.filter(a => { const tx = byId.get(a.newId), ex = store.get('transactions', a.existingId); return !!(tx && ex && mergeDiffFields(store, ex, tx).length); }).length; }
   plan.summary = summarizePlan(store, plan);
   return plan;
 }
@@ -1153,9 +1164,10 @@ function genericBalanceCheck(lines) {
 
 function summarizePlan(store, plan) {
   const s = { total: plan.txs.length, autoMerged: 0, deletedAgain: 0, possible: 0, newTx: 0, internal: 0, cardPayments: 0, roundUps: 0, unclassified: 0, temporary: 0, uncategorized: 0, unknownMerchants: 0, personTransfers: 0 };
-  const mergedIds = new Set(plan.matches.auto.map(a => a.newId)), possibleIds = new Set(plan.matches.review.map(r => r.newId));
+  const mergedIds = new Set(plan.matches.auto.map(a => a.newId)), possibleIds = new Set(plan.matches.review.map(r => r.newId)), nearIds = new Set((plan.matches.near || []).map(r => r.newId));
+  s.diff = plan.diffCount || 0; s.near = 0;
   plan.txs.forEach(t => {
-    if (mergedIds.has(t.id)) s.autoMerged++; else if (plan.deletedMatches && plan.deletedMatches.has(t.id)) s.deletedAgain++; else if (possibleIds.has(t.id)) s.possible++; else s.newTx++;
+    if (mergedIds.has(t.id)) s.autoMerged++; else if (plan.deletedMatches && plan.deletedMatches.has(t.id)) s.deletedAgain++; else if (possibleIds.has(t.id)) s.possible++; else if (nearIds.has(t.id)) s.near++; else s.newTx++;
     if (t.transactionType === 'InternalTransfer' && t.transferSubtype !== 'round_up') s.internal++;
     if (t.transactionType === 'CreditCardPayment') s.cardPayments++;
     if (t.transferSubtype === 'round_up') s.roundUps++;
@@ -1197,7 +1209,8 @@ function srcTypes(tx) { return (tx.sourceLinks || []).map(s => s.sourceType); }
 
 function scorePair(store, a, b, planInstruments, alias) {
   // a: عملية جديدة، b: موجودة. alias: حساب مؤقت (بطاقة من رسالة) ← الحساب الحقيقي اللي يمثله في هذا الكشف
-  if (a.direction !== b.direction || (a.currency || 'SAR') !== (b.currency || 'SAR') || cents(a.grossAmount) !== cents(b.grossAmount)) return null;
+  // 1.8.0: عملية انحسم مبلغها في «يمكن نفس العملية» تحتفظ بمبلغ المصدر الثاني (altAmounts) عشان سطره ما يرجع يدخل عملية جديدة
+  if (a.direction !== b.direction || (a.currency || 'SAR') !== (b.currency || 'SAR') || (cents(a.grossAmount) !== cents(b.grossAmount) && !(b.altAmounts || []).includes(cents(a.grossAmount)))) return null;
   const da = a.transactionDate || a.postingDate, db = b.transactionDate || b.postingDate;
   const dd = Math.abs(daysBetween(da, db));
   if (dd > 3) return null;
@@ -1245,9 +1258,16 @@ function sameSmsMessage(store, a, b, planIns) {
   // بدون تاجر (مثل السحب): ما يكفي نفس الدقيقة، لازم رصيد أو مرجع متطابق (فوق)
   return !!(a.merchantRaw && b.merchantRaw) && merchantScore(a, b, store) >= 30;
 }
+// عمليات عليها رسالة تنتظر قرارك في المراجعة (تكرار محتمل أو اختلاف): تعتبر «لها رسالة»، فرسالة ثانية ما تندمج فيها
+function smsClaimed(store) {
+  const s = new Set();
+  store.all('reviews').forEach(r => { if (r.status === 'open' && r.existingId && r.heldTx && (r.kind === 'merge_diff' || r.kind === 'sms_duplicate') && hasSmsSource(r.heldTx)) s.add(r.existingId); });
+  return s;
+}
 function findDuplicates(store, newTxs, ctx) {
   const byAmt = new Map();
-  store.all('transactions').forEach(t => { const k = cents(t.grossAmount); if (!byAmt.has(k)) byAmt.set(k, []); byAmt.get(k).push(t); });
+  const idx = (k, t) => { if (!byAmt.has(k)) byAmt.set(k, []); if (!byAmt.get(k).includes(t)) byAmt.get(k).push(t); };
+  store.all('transactions').forEach(t => { idx(cents(t.grossAmount), t); (t.altAmounts || []).forEach(k => idx(k, t)); });
   const pairs = [];
   newTxs.forEach(a => {
     (byAmt.get(cents(a.grossAmount)) || []).forEach(b => {
@@ -1255,7 +1275,8 @@ function findDuplicates(store, newTxs, ctx) {
       if (ctx.sourceType === 'sms' && hasSmsSource(b)) return; // رسالة مع رسالة ثانية = عمليتان
       const r = scorePair(store, a, b, null, ctx.accountAlias);
       if (!r || r.score < 65 && !r.cardException) return;
-      pairs.push({ newId: a.id, existingId: b.id, score: r.score, decisive: r.decisive || null, cardException: !!r.cardException, manual: !!r.manual });
+      // 1.8.0: لو فيه أكثر من مرشح بنفس القوة، اللي بدون اختلاف أول (مثل سطر كشف مكرر مع عمليته نفسها)
+      pairs.push({ newId: a.id, existingId: b.id, score: r.score, decisive: r.decisive || null, cardException: !!r.cardException, manual: !!r.manual, nd: mergeDiffFields(store, b, a).length });
     });
   });
   return resolvePairs(pairs);
@@ -1266,7 +1287,7 @@ function resolvePairs(pairs) {
   const cntNew = new Map(), cntEx = new Map();
   pairs.forEach(p => { cntNew.set(p.newId, (cntNew.get(p.newId) || 0) + 1); cntEx.set(p.existingId, (cntEx.get(p.existingId) || 0) + 1); });
   const eff = (p) => p.decisive ? 100 : p.score;
-  pairs.sort((x, y) => eff(y) - eff(x));
+  pairs.sort((x, y) => (y.decisive ? 1 : 0) - (x.decisive ? 1 : 0) || eff(y) - eff(x) || (x.decisive && y.decisive ? (x.nd || 0) - (y.nd || 0) : 0)); // الدليل الحاسم (نفس المرجع أو الرصيد) أول، حتى لو مرشح ثاني نقاطه أعلى
   const usedN = new Set(), usedE = new Set(), auto = [], review = [];
   for (let i = 0; i < pairs.length; i++) {
     const p = pairs[i];
@@ -1302,8 +1323,9 @@ function commitImport(store, plan, decisions) {
   plan.matches.auto.forEach(a => mergeMap.set(a.newId, a));
   plan.matches.review.forEach(r => { if (decisions[r.newId] === 'merge') mergeMap.set(r.newId, r); });
   const idRemap = new Map();
-  let created = 0, merged = 0;
+  let created = 0, merged = 0, held = 0;
   let restored = 0, keptDeleted = 0;
+  const nearMap = new Map(((plan.matches && plan.matches.near) || []).map(x => [x.newId, x]));
   // 1.7.0: سطر كشف تاريخه بعد اليوم ما ينحفظ إلا إذا أكدته في مراجعة الاستيراد («تاريخ في المستقبل»)
   const today = todayISO(), skipped = new Set();
   if (!plan.msgRecords) plan.txs.forEach(tx => { if (futureTx(tx, today) && decisions['future:' + tx.id] !== 'ok' && decisions[tx.id] !== 'future_ok') skipped.add(tx.id); });
@@ -1322,17 +1344,17 @@ function commitImport(store, plan, decisions) {
     if (mm) {
       const ex = store.get('transactions', mm.existingId);
       if (ex) {
-        const exOnlySms = (ex.sourceLinks || []).length && ex.sourceLinks.every(sl => sl.sourceType === 'sms');
-        const newIsStatement = (tx.sourceLinks || []).some(sl => sl.sourceType === 'account_statement' || sl.sourceType === 'card_statement');
-        ex.sourceLinks = (ex.sourceLinks || []).concat(tx.sourceLinks);
-        if (exOnlySms && newIsStatement) completeFromStatement(ex, tx);
-        carry150(ex, tx); // المدينة المقترحة من الرسالة تبقى لو الكشف ما فيه مدينة، والمعتمدة ما تتغير
-        carryShop(ex, tx);
-        ['balanceAfter', 'postingDate', 'time', 'reference', 'instrumentId', 'merchantRaw'].forEach(k => { if (ex[k] == null && tx[k] != null) ex[k] = tx[k]; });
-        ex.duplicateStatus = 'confirmed'; ex.confidenceScore = mm.score; ex.updatedAt = now;
+        // 1.8.0: ما فيه «مرجع كامل». اختلاف المحل/المستفيد أو التاريخ أو النوع: الموجودة تبقى والجديدة تنتظر في المراجعة. غيره: يتعبى الناقص بس
+        const fields = mergeDiffFields(store, ex, tx);
+        if (fields.length) { const hv = holdMergeDiff(store, plan, tx, ex, fields, mm); idRemap.set(tx.id, ex.id); if (hv._joined) { delete hv._joined; merged++; } else held++; return; }
+        mergeFill(store, ex, tx, mm.score);
         store.put('transactions', ex); idRemap.set(tx.id, ex.id); merged++;
         return;
       }
+    }
+    { // 1.8.0: نفس المحل والحساب وقريبة في التاريخ بس المبلغ يختلف بفرق بسيط: «يمكن نفس العملية» تنتظر في المراجعة
+      const nr = nearMap.get(tx.id), ex = nr ? store.get('transactions', nr.existingId) : null;
+      if (ex && cents(ex.grossAmount) !== cents(tx.grossAmount)) { const hv = holdMergeDiff(store, plan, tx, ex, ['amount'].concat(mergeDiffFields(store, ex, tx)), null, { near: true }); idRemap.set(tx.id, ex.id); if (hv._joined) { delete hv._joined; merged++; } else held++; return; }
     }
     const t = Object.assign({}, tx);
     Object.keys(t).forEach(k => { if (k.startsWith('_') && k !== '_feeSub') delete t[k]; });
@@ -1349,7 +1371,7 @@ function commitImport(store, plan, decisions) {
 
   const bc = plan.balanceCheck || {};
   const imp = { id: plan.id, filename: plan.filename, hash: plan.hash, accountId: plan.account ? plan.account.id : null, kind: plan.kind, sourceType: plan.sourceType, templateId: plan.template ? plan.template.id : (plan.kind === 'credit_card' ? 'alinma_card' : 'alinma_account'),
-    startDate: plan.startDate, endDate: plan.endDate, transactionCount: plan.txs.length, created, merged,
+    startDate: plan.startDate, endDate: plan.endDate, transactionCount: plan.txs.length, created, merged, held,
     openingBalance: bc.opening != null ? bc.opening : null, closingBalance: bc.closing != null ? bc.closing : null,
     previousBalance: plan.kind === 'credit_card' ? plan.header.previousBalance : null, previousBalanceDirection: plan.kind === 'credit_card' ? bc.direction : null,
     header: plan.header, balanceCheck: bc, balanceValidated: bc.ok === true ? true : bc.ok === false ? false : null, cardPaymentsStatus: null, createdAt: now };
@@ -1363,11 +1385,26 @@ function commitImport(store, plan, decisions) {
   absorbAutoAccounts(store, new Set(plan.accountAlias ? plan.accountAlias.keys() : []));
   sweepPeriods(store); // 1.7.0: العمليات الجديدة داخل «الفترات» تاخذ مدينتها ومجموعتها
   store.touch();
-  return { created, merged, restored, keptDeleted, importId: imp.id, idRemap, skippedFuture };
+  return { created, merged, held, restored, keptDeleted, importId: imp.id, idRemap, skippedFuture };
 }
 
 function deleteImport(store, importId) {
   let removed = 0, kept = 0;
+  // 1.8.0: سطور هذا الكشف اللي تنتظر في المراجعة (اختلاف) تنقفل معه
+  store.all('reviews').filter(r => r.status === 'open' && r.kind === 'merge_diff' && r.heldTx).forEach(r => {
+    const mine = (l) => l && l.importId === importId;
+    if (r.old) {
+      const all = [r.altLink].concat(r.altMore || []).filter(Boolean); if (!all.some(mine)) return;
+      const rest = all.filter(l => !mine(l));
+      if (!rest.length) return closeReview(store, r, 'import_deleted');
+      r.altLink = rest[0]; r.altMore = rest.slice(1); r.heldTx.sourceLinks = (r.heldTx.sourceLinks || []).filter(l => !mine(l)); store.put('reviews', r); return;
+    }
+    if (r.messageId || !(r.heldTx.sourceLinks || []).some(mine)) return;
+    // نفس السطر انضم لها من كشف ثاني: يبقى ينتظر بمصدره الباقي
+    const rest = r.heldTx.sourceLinks.filter(l => !mine(l));
+    if (!rest.length) return closeReview(store, r, 'import_deleted');
+    r.heldTx.sourceLinks = rest; r.importId = rest[0].importId || null; store.put('reviews', r);
+  });
   store.all('transactions').forEach(t => {
     if (!(t.sourceLinks || []).some(s => s.importId === importId)) return;
     const rest = t.sourceLinks.filter(s => s.importId !== importId);
@@ -1801,15 +1838,17 @@ function formatImpact(store, t) {
   return out;
 }
 // scope: {mode: 'future'} = الرسائل الجاية بس · {mode: 'all'} = وكل السابقة · {mode: 'from', from} = والسابقة من تاريخ
+// 1.8.0: {mode: 'ids', ids: [معرّف رسالة]} = اللي اخترتها بيدك من «الرسائل السابقة» بس، والباقي يبقى مثل ما هو
 async function applyFormatScope(store, id, scope) {
   const t = store.get('templates', id); if (!isFormat(t) || t.status !== 'approved') return null;
   scope = scope || {}; const out = { created: 0, corrected: 0, reviews: 0 };
-  if (scope.mode !== 'all' && scope.mode !== 'from') return out;
+  if (scope.mode !== 'all' && scope.mode !== 'from' && scope.mode !== 'ids') return out;
   if (scope.mode === 'from' && !/^\d{4}-\d{2}-\d{2}$/.test(String(scope.from || ''))) return { error: 'date' };
   if (store._scopeBusy) return { busy: true };
   store._scopeBusy = true;
   try {
-  const from = scope.mode === 'from' ? scope.from : null, imp = formatImpact(store, t), inS = (x) => !from || x.date >= from;
+  const pick = scope.mode === 'ids' ? new Set(scope.ids || []) : null;
+  const from = scope.mode === 'from' ? scope.from : null, imp = formatImpact(store, t), inS = (x) => pick ? pick.has(x.messageId) : (!from || x.date >= from);
   for (const c of imp.changes.filter(inS)) {
     const m = store.get('messages', c.messageId); if (!m) continue;
     const W = smsWordsFor(store, m.text, m.receivedAt, null, bankOf(store, m.sender)).W;
@@ -2045,7 +2084,7 @@ async function prepareSms(store, msgs, opts) {
     return false;
   });
   // المطابقة مع العمليات الموجودة بالقاعدة المعتمدة
-  plan.matches = findDuplicates(store, plan.txs, { importId: plan.id, sourceType: 'sms' });
+  plan.matches = opts.noMatch ? { auto: [], review: [] } : findDuplicates(store, plan.txs, { importId: plan.id, sourceType: 'sms' });
   plan.matches.review.forEach(r => {
     const tx = plan.txs.find(t => t.id === r.newId); if (!tx) return;
     const rec = plan.msgRecords.find(x => x.id === tx._msgId);
@@ -2055,16 +2094,48 @@ async function prepareSms(store, msgs, opts) {
     newReview(plan, rec, 'sms_duplicate', { existingId: r.existingId, score: r.score, reason: r.reason, heldTx: cleanTx(tx) });
     rec.txId = null;
   });
+  // 1.8.0: تطابق تلقائي فيه اختلاف (المحل/المستفيد، التاريخ، النوع): العملية الموجودة تبقى، والرسالة تنتظر في المراجعة (ما فيه «مرجع كامل»)
+  const diffEx = new Set();
+  const holdDiff = (tx, extra) => {
+    const rec = plan.msgRecords.find(x => x.id === tx._msgId); if (!rec) return false;
+    plan.held.set(tx.id, tx);
+    plan.reviews = plan.reviews.filter(x => !(x.kind === 'sms_partial' && x.txId === tx.id));
+    newReview(plan, rec, 'merge_diff', Object.assign({ src: 'sms', heldTx: cleanTx(tx) }, extra));
+    if (extra && extra.existingId) diffEx.add(extra.existingId);
+    rec.txId = null; return true;
+  };
+  const claimed = smsClaimed(store);
+  plan.matches.auto = plan.matches.auto.filter(a => {
+    const tx = plan.txs.find(t => t.id === a.newId), ex = store.get('transactions', a.existingId); if (!tx || !ex) return true;
+    // عملية عليها رسالة ثانية تنتظر قرارك: هذي ما تندمج فيها تلقائي (كل رسالة عملية)، تروح «تكرار محتمل» وتقرر أنت
+    if (claimed.has(ex.id)) {
+      const rec = plan.msgRecords.find(x => x.id === tx._msgId); if (!rec) return true;
+      plan.held.set(tx.id, tx);
+      plan.reviews = plan.reviews.filter(x => !(x.kind === 'sms_partial' && x.txId === tx.id));
+      newReview(plan, rec, 'sms_duplicate', { existingId: ex.id, score: a.score, reason: 'claimed', heldTx: cleanTx(tx) });
+      rec.txId = null; return false;
+    }
+    const fields = mergeDiffFields(store, ex, tx); if (!fields.length) return true;
+    return !holdDiff(tx, { existingId: a.existingId, score: a.score, reason: a.reason || null, fields });
+  });
   plan.matches.auto.forEach(a => { const rec = plan.msgRecords.find(x => x.txId === a.newId); if (rec) { rec.status = 'merged'; rec.txId = a.existingId; } });
   // عملية حذفتها قبل وجات برسالة: تنتظر قرارك (رجّعها أو خلها محذوفة)
   const autoIds = new Set(plan.matches.auto.map(a => a.newId));
-  findDeletedMatches(store, plan.txs.filter(t => !plan.held.has(t.id) && !autoIds.has(t.id)), null, { sms: true }).forEach((dm, txId) => {
+  if (!opts.noMatch) findDeletedMatches(store, plan.txs.filter(t => !plan.held.has(t.id) && !autoIds.has(t.id)), null, { sms: true }).forEach((dm, txId) => {
     const tx = plan.txs.find(t => t.id === txId), rec = plan.msgRecords.find(x => x.id === tx._msgId);
     plan.held.set(tx.id, tx);
     plan.reviews = plan.reviews.filter(x => !(x.kind === 'sms_partial' && x.txId === tx.id));
     newReview(plan, rec, 'sms_deleted_again', { deletedId: dm.deletedId, score: dm.score, heldTx: cleanTx(tx) });
     rec.txId = null;
   });
+  // 1.8.0: نفس المحل والحساب وقريبة في التاريخ بس المبلغ يختلف بفرق بسيط عن عملية من كشف: «يمكن نفس العملية»
+  if (!opts.noMatch) {
+    const usedN = new Set(Array.from(plan.held.keys()).concat(Array.from(autoIds))), usedE = new Set(plan.matches.auto.concat(plan.matches.review).map(x => x.existingId).concat(Array.from(diffEx)));
+    findNearMatches(store, plan.txs, { sourceType: 'sms', planInstruments: plan.newInstruments }, usedN, usedE).forEach(p => {
+      const tx = plan.txs.find(t => t.id === p.newId), ex = store.get('transactions', p.existingId); if (!tx || !ex) return;
+      holdDiff(tx, { existingId: ex.id, score: null, reason: null, near: true, fields: ['amount'].concat(mergeDiffFields(store, ex, tx)) });
+    });
+  }
   const st = { total: msgs.length, already: plan.alreadyStored.length, tx: 0, merged: plan.matches.auto.length, review: plan.reviews.filter(r => r.status === 'open').length, informational: 0, discarded: 0, duplicate: 0 };
   plan.msgRecords.forEach(r => { if (r.status === 'tx') st.tx++; if (r.status === 'informational') st.informational++; if (r.status === 'discarded') st.discarded++; if (r.status === 'duplicate') st.duplicate++; });
   plan.smsSummary = st;
@@ -2265,6 +2336,302 @@ function completeFromStatement(ex, tx) {
     }
   }
 }
+/* ---------- 1.8.0: دمج مصدرين لنفس العملية (رسالة وكشف): ما فيه «مرجع كامل» ----------
+   قبل: قيم الكشف تغلب. الحين: العملية الموجودة قبل تبقى بقيمها.
+   - المعلومة الناقصة عندها تتعبى من المصدر الجديد بدون سؤال (المرجع، الوقت، الرصيد، البطاقة، المحل أو المستفيد لو ما لها،
+     تفصيل الرسوم لو ما ذكرت رسوم، والنوع غير المؤكد «نوعها غير معروف» / «تحويل لشخص ما صنفته»).
+   - الرسوم أو الرصيد لو مذكورين في الاثنين ومختلفين: الموجودة تبقى بدون سؤال.
+   - اختلاف المحل/المستفيد، أو التاريخ، أو نوع العملية ← مراجعة «merge_diff»: الجديدة تنتظر فيها (heldTx) وما تنحسب لين تقرر،
+     وتختار لكل خانة «الموجودة» أو «الجديدة» (والمحل: «نفس المحل بكتابة ثانية» فيتذكرها)، أو «عمليتين مختلفتين».
+   - المبلغ المختلف بفرق بسيط (نفس الحساب/البطاقة، نفس المحل، في حدود 3 أيام، والفرق لين النسبة في الإعدادات) ← «يمكن نفس العملية» (near).
+   خانة قررتها بيدك (تاريخ حددته، نوع غيّرته، محل لهذي العملية بس) ما تنسأل عنها. */
+const TYPE_BUNDLE = ['transactionType', 'classificationStatus', 'transferSubtype', 'incomeSubtype', 'counterpartyAccountId', 'transferLinkStatus', 'targetCardId', 'targetCardLast4', 'cardPaymentStatus'];
+const typeSure = (t) => t.classificationStatus === 'confirmed' && t.transactionType !== 'Unknown';
+const hasFees = (t) => round2((Number(t.feeAmount) || 0) + (Number(t.vatAmount) || 0)) > 0.004;
+const srcKindOf = (t) => { const s = (t.sourceLinks || [])[0]; return s ? s.sourceType : null; };
+const isStmtLink = (l) => !!l && (l.sourceType === 'account_statement' || l.sourceType === 'card_statement');
+// «المحل» هو وصف سطر كشف الحساب كامل (قالب متعلّم)، مو اسم محل مقروء. العمليات القديمة ما عليها العلامة فتنعرف من تطابق الاسم مع نص السطر
+const descLike = (t) => {
+  if (t.descParty) return true;
+  const l = (t.sourceLinks || [])[0]; if (!(l && l.sourceType === 'account_statement' && t.merchantRaw && l.rawDescription)) return false;
+  const d = normAr(sanitizeText(cleanText(l.rawDescription))), m = normAr(sanitizeText(t.merchantRaw));
+  return !!m && (d === m || (m.length >= 20 && d.startsWith(m))); // الاسم = نص السطر (أو أوله لو السطر أطول من 80 حرف)
+};
+// عملية من كشف بس، وتاريخها هو يوم القيد (السطر ما فيه تاريخ العملية نفسها ولا وقتها)
+// سطر كشف حساب ما في نصه تاريخ. كشف البطاقة له عمود لتاريخ العملية، والسطر اللي في وصفه تاريخ = تاريخ العملية معروف
+const DATE_IN_TEXT = /(^|[^0-9])(\d{1,2}[-\/]\d{1,2}[-\/]\d{4}|\d{4}[-\/]\d{1,2}[-\/]\d{1,2})(?![0-9])/;
+const bookLink = (l) => !!l && l.sourceType === 'account_statement' && !DATE_IN_TEXT.test(String(l.rawDescription || ''));
+const bookOnly = (t) => !t.time && !t.dateReal && !!t.postingDate && (t.transactionDate || t.postingDate) === t.postingDate && (t.sourceLinks || []).length > 0 && (t.sourceLinks || []).every(bookLink) && t.dateSource !== 'user';
+// التاريخ الفعلي يعبّي يوم القيد: الموجودة تاريخها يوم القيد بس، والثانية تعرف تاريخ العملية (قبله، في حدود 3 أيام)
+function fillRealDate(ex, tx, exBook) {
+  const de = ex.transactionDate || ex.postingDate, dn = tx.transactionDate || tx.postingDate;
+  if (!(exBook && !bookOnly(tx) && de && dn && dn < de && Math.abs(daysBetween(dn, de)) <= 3)) return false;
+  ex.transactionDate = dn; ex.dateReal = true; if (tx.dateArrival) ex.dateArrival = tx.dateArrival; if (tx.dateShape) ex.dateShape = tx.dateShape;
+  return true;
+}
+// بعد ما يتغير تاريخ عملية: علامات «الفترات» اللي ما عادت تغطي تاريخها ترجع (مثل حذف الفترة لهذي العملية بس)
+function dropStalePeriodMarks(store, t) {
+  const d = t.transactionDate || t.postingDate, list = periodsList(store), inP = (p) => p && d >= p.from && d <= p.to;
+  if (t.periodCity) { const p = list.find(x => x.id === t.periodCity.pid); if (!inP(p)) { if (p && t.cityId === p.cityId) restorePeriodCity(t); else delete t.periodCity; } }
+  if (t.periodGroups) {
+    const pg = Object.assign({}, t.periodGroups);
+    Object.keys(pg).forEach(pid => { if (inP(list.find(x => x.id === pid))) return; const g = pg[pid]; delete pg[pid]; if (!Object.values(pg).includes(g)) t.groupIds = (t.groupIds || []).filter(x => x !== g); });
+    if (Object.keys(pg).length) t.periodGroups = pg; else delete t.periodGroups;
+  }
+}
+// رسالة ما تنضم لعملية فيها رسالة ثانية (كل رسالة عملية)
+const smsConflict = (ex, held) => hasSmsSource(held) && (ex.sourceLinks || []).some(l => l.sourceType === 'sms' && l.messageId !== ((held.sourceLinks || []).find(x => x.sourceType === 'sms') || {}).messageId);
+// نفس سطر الكشف (جا مرة ثانية من كشف متداخل): نفس الحساب والاتجاه والمبلغ ويوم القيد، ونفس الرصيد أو المرجع أو نص السطر
+function sameStmtRow(a, b) {
+  if (!a || !b || !isStmtLink((a.sourceLinks || [])[0]) || !isStmtLink((b.sourceLinks || [])[0])) return false;
+  if ((a.accountId || null) !== (b.accountId || null) || a.direction !== b.direction || cents(a.grossAmount) !== cents(b.grossAmount)) return false;
+  if ((a.postingDate || a.transactionDate || null) !== (b.postingDate || b.transactionDate || null)) return false;
+  if (a.balanceAfter != null && b.balanceAfter != null) return cents(a.balanceAfter) === cents(b.balanceAfter);
+  if (a.reference && b.reference) return a.reference === b.reference;
+  const ra = normAr(((a.sourceLinks || [])[0] || {}).rawDescription || ''), rb = normAr(((b.sourceLinks || [])[0] || {}).rawDescription || '');
+  return !!ra && ra === rb;
+}
+function nearPct(store) { const v = Number(store.settings.mergeNearPct); return isFinite(v) && v >= 0 ? Math.min(v, 20) : 3; }
+// نفس المحل: نفس السجل، أو كتابة وحدة منهم معروفة للمحل الثاني (فاتورة تحتمل أكثر من محل)
+function sameShop(store, a, b) {
+  if (!a.merchantId || !b.merchantId) return false;
+  if (a.merchantId === b.merchantId) return true;
+  const has = (t, mid) => { const al = invoiceAliasOf(t); return !!al && shopsForAlias(store, al).some(m => m.id === mid); };
+  return has(a, b.merchantId) || has(b, a.merchantId);
+}
+// الخانات المختلفة بين العملية الموجودة والجديدة (اللي تروح المراجعة): party · date · type
+function mergeDiffFields(store, ex, tx, opts) {
+  opts = opts || {};
+  const out = [];
+  const pe = ex.beneficiaryId ? 'b' : ex.merchantId ? 'm' : null, pn = tx.beneficiaryId ? 'b' : tx.merchantId ? 'm' : null;
+  // ما ينسأل عن الجهة: محل ثبّته لهذي العملية، أو قررت فيه قبل، أو «المحل» مجرد وصف سطر كشف (قالب متعلّم)
+  if (pe && pn && !ex.merchantLocked && !ex.partyDecided && !descLike(ex) && !descLike(tx)) {
+    const same = pe === pn && (pe === 'b' ? ex.beneficiaryId === tx.beneficiaryId : sameShop(store, ex, tx));
+    if (!same) out.push('party');
+  }
+  const de = ex.transactionDate || ex.postingDate, dn = tx.transactionDate || tx.postingDate;
+  if (!opts.noDate && de && dn && de !== dn && ex.dateSource !== 'user') {
+    // تاريخ القيد مو تاريخ العملية: سطر كشف ما فيه تاريخ العملية نفسها (تاريخه = يوم القيد) ويوم قيده في يوم العملية أو بعده = مو اختلاف
+    const book = (bookOnly(tx) && dn > de) || (bookOnly(ex) && de > dn);
+    // رسالة آخر الليل (1.7.0): البنك كتب تاريخ اليوم الجاي والتطبيق اعتمد يوم الوصول. نفس تاريخ البنك في المصدر الثاني مو اختلاف جديد (بالترتيبين)
+    const night = (ex.dateArrival && dn === addDays(de, 1)) || (tx.dateArrival && de === addDays(dn, 1));
+    if (!book && !night) out.push('date');
+  }
+  if (ex.typeSource !== 'user' && typeSure(ex) && typeSure(tx) && ex.transactionType !== tx.transactionType) out.push('type');
+  return out;
+}
+function takeType(ex, tx) {
+  TYPE_BUNDLE.forEach(k => { ex[k] = tx[k] === undefined ? null : tx[k]; });
+  if (tx.cardPaymentByUser) ex.cardPaymentByUser = true; else delete ex.cardPaymentByUser;
+  const type = ex.transactionType;
+  if (type !== 'Refund') { delete ex.refundOfId; ex.refundItemAllocations = []; }
+  if (type !== 'CashWithdrawal') delete ex.cashParts;
+  if (type !== 'CashDeposit') { ex.cashReturnOfId = null; ex.cashReturnPartId = null; }
+  if (ex.categorySource !== 'user_txn' && (!ex.categoryId || ex.categorySource !== 'user_rule')) { ex.categoryId = tx.categoryId || null; ex.subcategoryId = tx.subcategoryId || null; ex.categorySource = tx.categorySource || null; }
+}
+function takeParty(store, ex, tx) {
+  ex.merchantId = tx.merchantId || null; ex.beneficiaryId = tx.beneficiaryId || null;
+  if (tx.merchantRaw) ex.merchantRaw = tx.merchantRaw;
+  if (tx.beneficiaryRaw) ex.beneficiaryRaw = tx.beneficiaryRaw;
+  if (tx.beneficiaryLast4) ex.beneficiaryLast4 = tx.beneficiaryLast4;
+  ex.shopChoicePending = !!tx.shopChoicePending; ex.invoiceAlias = tx.invoiceAlias || null; delete ex.merchantLocked;
+  if (ex.categorySource === 'user_txn' || ex.categorySource === 'user_rule') return;
+  const m = ex.merchantId ? store.get('merchants', ex.merchantId) : null, b = ex.beneficiaryId ? store.get('beneficiaries', ex.beneficiaryId) : null;
+  if (m && ex.transferSubtype !== 'round_up' && (ex.transactionType === 'Payment' || ex.transactionType === 'Refund' || ex.transactionType === 'CashExpense')) applyMerchantCategory(ex, m, null);
+  else if (b && ex.typeSource !== 'user' && ['PersonTransfer', 'InternalTransfer', 'Unknown', 'CreditCardPayment'].includes(ex.transactionType)) applyBeneficiaryClassification(ex, b);
+}
+// ضم مصدر جديد لعملية موجودة: يعبّي الناقص بس، وما يغيّر قيمة موجودة
+function mergeFill(store, ex, tx, score) {
+  const exBook = bookOnly(ex);
+  ex.sourceLinks = (ex.sourceLinks || []).concat(tx.sourceLinks || []);
+  if (fillRealDate(ex, tx, exBook)) dropStalePeriodMarks(store, ex);
+  if (!hasFees(ex) && hasFees(tx) && cents(ex.grossAmount) === cents(tx.grossAmount)) { // الموجودة ما ذكرت رسوم، والجديدة فصّلتها (نفس الإجمالي)
+    ['principalAmount', 'feeAmount', 'vatAmount', 'feeTaxBreakdownKnown'].forEach(k => { if (tx[k] != null) ex[k] = tx[k]; });
+    const fs = tx._feeSub || tx.feeSubcategoryId; if (fs) ex.feeSubcategoryId = fs;
+  }
+  ['balanceAfter', 'postingDate', 'time', 'reference', 'instrumentId', 'merchantRaw', 'beneficiaryRaw', 'beneficiaryLast4', 'foreignAmount', 'foreignCurrency'].forEach(k => { if (ex[k] == null && tx[k] != null) ex[k] = tx[k]; });
+
+  if ((!ex.paymentMethod || ex.paymentMethod === 'Unknown') && tx.paymentMethod && tx.paymentMethod !== 'Unknown') ex.paymentMethod = tx.paymentMethod;
+  if (!ex.merchantId && !ex.beneficiaryId) {
+    if (tx.merchantId) { ex.merchantId = tx.merchantId; if (tx.shopChoicePending) { ex.shopChoicePending = true; ex.invoiceAlias = tx.invoiceAlias; } }
+    else if (tx.beneficiaryId) ex.beneficiaryId = tx.beneficiaryId;
+  }
+  // النوع غير المؤكد = معلومة ناقصة: يتعبى من المصدر اللي يعرفه (إلا لو غيّرت النوع بيدك)
+  if (ex.typeSource !== 'user' && !typeSure(ex) && typeSure(tx) && ex.transferSubtype !== 'round_up') takeType(ex, tx);
+  else if (!ex.categoryId && tx.categoryId && ex.categorySource !== 'user_txn' && ex.transactionType === tx.transactionType && ex.transferSubtype !== 'round_up') { ex.categoryId = tx.categoryId; ex.subcategoryId = tx.subcategoryId || null; ex.categorySource = tx.categorySource || null; if (ex.transactionType === 'PersonTransfer') ex.classificationStatus = 'confirmed'; }
+  carry150(ex, tx); carryShop(ex, tx); carrySub(ex, tx);
+  ex.duplicateStatus = 'confirmed'; if (score != null) ex.confidenceScore = score; ex.updatedAt = new Date().toISOString();
+  return ex;
+}
+// مراجعة اختلاف لعملية من كشف أو إدخال (الرسائل: newReview في prepareSms)
+function holdMergeDiff(store, plan, tx, ex, fields, mm, extra) {
+  if (!tx._msgId && isStmtLink((tx.sourceLinks || [])[0])) {
+    const dup = store.all('reviews').find(r => r.status === 'open' && r.kind === 'merge_diff' && r.existingId === ex.id && r.heldTx && !r.old && sameStmtRow(r.heldTx, tx));
+    if (dup) { dup.heldTx.sourceLinks = (dup.heldTx.sourceLinks || []).concat(JSON.parse(JSON.stringify(tx.sourceLinks || []))); store.put('reviews', dup); return Object.assign(dup, { _joined: true }); }
+  }
+  const rv = Object.assign({ id: uid(), kind: 'merge_diff', status: 'open', createdAt: new Date().toISOString(), messageId: null, importId: plan ? plan.id : null,
+    existingId: ex.id, score: mm ? (mm.score == null ? null : mm.score) : null, reason: mm ? (mm.reason || null) : null, fields, src: srcKindOf(tx), heldTx: cleanTx(tx) }, extra || {});
+  const rec = plan && plan.msgRecords && tx._msgId ? plan.msgRecords.find(x => x.id === tx._msgId) : null;
+  if (rec) { rec.status = 'review'; rec.txId = null; rec.reviewId = rv.id; rv.messageId = rec.id; plan.reviews.push(rv); }
+  else store.put('reviews', rv);
+  return rv;
+}
+// تطابقات قريبة: نفس الحساب/البطاقة ونفس المحل وفي حدود 3 أيام، والمبلغ يختلف بفرق بسيط. رسالة مع كشف بس (مو رسالة مع رسالة)
+function findNearMatches(store, newTxs, ctx, usedNew, usedEx) {
+  const pct = nearPct(store); if (!(pct > 0)) return [];
+  const newIsSms = ctx.sourceType === 'sms', alias = ctx.accountAlias || null, pIns = ctx.planInstruments || null;
+  const claimed = newIsSms ? smsClaimed(store) : null;
+  const pool = store.all('transactions').filter(b => b.merchantId && !usedEx.has(b.id) && !(claimed && claimed.has(b.id)) && (newIsSms ? (hasStatementLink(b) && !hasSmsSource(b)) : (hasSmsSource(b) && !hasStatementLink(b))));
+  if (!pool.length) return [];
+  const pairs = [];
+  newTxs.forEach(a => {
+    if (usedNew.has(a.id) || !a.merchantId || !(a.grossAmount > 0)) return;
+    const da = a.transactionDate || a.postingDate; if (!da) return;
+    pool.forEach(b => {
+      if (a.direction !== b.direction || (a.currency || 'SAR') !== (b.currency || 'SAR') || a.transactionType !== b.transactionType) return;
+      const db = b.transactionDate || b.postingDate; if (!db) return;
+      const dd = Math.abs(daysBetween(da, db)); if (dd > 3) return;
+      if (a.time && b.time && Math.abs(minutesOf(da, a.time) - minutesOf(db, b.time)) > 60) return; // وقت في الطرفين وفرقه أكثر من ساعة = عمليتين (نفس قاعدة المطابقة)
+      const accA = (alias && alias.get(a.accountId)) || a.accountId, accB = (alias && alias.get(b.accountId)) || b.accountId;
+      if (accA && accB && accA !== accB) return;
+      let ia = instrumentKey(store, a, pIns), ib = instrumentKey(store, b, pIns);
+      if (accA !== a.accountId || accB !== b.accountId) { ia = ia && ia.split(':')[1]; ib = ib && ib.split(':')[1]; }
+      if (ia && ib && ia !== ib) return;
+      if (!sameShop(store, a, b)) return;
+      const diff = Math.abs(a.grossAmount - b.grossAmount); if (diff < 0.005) return;
+      if (diff > pct / 100 * Math.max(a.grossAmount, b.grossAmount) + 0.0049) return;
+      pairs.push({ newId: a.id, existingId: b.id, diff: round2(diff), dd });
+    });
+  });
+  pairs.sort((p, q) => p.diff - q.diff || p.dd - q.dd);
+  const un = new Set(), ue = new Set(), out = [];
+  pairs.forEach(p => { if (un.has(p.newId) || ue.has(p.existingId)) return; un.add(p.newId); ue.add(p.existingId); out.push(p); });
+  return out;
+}
+// بعد «نفس المحل» (أو دمج محلين): مراجعات الاختلاف اللي ما عاد فيها اختلاف محل تنقفل لحالها
+function recheckMergeDiffs(store) {
+  let n = 0;
+  store.all('reviews').filter(r => r.status === 'open' && r.kind === 'merge_diff' && (r.fields || []).includes('party')).forEach(r => {
+    const ex = store.get('transactions', r.existingId), held = r.heldTx; if (!ex || !held) return;
+    const pe = ex.beneficiaryId ? 'b' : ex.merchantId ? 'm' : null, pn = held.beneficiaryId ? 'b' : held.merchantId ? 'm' : null;
+    const same = pe && pe === pn && (pe === 'b' ? ex.beneficiaryId === held.beneficiaryId : sameShop(store, ex, held));
+    if (!same) return;
+    if (!r.old && smsConflict(ex, held)) return; // العملية صار فيها رسالة ثانية: ما تندمج لحالها، تبقى تنتظر قرارك
+    r.fields = r.fields.filter(k => k !== 'party');
+    if (r.fields.length) { store.put('reviews', r); return; }
+    finishMerge(store, r, ex, {}); n++;
+  });
+  return n;
+}
+function finishMerge(store, r, ex, pick) {
+  const held = r.heldTx, msg = r.messageId ? store.get('messages', r.messageId) : null;
+  r.status = 'closing'; // دمج المحلين تحت يعيد فحص المراجعات المفتوحة: هذي ما تنفحص مرتين
+  const type0 = ex.transactionType, amt0 = cents(ex.grossAmount);
+  if (!r.old) mergeFill(store, ex, held, r.score);
+  // المنتظرة كانت عملية محفوظة قبل (بطاقة مؤقتة انضمت لحسابها): قراراتك عليها تبقى، مثل الدمج بدون اختلاف
+  if (r.absorbed) ABSORB_KEEP.forEach(k => { if (held[k] != null && held[k] !== '' && (ex[k] == null || ex[k] === '' || ex[k] === false || held.categorySource === 'user_txn')) ex[k] = held[k]; });
+  let typeCh = ex.transactionType !== type0;
+  (r.fields || []).forEach(k => {
+    const p = pick[k] || 'cur';
+    if (k === 'date') {
+      if (p === 'new') { ex.transactionDate = held.transactionDate || held.postingDate; if (held.time) ex.time = held.time; delete ex.dateArrival; ex.dateShape = null; }
+      ex.dateSource = 'user'; // قررت فيه: ما ينسأل عنه مرة ثانية ولا تغيّره صيغة
+    }
+    if (k === 'type') { if (p === 'new') { takeType(ex, held); typeCh = true; } ex.typeSource = 'user'; }
+    if (k === 'party') {
+      if (p === 'same' && ex.merchantId && held.merchantId && ex.merchantId !== held.merchantId && store.get('merchants', held.merchantId)) { store.put('transactions', ex); mergeMerchants(store, ex.merchantId, held.merchantId); }
+      else { if (p === 'new') takeParty(store, ex, held); ex.partyDecided = true; } // قررت فيه: نفس السطر من كشف ثاني ما ينسأل عنه
+    }
+    if (k === 'amount' && p === 'new') {
+      ['grossAmount', 'principalAmount', 'feeAmount', 'vatAmount', 'feeTaxBreakdownKnown', 'foreignAmount', 'foreignCurrency'].forEach(c => { if (held[c] !== undefined) ex[c] = held[c]; });
+      if (held.feeSubcategoryId) ex.feeSubcategoryId = held.feeSubcategoryId;
+      if (held.balanceAfter != null) ex.balanceAfter = held.balanceAfter;
+    }
+    // المبلغ اللي ما اعتمدته يبقى معروف للعملية: نفس السطر من كشف متداخل يطابقها وما يدخل عملية جديدة
+    if (k === 'amount') { const other = p === 'new' ? amt0 : cents(held.grossAmount); if (other !== cents(ex.grossAmount)) ex.altAmounts = Array.from(new Set((ex.altAmounts || []).concat([other]))); }
+  });
+  ex.updatedAt = new Date().toISOString(); store.put('transactions', ex);
+  if (msg && !r.old) { msg.status = 'merged'; msg.txId = ex.id; msg.userMerged = true; store.put('messages', msg); }
+  if (held.id && held.id !== ex.id) remapTxRefs(store, held.id, ex.id); // لو المنتظرة كانت عملية محفوظة قبل (حساب مؤقت انضم لحسابه): اللي يشير لها يشير للباقية
+  r.picks = pick; closeReview(store, r, 'merge');
+  if (typeCh) pairTransfers(store);
+  return ex;
+}
+// بعد «عمليتين»: لو مصدر ثاني (كشف مع رسالة) ينتظر على نفس العملية الموجودة وهو يطابق العملية الجديدة بدليل حاسم أو 90+، ينتقل لها:
+// بدون اختلاف يندمج فيها، وباختلاف يسألك عنها هي. عشان مصدرين لنفس الشراء ما يصيرون عمليتين
+function rehomeHeld(store, t, oldExId) {
+  store.all('reviews').filter(q => q.status === 'open' && q.kind === 'merge_diff' && !q.old && q.existingId === oldExId && q.heldTx).forEach(q => {
+    const h = q.heldTx, cur = store.get('transactions', t.id); if (!cur) return;
+    if (hasSmsSource(h) === hasSmsSource(cur) || smsConflict(cur, h)) return; // رسالة مع كشف بس
+    const sp = scorePair(store, h, cur); if (!sp || !(sp.decisive || sp.score >= 90)) return;
+    const f = mergeDiffFields(store, cur, h);
+    q.existingId = cur.id; q.score = sp.score; q.reason = sp.decisive || 'score'; delete q.near;
+    if (f.length) { q.fields = f; store.put('reviews', q); return; }
+    q.fields = []; finishMerge(store, q, cur, {});
+  });
+}
+// d: { action: 'merge', pick: { party: 'cur'|'new'|'same', date: 'cur'|'new', type: 'cur'|'new', amount: 'cur'|'new' } } | { action: 'separate' }
+function resolveMergeDiff(store, reviewId, d) {
+  const r = store.get('reviews', reviewId); if (!r || r.status !== 'open' || r.kind !== 'merge_diff' || !r.heldTx) return null;
+  d = d || {};
+  const held = r.heldTx, msg = r.messageId ? store.get('messages', r.messageId) : null, ex = store.get('transactions', r.existingId);
+  const asNew = () => {
+    const t = Object.assign({}, held, { duplicateStatus: 'independent', updatedAt: new Date().toISOString() }); normTx150(t);
+    store.put('transactions', t); applyRulesTo(store, [t.id]);
+    return t;
+  };
+  if (d.action === 'separate' || (!ex && !r.old && !store.get('deletedTxs', r.existingId))) {
+    let t;
+    if (r.old) {
+      // دمج قديم: المصدر الثاني يطلع من العملية ويصير عملية مستقلة
+      if (!ex) { closeReview(store, r, 'gone'); store.touch(); return { review: r }; }
+      const L = r.altLink || {}, LL = [L].concat(r.altMore || []);
+      const same = (l) => l && LL.some(x => l.sourceType === x.sourceType && (l.importId || null) === (x.importId || null) && (l.sourceRecordId || null) === (x.sourceRecordId || null) && (l.messageId || null) === (x.messageId || null));
+      const rest = (ex.sourceLinks || []).filter(l => !same(l));
+      if (rest.length === (ex.sourceLinks || []).length || !rest.length) { closeReview(store, r, 'gone'); store.touch(); return { review: r }; }
+      ex.sourceLinks = rest; ex.updatedAt = new Date().toISOString(); store.put('transactions', ex);
+      t = asNew();
+      const m2 = L.messageId ? store.get('messages', L.messageId) : null;
+      if (m2) { m2.status = 'tx'; m2.txId = t.id; delete m2.userMerged; store.put('messages', m2); }
+    } else {
+      t = asNew();
+      if (msg) { msg.status = 'tx'; msg.txId = t.id; store.put('messages', msg); }
+    }
+    closeReview(store, r, 'separate');
+    if (t && !r.old) rehomeHeld(store, t, r.existingId);
+    pairTransfers(store); sweepPeriods(store); store.touch();
+    return { review: r, tx: store.get('transactions', t.id) || t, separate: true };
+  }
+  if (!ex) {
+    if (r.old) { closeReview(store, r, 'gone'); store.touch(); return { review: r }; }
+    // الموجودة حذفتها بعد ما انفتحت المراجعة: المصدر الجديد ينضم للمحذوفة وتبقى محذوفة
+    attachToDeleted(store, r.existingId, held, false);
+    if (msg) { msg.status = 'deleted'; msg.deletedTxId = r.existingId; msg.txId = null; store.put('messages', msg); }
+    if (r.absorbed && held.id) remapTxRefs(store, held.id, r.existingId); // اللي كان يشير للمنتظرة (مثل استرداد مربوط بها) يشير للمحذوفة
+    closeReview(store, r, 'existing_deleted'); store.touch(); return { review: r, deleted: true };
+  }
+  // رسالة ما تنضم لعملية فيها رسالة ثانية (كل رسالة عملية): الحل «عمليتين مختلفتين»
+  if (!r.old && smsConflict(ex, held)) return { review: r, error: 'sms' };
+  const pick = Object.assign({}, d.pick || {});
+  const out = finishMerge(store, r, ex, pick);
+  if (pick.party === 'same') recheckMergeDiffs(store);
+  sweepPeriods(store); store.touch();
+  return { review: r, tx: store.get('transactions', out.id) || out };
+}
+// نفس القرار لخانة وحدة على أكثر من مراجعة (المجموعات اللي اختلافها خانة وحدة)
+function resolveMergeDiffBulk(store, ids, key, pick) {
+  let n = 0;
+  (ids || []).forEach(id => {
+    const r = store.get('reviews', id); if (!r || r.status !== 'open' || r.kind !== 'merge_diff') return;
+    if (!(r.fields || []).includes(key) || (key === 'party' && pick === 'same' && !(r.heldTx && r.heldTx.merchantId))) return;
+    const res = resolveMergeDiff(store, id, { action: 'merge', pick: { [key]: pick } }); if (res && !res.error) n++;
+  });
+  return n;
+}
+function mergeDiffReviews(store) { return store.all('reviews').filter(r => r.status === 'open' && r.kind === 'merge_diff' && r.heldTx); }
+// مفتاح التجميع: near (المبلغ)، أو خانة وحدة (party/date/type)، أو multi
+function mergeDiffGroupOf(r) { const f = r.fields || []; return r.near ? 'amount' : f.length === 1 ? f[0] : 'multi'; }
+
 // مراجعة الرسائل: قرارات المستخدم
 function reviewMessage(store, id) { const r = store.get('reviews', id); return r && r.messageId ? store.get('messages', r.messageId) : null; }
 function closeReview(store, r, resolution) { r.status = 'resolved'; r.resolution = resolution; r.resolvedAt = new Date().toISOString(); store.put('reviews', r); }
@@ -2273,12 +2640,28 @@ function resolveDuplicate(store, reviewId, decision) {
   const msg = store.get('messages', r.messageId), held = r.heldTx;
   if (decision === 'merge') {
     const ex = store.get('transactions', r.existingId);
+    if (ex && held && smsConflict(ex, held)) return { error: 'sms' }; // 1.8.0: العملية فيها رسالة ثانية، وكل رسالة عملية: «عمليتان منفصلتان» بس
     if (ex) {
-      ex.sourceLinks = (ex.sourceLinks || []).concat(held.sourceLinks);
-      ['balanceAfter', 'time', 'reference', 'instrumentId', 'merchantRaw'].forEach(k => { if (ex[k] == null && held[k] != null) ex[k] = held[k]; });
-      carry150(ex, held); carryShop(ex, held);
-      ex.duplicateStatus = 'confirmed'; ex.confidenceScore = r.score; ex.updatedAt = new Date().toISOString(); store.put('transactions', ex);
+      // 1.8.0: قلت «نفس العملية» وفيها اختلاف (محل/مستفيد، تاريخ، نوع): تتحول لمراجعة اختلاف تختار فيها لكل خانة
+      const fields = mergeDiffFields(store, ex, held);
+      if (fields.length) { Object.assign(r, { kind: 'merge_diff', fields, src: 'sms', userSame: true }); store.put('reviews', r); store.touch(); return r; }
+      const type0 = ex.transactionType;
+      mergeFill(store, ex, held, r.score); store.put('transactions', ex);
       if (msg) { msg.status = 'merged'; msg.txId = ex.id; msg.userMerged = true; store.put('messages', msg); } // قرارك: ما ينفصل تلقائيًا
+      if (ex.transactionType !== type0) pairTransfers(store);
+      sweepPeriods(store);
+    } else if (held && store.get('deletedTxs', r.existingId)) {
+      // العملية الموجودة حذفتها بعد ما انفتحت المراجعة: الرسالة تنضم للمحذوفة وتبقى محذوفة (ما تضيع بدون أثر)
+      attachToDeleted(store, r.existingId, held, false);
+      if (msg) { msg.status = 'deleted'; msg.deletedTxId = r.existingId; msg.txId = null; store.put('messages', msg); }
+      closeReview(store, r, 'existing_deleted'); store.touch(); return r;
+    } else if (held) {
+      // العملية الموجودة ما عادت موجودة أبدًا (مثل كشف انحذف): الرسالة تصير عملية مستقلة بدل ما تضيع
+      const t = Object.assign({}, held, { duplicateStatus: 'independent' });
+      store.put('transactions', t); applyRulesTo(store, [t.id]);
+      if (msg) { msg.status = 'tx'; msg.txId = t.id; store.put('messages', msg); }
+      pairTransfers(store); sweepPeriods(store);
+      closeReview(store, r, 'separate'); store.touch(); return r;
     }
   } else {
     const t = Object.assign({}, held, { duplicateStatus: 'independent' });
@@ -2792,6 +3175,13 @@ function isExcluded(store, tx) {
   }
   return false;
 }
+// 1.8.0: ليش ما انحسبت: user = اخترت «لا تحسبها في الصرف» · inst = بطاقة أو حساب مستثنى من مصروفك. الاسترداد يتبع سبب شرائه
+function excludedWhy(store, tx) {
+  if (tx.excludedByUser) return 'user';
+  const i = instrumentOf(store, tx); if (i && i.includeInPersonalSpend === false) return 'inst';
+  if (tx.transactionType === 'Refund' && tx.refundOfId) { const p = store.get('transactions', tx.refundOfId); if (p && p.transactionType !== 'Refund') return excludedWhy(store, p); }
+  return 'user';
+}
 const txDate = (t) => t.transactionDate || t.postingDate;
 const inPeriod = (t, p) => { const d = txDate(t); return d >= p.start && d <= p.end; };
 
@@ -2868,7 +3258,10 @@ function computePeriod(store, period) {
     unclassifiedOut: 0, unclassifiedOutCount: 0, roundUpUnknown: 0, roundUpUnknownCount: 0, unclassifiedIn: 0, unclassifiedInCount: 0,
     internal: 0, internalCount: 0, internalOneSided: 0, cardPayments: 0, cardPaymentsCount: 0, cardPaymentsUnmatched: 0, cardPaymentsUnknownCard: 0,
     commitments: 0, commitmentItems: [], fees: 0, byCategory: new Map(), byCard: new Map(), merchants: new Map(), topTx: [], excludedSpend: 0, excludedCount: 0,
-    cashWithdrawals: 0, cashWithdrawalsCount: 0, refunds: 0, txCount: txs.length };
+    cashWithdrawals: 0, cashWithdrawalsCount: 0, refunds: 0, txCount: txs.length,
+    // 1.8.0: «مبالغ غير محسوبة في الصرفيات»: نفس أرقام «صرفياتك» مفصلة بسببها، ومع كل رقم عملياته
+    outside: { user: { amount: 0, count: 0, ids: [] }, inst: { amount: 0, count: 0, ids: [] }, internal: { amount: 0, count: 0, ids: [] }, card: { amount: 0, count: 0, ids: [] }, loans: { amount: 0, count: 0, ids: [] } } };
+  const outAdd = (k, amt, tx) => { const o = r.outside[k]; o.amount = round2(o.amount + amt); o.count++; o.ids.push(tx.id); };
   const addCat = (cat, sub, amt, tx) => {
     const key = cat || '__none';
     if (!r.byCategory.has(key)) r.byCategory.set(key, { categoryId: cat === '__none' ? null : cat, amount: 0, count: 0, subs: new Map(), txIds: [] });
@@ -2884,7 +3277,7 @@ function computePeriod(store, period) {
   spendTxs.forEach(tx => {
     const parts = effParts(store, tx), eff = round2(parts.reduce((s, p) => s + p.amt, 0)), fee = feeOf(tx);
     if (eff === 0 && !fee) return;
-    if (isExcluded(store, tx)) { r.excludedSpend = round2(r.excludedSpend + eff + fee); r.excludedCount++; return; }
+    if (isExcluded(store, tx)) { r.excludedSpend = round2(r.excludedSpend + eff + fee); r.excludedCount++; outAdd(excludedWhy(store, tx), eff + fee, tx); return; }
     const ins = instrumentOf(store, tx);
     if (eff !== 0) {
       r.spend = round2(r.spend + eff);
@@ -2911,13 +3304,14 @@ function computePeriod(store, period) {
       case 'Unknown': if (tx.direction !== 'out') { r.unclassifiedIn = round2(r.unclassifiedIn + tx.grossAmount); r.unclassifiedInCount++; } break;
       case 'InternalTransfer':
         if (tx.transferSubtype === 'round_up' && tx.classificationStatus === 'unclassified') break;
-        if (tx.transferLinkStatus === 'linked') { if (tx.direction === 'out') { r.internal = round2(r.internal + tx.principalAmount); r.internalCount++; } }
-        else { r.internal = round2(r.internal + tx.principalAmount); r.internalCount++; r.internalOneSided++; }
+        if (tx.transferLinkStatus === 'linked') { if (tx.direction === 'out') { r.internal = round2(r.internal + tx.principalAmount); r.internalCount++; outAdd('internal', tx.principalAmount, tx); } }
+        else { r.internal = round2(r.internal + tx.principalAmount); r.internalCount++; r.internalOneSided++; outAdd('internal', tx.principalAmount, tx); }
         break;
       case 'CreditCardPayment':
-        if (tx.transferLinkStatus === 'linked') { if (tx.direction === 'out') { r.cardPayments = round2(r.cardPayments + tx.principalAmount); r.cardPaymentsCount++; } }
-        else { r.cardPayments = round2(r.cardPayments + tx.principalAmount); r.cardPaymentsCount++; r.cardPaymentsUnmatched++; if (tx.direction === 'out' && !tx.targetCardLast4) r.cardPaymentsUnknownCard++; }
+        if (tx.transferLinkStatus === 'linked') { if (tx.direction === 'out') { r.cardPayments = round2(r.cardPayments + tx.principalAmount); r.cardPaymentsCount++; outAdd('card', tx.principalAmount, tx); } }
+        else { r.cardPayments = round2(r.cardPayments + tx.principalAmount); r.cardPaymentsCount++; r.cardPaymentsUnmatched++; if (tx.direction === 'out' && !tx.targetCardLast4) r.cardPaymentsUnknownCard++; outAdd('card', tx.principalAmount, tx); }
         break;
+      case 'LoanToPerson': if (tx.direction === 'out') outAdd('loans', tx.principalAmount, tx); break;
     }
   });
   r.surplus = round2(r.income - r.spend);
@@ -2996,15 +3390,16 @@ function comparePeriods(store, period, today) {
     prv = { start: prev.start, end: pe < prev.end ? pe : prev.end };
   }
   const a = spendIn(store, cur), b = spendIn(store, prv);
-  const covA = coverageFor(store, cur), covB = coverageFor(store, prv);
+  // 1.8.0: المقارنة تطلع دايمًا (ما فيه «مرجع كامل»: الكشف والرسالة سواء). ما تطلع بس لو الفترة السابقة (كاملة) ما فيها ولا عملية
+  const prevN = open ? spendIn(store, { start: prev.start, end: prev.end }).txCount : b.txCount;
   return { current: a.spend, previous: b.spend, diff: round2(a.spend - b.spend), partial: open, days: daysBetween(cur.start, cur.end) + 1,
-    curRange: cur, prevRange: prv, prevPeriod: prev, reliable: covA.complete && covB.complete && b.txCount > 0, curCoverage: covA, prevCoverage: covB };
+    curRange: cur, prevRange: prv, prevPeriod: prev, reliable: prevN > 0, noPrev: !(prevN > 0) };
 }
 // مقارنة يوم باليوم اللي قبله
 function compareDay(store, date) {
   const d0 = { start: date, end: date }, d1 = { start: addDays(date, -1), end: addDays(date, -1) };
   const a = spendIn(store, d0), b = spendIn(store, d1);
-  return { current: a.spend, previous: b.spend, diff: round2(a.spend - b.spend), prevDate: d1.start, reliable: coverageFor(store, d0).complete && coverageFor(store, d1).complete };
+  return { current: a.spend, previous: b.spend, diff: round2(a.spend - b.spend), prevDate: d1.start, reliable: b.txCount > 0, noPrev: !(b.txCount > 0) };
 }
 
 // هل ملفات كل حساب تغطي الفترة؟
@@ -3132,7 +3527,7 @@ function mergeInto(store, keepId, dropId) {
   keep.sourceLinks = (keep.sourceLinks || []).concat(drop.sourceLinks || []);
   if (!keep.note && drop.note) keep.note = drop.note;
   if (!keep.categoryId && drop.categoryId) { keep.categoryId = drop.categoryId; keep.subcategoryId = drop.subcategoryId; keep.categorySource = drop.categorySource; }
-  carry150(keep, drop); carryShop(keep, drop);
+  carry150(keep, drop); carryShop(keep, drop); carrySub(keep, drop);
   keep.duplicateStatus = 'confirmed'; keep.updatedAt = new Date().toISOString();
   store.put('transactions', keep); store.remove('transactions', dropId); remapTxRefs(store, dropId, keep.id); store.touch();
 }
@@ -3143,8 +3538,12 @@ function carry150(keep, drop) {
   if (!keep || !drop) return;
   USER150.forEach(k => { if (empty150(keep[k]) && !empty150(drop[k])) keep[k] = JSON.parse(JSON.stringify(drop[k])); });
 }
+// 1.8.0: المجموعة الفرعية اللي اخترتها بيدك تنتقل مع الدمج (اللي على الباقية تغلب)
+function carrySub(keep, drop) { if (keep && drop && drop.subOf && Object.keys(drop.subOf).length) keep.subOf = Object.assign({}, drop.subOf, keep.subOf || {}); }
 // عملية انحذفت بالدمج: الاستردادات والمبالغ المعادة المربوطة فيها تنتقل للباقية
 function remapTxRefs(store, fromId, toId) {
+  store.all('reviews').forEach(r => { if (r.status === 'open' && r.existingId === fromId) { r.existingId = toId; store.put('reviews', r); } }); // 1.8.0: مراجعات تنتظر على العملية اللي اندمجت
+  store.all('messages').forEach(m => { if (m.txId === fromId) { m.txId = toId; if (m.status === 'tx') m.status = 'merged'; store.put('messages', m); } }); // والرسائل اللي تشير لها
   store.all('transactions').forEach(t => {
     let ch = false;
     if (t.refundOfId === fromId) { t.refundOfId = toId; ch = true; }
@@ -3424,6 +3823,7 @@ function autoAccountFor(store, plan, H, info, text) {
   return H.addAccount({ name: (isCard ? 'بطاقة …' : 'حساب …') + l4, type: credit ? 'credit_card' : 'unknown', last4: l4, autoCreated: true, isMine: true });
 }
 // compared: حسابات مؤقتة انقارنت عملياتها مع أسطر هذا الكشف وقت الاستيراد (قراراتك هناك تبقى، فما نعيد الدمج)
+const ABSORB_KEEP = ['categoryId', 'subcategoryId', 'categorySource', 'recurrenceType', 'necessityType', 'note', 'excludedByUser', 'refundOfId', 'cashParts'];
 function absorbAutoAccounts(store, compared) {
   const autos = store.all('accounts').filter(a => a.autoCreated);
   let moved = 0, merged = 0;
@@ -3468,11 +3868,23 @@ function absorbAutoAccounts(store, compared) {
     txs.forEach(a => (byAmt.get(cents(a.grossAmount)) || []).forEach(b => { if (hasSmsSource(a) && hasSmsSource(b)) return; const r = scorePair(store, a, b); if (r && (r.score >= 65 || r.cardException)) pairs.push({ newId: a.id, existingId: b.id, score: r.score, decisive: r.decisive || null, cardException: !!r.cardException, manual: !!r.manual }); }));
     resolvePairs(pairs).auto.forEach(p => {
       const keep = store.get('transactions', p.existingId), drop = store.get('transactions', p.newId); if (!keep || !drop) return;
+      // 1.8.0: نفس قاعدة الدمج: لو بينهم اختلاف (محل، تاريخ، نوع) ما يندمجون بصمت: عملية الحساب المؤقت تنتظر قرارك في «المراجعة» وما تنحسب مرتين
+      const dfields = mergeDiffFields(store, keep, drop);
+      if (dfields.length) {
+        const m0 = store.all('messages').find(m => m.txId === drop.id) || null;
+        store.put('reviews', { id: uid(), kind: 'merge_diff', status: 'open', createdAt: new Date().toISOString(), messageId: m0 ? m0.id : null, importId: null, existingId: keep.id, score: p.score == null ? null : p.score, reason: p.decisive || 'score', fields: dfields, src: srcKindOf(drop), heldTx: cleanTx(drop), absorbed: true });
+        if (m0) { m0.status = 'review'; m0.txId = null; store.put('messages', m0); }
+        store.remove('transactions', drop.id);
+        return;
+      }
       if ((drop.sourceLinks || []).every(sl => sl.sourceType === 'sms') && (keep.sourceLinks || []).some(sl => sl.sourceType === 'account_statement' || sl.sourceType === 'card_statement')) {
         // الرسالة أقدم عند المستخدم: تصنيفه وقراراته تبقى، والكشف يكمّل الأصل والرسوم
-        ['categoryId', 'subcategoryId', 'categorySource', 'recurrenceType', 'necessityType', 'note', 'excludedByUser', 'refundOfId', 'cashParts'].forEach(k => { if (drop[k] != null && drop[k] !== '' && (keep[k] == null || keep[k] === '' || drop.categorySource === 'user_txn')) keep[k] = drop[k]; });
+        ABSORB_KEEP.forEach(k => { if (drop[k] != null && drop[k] !== '' && (keep[k] == null || keep[k] === '' || drop.categorySource === 'user_txn')) keep[k] = drop[k]; });
         carry150(keep, drop);
       }
+      // تاريخ العملية الفعلي والوقت من الرسالة لو الكشف ما فيه إلا يوم القيد (نفس قاعدة الدمج)
+      if (fillRealDate(keep, drop, bookOnly(keep))) dropStalePeriodMarks(store, keep);
+      if (keep.time == null && drop.time != null) keep.time = drop.time;
       mergeInto(store, keep.id, drop.id);
       store.all('messages').filter(m => m.txId === drop.id).forEach(m => { m.txId = keep.id; m.status = 'merged'; store.put('messages', m); });
       merged++;
@@ -3597,6 +4009,7 @@ function setTxCity(store, txId, cityId) {
   const t = store.get('transactions', txId); if (!t) return null;
   if (cityId && !store.get('cities', cityId)) return null;
   t.cityId = cityId || null; if (cityId) delete t.cityDismissed; delete t.cityAuto;
+  if (t.shopCity) t.shopCity.touched = true; // 1.8.0: غيّرتها بيدك وهي تحت تجاهل محلها: «رجّع كل شي» ما يلمسها
   t.cityManualAt = new Date().toISOString(); delete t.periodCity; // 1.7.0: تعديلك اليدوي يغلب الفترة
   t.updatedAt = new Date().toISOString(); store.put('transactions', t); store.touch();
   const s = store.settings, snoozed = s.cityPromptSnoozeUntil && s.cityPromptSnoozeUntil > new Date().toISOString();
@@ -3988,6 +4401,7 @@ function deleteGroup(store, id) {
     (t.items || []).forEach(i => { if ((i.groupIds || []).includes(id)) { i.groupIds = i.groupIds.filter(x => x !== id); ch = true; } });
     if (ch) { store.put(store.get('transactions', t.id) ? 'transactions' : 'deletedTxs', t); n++; }
   });
+  clearSubOf(store, id, null); // 1.8.0: اختيارات المجموعات الفرعية تروح معها
   store.remove('groups', id); store.touch(); return { txs: n };
 }
 function setTxGroups(store, txId, ids) {
@@ -3999,6 +4413,7 @@ function setTxGroups(store, txId, ids) {
   removed.forEach(g => { if (covered(g) && !opt.includes(g)) opt.push(g); });
   if (opt.length) t.groupOptOut = opt; else delete t.groupOptOut;
   if (t.periodGroups) { const pg = {}; Object.keys(t.periodGroups).forEach(k => { if (next.includes(t.periodGroups[k])) pg[k] = t.periodGroups[k]; }); if (Object.keys(pg).length) t.periodGroups = pg; else delete t.periodGroups; }
+  if (t.subOf) { const o = {}; Object.keys(t.subOf).forEach(k => { if (next.includes(k) || (t.items || []).some(i => (i.groupIds || []).includes(k))) o[k] = t.subOf[k]; }); if (Object.keys(o).length) t.subOf = o; else delete t.subOf; } // 1.8.0: طلعت من المجموعة = تطلع من مجموعتها الفرعية
   t.groupIds = next; t.updatedAt = new Date().toISOString(); store.put('transactions', t); store.touch(); return t;
 }
 function setItemGroups(store, txId, itemId, ids) {
@@ -4046,6 +4461,115 @@ function groupStats(store, gid) {
     count: txIds.size, txIds: Array.from(txIds), itemRefs,
     categories: Array.from(cats.entries()).map(([k, v]) => ({ categoryId: k, amount: v })).filter(x => x.amount > 0.004).sort((a, b) => b.amount - a.amount),
     products: Array.from(prods.values()).sort((a, b) => b.amount - a.amount) };
+}
+
+/* ---------- 1.8.0: حالة المجموعة والمجموعات الفرعية ----------
+   الحالة: نشطة · مخفية (ترجع بضغطة، وتنبيه ميزانيتها يستمر) · منتهية (ترجع بعد تأكيد، وتنبيهها يوقف).
+   المنتهية: بزر «إنهاء المجموعة»، أو لحالها لما يعدي تاريخ نهايتها. إعادة التفعيل تمسح تاريخ النهاية.
+   المخفية والمنتهية ما تطلع في اختيار المجموعات إلا مع «عرض المجموعات المخفية». العمليات اللي فيها تبقى فيها والأرقام ما تتغير. */
+function groupState(g, today) {
+  if (!g) return null;
+  if (g.active === false || (g.endDate && g.endDate < (today || todayISO()))) return 'ended';
+  return g.hidden ? 'hidden' : 'active';
+}
+function setGroupHidden(store, id, on) {
+  const g = store.get('groups', id); if (!g) return null;
+  if (on) g.hidden = true; else delete g.hidden;
+  g.updatedAt = new Date().toISOString(); store.put('groups', g); store.touch(); return g;
+}
+function endGroup(store, id) {
+  const g = store.get('groups', id); if (!g) return null;
+  g.active = false; g.endedAt = new Date().toISOString(); g.updatedAt = g.endedAt; store.put('groups', g); store.touch(); return g;
+}
+function reactivateGroup(store, id) {
+  const g = store.get('groups', id); if (!g) return null;
+  g.active = true; g.endDate = null; delete g.endedAt; delete g.hidden; g.updatedAt = new Date().toISOString(); store.put('groups', g); store.touch(); return g;
+}
+/* المجموعات الفرعية: g.subs = [{ id, n, name, kind: 'manual' | 'range', from, to }]، و g.subSeq عدّاد الترقيم (بترتيب الإضافة، ما ينعاد استخدامه).
+   العملية في مجموعة فرعية وحدة بس: اختيارك اليدوي (t.subOf[معرّف المجموعة] = معرّف الفرعية، أو '' = بدون) يغلب،
+   وإلا اللي بالتاريخ والوقت تاخذ العملية اللي وقتها داخلها. العملية اللي ما لها وقت ما تدخل لحالها.
+   المتوسط = مجموع المجموعات الفرعية ÷ عددها، وما يدخل فيه: اللي بالتاريخ وما خلص وقتها، والفاضية، و«بدون مجموعة فرعية». */
+const SUB_DT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/;
+function nowLocalDT() { const d = new Date(); return `${isoDate(d.getFullYear(), d.getMonth() + 1, d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}`; }
+function subName(g, s) { return s ? (s.name || `${g.name} ${s.n}`) : ''; }
+function saveSubgroup(store, gid, d) {
+  const g = store.get('groups', gid); if (!g) return { error: 'missing' };
+  d = d || {};
+  const subs = (g.subs || []).slice(), i = d.id ? subs.findIndex(x => x.id === d.id) : -1; if (d.id && i < 0) return { error: 'missing' };
+  const kind = d.kind === 'range' ? 'range' : 'manual', name = cleanText(d.name || '').slice(0, 40) || null;
+  let from = null, to = null;
+  if (kind === 'range') {
+    from = String(d.from || ''); to = String(d.to || '');
+    const okDT = (v) => { if (!SUB_DT.test(v)) return false; const [d, t] = v.split('T'), [y, mo, da] = d.split('-').map(Number), [h, mi] = t.split(':').map(Number); return mo >= 1 && mo <= 12 && da >= 1 && da <= daysInMonth(y, mo) && h <= 23 && mi <= 59; };
+    if (!okDT(from) || !okDT(to)) return { error: 'dates' };
+    if (from > to) return { error: 'order' };
+    const clash = subs.find((x, k) => k !== i && x.kind === 'range' && x.from <= to && x.to >= from);
+    if (clash) return { error: 'overlap', other: clash, otherName: subName(g, clash) };
+  }
+  const now = new Date().toISOString();
+  let sub;
+  if (i >= 0) { sub = Object.assign({}, subs[i], { name, kind, from, to, updatedAt: now }); subs[i] = sub; }
+  else { g.subSeq = (g.subSeq || 0) + 1; sub = { id: 'sg-' + uid().replace(/[^a-z0-9]/gi, '').slice(0, 10), n: g.subSeq, name, kind, from, to, createdAt: now }; subs.push(sub); }
+  g.subs = subs; g.updatedAt = now; store.put('groups', g); store.touch();
+  return { sub, group: g };
+}
+function clearSubOf(store, gid, sid) {
+  ['transactions', 'deletedTxs'].forEach(tb => store.all(tb).forEach(t => {
+    if (!t.subOf || t.subOf[gid] === undefined || (sid != null && t.subOf[gid] !== sid)) return;
+    const o = Object.assign({}, t.subOf); delete o[gid];
+    if (Object.keys(o).length) t.subOf = o; else delete t.subOf;
+    store.put(tb, t);
+  }));
+}
+function deleteSubgroup(store, gid, sid) {
+  const g = store.get('groups', gid); if (!g || !(g.subs || []).some(x => x.id === sid)) return null;
+  g.subs = g.subs.filter(x => x.id !== sid); g.updatedAt = new Date().toISOString(); store.put('groups', g);
+  clearSubOf(store, gid, sid); store.touch(); return g;
+}
+// sid: معرّف مجموعة فرعية (اختيار يدوي) · '' = بدون مجموعة فرعية (يدوي) · null = يشيل اختيارك اليدوي (ترجع تلقائية)
+function assignSub(store, gid, txIds, sid) {
+  const g = store.get('groups', gid); if (!g) return 0;
+  if (sid && !(g.subs || []).some(x => x.id === sid)) return 0;
+  const now = new Date().toISOString(); let n = 0;
+  (txIds || []).forEach(id => {
+    const t = store.get('transactions', id); if (!t) return;
+    const cur = t.subOf ? t.subOf[gid] : undefined;
+    if (sid === null || sid === undefined) { if (cur === undefined) return; const o = Object.assign({}, t.subOf); delete o[gid]; if (Object.keys(o).length) t.subOf = o; else delete t.subOf; }
+    else { if (cur === sid) return; t.subOf = Object.assign({}, t.subOf || {}, { [gid]: sid }); }
+    t.updatedAt = now; store.put('transactions', t); n++;
+  });
+  if (n) store.touch();
+  return n;
+}
+function subOfTx(store, g, t) {
+  const subs = g.subs || []; if (!subs.length) return null;
+  const a = t.transactionType === 'Refund' && t.refundOfId ? spendAnchor(store, t) : t; // الاسترداد المربوط يتبع شراءه
+  const man = a.subOf ? a.subOf[g.id] : undefined;
+  if (man !== undefined) return man && subs.some(x => x.id === man) ? man : null;
+  const d = txDate(a); if (!d || !a.time) return null;
+  const dt = d + 'T' + String(a.time).slice(0, 5);
+  const hit = subs.find(x => x.kind === 'range' && x.from <= dt && dt <= x.to);
+  return hit ? hit.id : null;
+}
+function groupSubStats(store, gid, nowDT) {
+  const g = store.get('groups', gid); if (!g) return null;
+  nowDT = nowDT || nowLocalDT();
+  const subs = g.subs || [], by = new Map(subs.map(x => [x.id, { sub: x, name: subName(g, x), total: 0, ids: new Set() }])), un = { total: 0, ids: new Set() };
+  let total = 0;
+  const add = (t, amt) => { const sid = subOfTx(store, g, t), o = (sid && by.get(sid)) || un; o.total += amt; o.ids.add(t.id); total += amt; };
+  store.all('transactions').forEach(t => {
+    if (isExcluded(store, t)) return;
+    if (inGroup(store, t, gid)) { const parts = spendParts(store, t); if (!parts.length) return; add(t, parts.reduce((s, p) => s + p.amt, 0)); return; }
+    if (!canHaveItems(t)) return;
+    itemNet(store, t).forEach(o => { if ((o.item.groupIds || []).includes(gid) && o.net > 0) add(t, o.net); });
+  });
+  const list = Array.from(by.values()).map(o => {
+    const finished = o.sub.kind !== 'range' || o.sub.to < nowDT, count = o.ids.size;
+    return { sub: o.sub, name: o.name, total: round2(o.total), count, txIds: Array.from(o.ids), finished, counted: finished && count > 0 };
+  }).sort((a, b) => b.sub.n - a.sub.n);
+  const cn = list.filter(x => x.counted);
+  return { group: g, hasSubs: subs.length > 0, total: round2(total), subs: list, unassigned: { total: round2(un.total), count: un.ids.size, txIds: Array.from(un.ids) },
+    countedN: cn.length, avg: cn.length ? round2(cn.reduce((s, x) => s + x.total, 0) / cn.length) : null };
 }
 
 /* ---------- 17و. سجل الأرصدة (Balance Snapshots) ----------
@@ -4610,8 +5134,10 @@ function mergeMerchants(store, keepId, dropId, o) {
       plans[kk] = other ? Object.assign({}, main, { marks: Object.assign({}, other.marks || {}, main.marks || {}), multi: Object.assign({}, other.multi || {}, main.multi || {}) }) : main;
       delete plans[kd]; s2.commitPlans = plans; store.put('settings', s2);
     } }
+  // 1.8.0: تجاهل الموقع: إعداد المحل الباقي هو اللي يمشي. علامات عمليات المحل المدموج تنتقل له لو هو متجاهل، وإلا تنشال (العمليات تبقى مثل ما هي)
+  ['transactions', 'deletedTxs'].forEach(tb => store.all(tb).forEach(t => { if (!t.shopCity || t.shopCity.mid !== drop.id) return; if (keep.cityIgnore) t.shopCity.mid = keep.id; else delete t.shopCity; store.put(tb, t); }));
   store.remove('merchants', drop.id);
-  refreshShopChoices(store); store.touch();
+  refreshShopChoices(store); if (keep.cityIgnore) sweepShopCity(store); recheckMergeDiffs(store); store.touch();
   return { merchant: keep, moved };
 }
 // بعد الدمج: اسم فاتورة ما عاد له إلا محل واحد ← العمليات ما تحتاج اختيار
@@ -4643,6 +5169,90 @@ function isIgnored(store, t, kind) {
   const d = txDate(t); if (!d) return false;
   return (store.settings.ignorePeriods || []).some(p => p[kind] && d >= p.from && d <= p.to);
 }
+/* ---------- 1.8.0: تجاهل الموقع للمحل ----------
+   على المحل: cityIgnore = { at, scope: 'future' | 'all' }. «القادمة» = اللي تنضاف بعد الحين. «السابقة والقادمة» = كل عمليات المحل،
+   حتى اللي لها مدينة معتمدة (تنشال مدينتها، كأنه إدخال يدوي). عملية جديدة من المحل تجي متجاهلة حتى لو الجوال سجّل موقع.
+   يغلب «الفترات» حتى «كل العمليات». ولو حددت مدينة بيدك لعملية وحدة من المحل تبقى.
+   العملية اللي تجاهلها المحل عليها علامة shopCity = { mid, prev } عشان «رجّع كل شي مثل ما كان». */
+const shopCityTx = (t) => !!t && !!t.merchantId && CITY_MARK_TYPES.has(t.transactionType) && t.direction === 'out';
+function shopCityIgnoreOf(store, t) {
+  if (!shopCityTx(t)) return null;
+  const m = store.get('merchants', t.merchantId), ig = m && m.cityIgnore; if (!ig) return null;
+  if (t.shopCity && t.shopCity.mid === m.id) return m;
+  return ig.scope === 'all' || String(t.createdAt || '') >= String(ig.at || '') ? m : null;
+}
+function shopCityCounts(store, merchantId) {
+  const txs = store.all('transactions').filter(t => t.merchantId === merchantId && shopCityTx(t));
+  return { total: txs.length, withCity: txs.filter(t => t.cityId).length };
+}
+function putShopCity(t, m) {
+  t.shopCity = { mid: m.id, prev: { cityId: t.cityId || null, cityAuto: !!t.cityAuto, cityDismissed: !!t.cityDismissed, periodCity: t.periodCity ? JSON.parse(JSON.stringify(t.periodCity)) : null } };
+  t.cityId = null; t.cityDismissed = true; delete t.cityAuto; delete t.periodCity;
+}
+// العمليات اللي يشملها تجاهل محلها وما انطبق عليها للحين. ينادى مع sweepPeriods (بعد كل استيراد أو رسائل أو إدخال)
+function sweepShopCity(store) {
+  const ms = store.all('merchants').filter(m => m.cityIgnore); if (!ms.length) return 0;
+  const by = new Map(ms.map(m => [m.id, m])), now = new Date().toISOString(); let n = 0;
+  store.all('transactions').forEach(t => {
+    const m = by.get(t.merchantId); if (!m || !shopCityTx(t) || (t.shopCity && t.shopCity.mid === m.id)) return;
+    if (!(m.cityIgnore.scope === 'all' || String(t.createdAt || '') >= String(m.cityIgnore.at || ''))) return;
+    putShopCity(t, m); t.updatedAt = now; store.put('transactions', t); n++;
+  });
+  return n;
+}
+// scope: 'future' (القادمة) | 'all' (السابقة والقادمة). txId: العملية اللي ضغطت منها (تتجاهل في الحالتين)
+function setShopCityIgnore(store, merchantId, scope, txId) {
+  const m = store.get('merchants', merchantId); if (!m) return null;
+  const now = new Date().toISOString();
+  m.cityIgnore = { at: now, scope: scope === 'all' ? 'all' : 'future' }; m.updatedAt = now; store.put('merchants', m);
+  let n = 0;
+  const t0 = txId ? store.get('transactions', txId) : null;
+  if (t0 && t0.merchantId === m.id && shopCityTx(t0) && !(t0.shopCity && t0.shopCity.mid === m.id)) { putShopCity(t0, m); t0.updatedAt = now; store.put('transactions', t0); n++; }
+  if (m.cityIgnore.scope === 'all') n += sweepShopCity(store);
+  store.touch();
+  return { merchant: m, applied: n };
+}
+// mode: 'keep' = وقّف التجاهل للجديد بس (القديمة تبقى متجاهلة) · 'restore' = رجّع كل شي مثل ما كان
+function clearShopCityIgnore(store, merchantId, mode) {
+  const m = store.get('merchants', merchantId); if (!m) return null;
+  const now = new Date().toISOString(); let restored = 0;
+  ['transactions', 'deletedTxs'].forEach(tb => store.all(tb).forEach(t => {
+    if (!t.shopCity || t.shopCity.mid !== merchantId) return;
+    if (mode === 'restore' && t.cityDismissed && !t.cityId && !t.shopCity.touched) { // ما غيّرتها بيدك بعدها
+      let pv = t.shopCity.prev || {};
+      // المدينة كانت من فترة وانحذفت الفترة (أو تغيّرت مدينتها) وهي متجاهلة: ترجع لقيمتها قبل الفترة
+      const per = pv.periodCity ? periodsList(store).find(p => p.id === pv.periodCity.pid) : null;
+      if (pv.periodCity && !(per && per.cityId === pv.cityId)) pv = Object.assign({}, pv.periodCity.prev || {}, { periodCity: null });
+      t.cityId = pv.cityId && store.get('cities', pv.cityId) ? pv.cityId : null;
+      if (pv.cityAuto && t.cityId) t.cityAuto = true; else delete t.cityAuto;
+      if (pv.cityDismissed) t.cityDismissed = true; else delete t.cityDismissed;
+      if (pv.periodCity && t.cityId) t.periodCity = pv.periodCity; else delete t.periodCity;
+      if (tb === 'transactions') restored++;
+    }
+    delete t.shopCity; t.updatedAt = now; store.put(tb, t);
+  }));
+  delete m.cityIgnore; m.updatedAt = now; store.put('merchants', m);
+  if (mode === 'restore') sweepPeriods(store);
+  store.touch();
+  return { merchant: m, restored };
+}
+// «تحديد» ← «تجاهل الموقع»: العمليات المحددة (اللي تقبل مدينة) تصير متجاهلة، واللي لها مدينة تنشال مدينتها
+function bulkDismissCity(store, txIds) {
+  const now = new Date().toISOString(); let n = 0, hadCity = 0;
+  (txIds || []).forEach(id => {
+    const t = store.get('transactions', id); if (!t || !CITY_MARK_TYPES.has(t.transactionType) || t.direction !== 'out') return;
+    if (t.cityDismissed && !t.cityId) return;
+    if (t.cityId) hadCity++;
+    t.cityId = null; t.cityDismissed = true; delete t.cityAuto; delete t.periodCity; t.cityManualAt = now; t.updatedAt = now; store.put('transactions', t); n++;
+  });
+  if (n) store.touch();
+  return { n, hadCity };
+}
+function bulkCityCounts(store, txIds) {
+  const txs = (txIds || []).map(id => store.get('transactions', id)).filter(t => t && CITY_MARK_TYPES.has(t.transactionType) && t.direction === 'out' && !(t.cityDismissed && !t.cityId));
+  return { n: txs.length, withCity: txs.filter(t => t.cityId).length };
+}
+
 /* ---------- 1.7.0: «الفترات» ----------
    من تاريخ لتاريخ، وفيها أي مجموعة من: مدينة، مجموعة، تجاهل علامات (المدينة و/أو التصنيف).
    {id, from, to, cityId, cityMode: 'all'|'noCity', groupId, city, category (التجاهل), note, createdAt, updatedAt}
@@ -4695,6 +5305,7 @@ function applyPeriodCity(store, p, mode) {
   const now = new Date().toISOString();
   store.all('transactions').forEach(t => {
     if (!inPeriodRange(t, p) || !periodCityOk(t) || t.cityId === p.cityId) return;
+    if (shopCityIgnoreOf(store, t)) return; // 1.8.0: محل تجاهلت موقعه يغلب أي فترة، حتى «كل العمليات»
     if (t.cityManualAt && t.cityManualAt > periodBorn(p)) return; // عدلتها بيدك بعد الفترة: تبقى
     if (periodConflict(t, p.cityId)) { out.conflicts++; return; }
     if (mode !== 'all' && (t.cityId || t.cityDismissed)) return;
@@ -4732,6 +5343,7 @@ function revertPeriod(store, p) {
 // العمليات اللي وصلت بعد الفترة (أو صارت تنطبق عليها) تاخذ مدينتها ومجموعتها. ينادى بعد كل استيراد أو رسائل أو إدخال يدوي
 function sweepPeriods(store) {
   let n = 0;
+  sweepShopCity(store); // 1.8.0: محل تجاهلت موقعه: عملياته الجديدة تجي متجاهلة (قبل مدن الفترات)
   dropPeriodGroupTransfers(store); // 1.7.1: عملية صارت تحويل داخلي أو سداد بطاقة بعد ما دخلت مجموعة الفترة تطلع منها
   periodsList(store).forEach(p => { if (p.cityId) n += applyPeriodCity(store, p, 'noCity').applied; if (p.groupId) n += applyPeriodGroup(store, p); });
   return n;
@@ -4739,7 +5351,7 @@ function sweepPeriods(store) {
 // اللي موقعها (GPS) مدينة ثانية: ما تتغير إلا إذا طلبت
 function periodConflicts(store, p) {
   if (!p || !p.cityId || !store.get('cities', p.cityId)) return [];
-  return store.all('transactions').filter(t => inPeriodRange(t, p) && periodCityOk(t) && t.cityId !== p.cityId && periodConflict(t, p.cityId) && !(t.cityManualAt && t.cityManualAt > periodBorn(p)));
+  return store.all('transactions').filter(t => inPeriodRange(t, p) && periodCityOk(t) && t.cityId !== p.cityId && periodConflict(t, p.cityId) && !(t.cityManualAt && t.cityManualAt > periodBorn(p)) && !shopCityIgnoreOf(store, t));
 }
 function applyPeriodToConflicts(store, pid, ids) {
   const p = periodsList(store).find(x => x.id === pid); if (!p || !p.cityId || !store.get('cities', p.cityId)) return 0;
@@ -4969,6 +5581,146 @@ function migrate171(store) {
   return out;
 }
 
+/* ---------- ترقية 1.8.0: فحص الدمج القديم ----------
+   قبل 1.8.0 الدمج كان يصير بدون سؤال (والكشف يغلب). مع التحديث: كل عملية مدموجة من رسالة وكشف ينعاد قراءة مصدرها الثاني من النص المحفوظ
+   ويتقارن مع قيمها الحالية. إذا فيه اختلاف في المحل/المستفيد أو التاريخ أو النوع تطلع مراجعة اختلاف (old) وتقرر فيها، والعملية تبقى مثل ما هي لين تقرر.
+   اللي ما ينقرأ من النص المحفوظ (مثل حوالة انخفى رقم حسابها) يبقى مثل ما هو. */
+async function rebuildStatementAlt(store, ex, link) {
+  const imp = link.importId ? store.get('imports', link.importId) : null; if (!imp) return null;
+  const acc = store.get('accounts', ex.accountId) || store.get('accounts', imp.accountId); if (!acc) return null;
+  const raw = link.rawDescription || ''; if (!raw) return null;
+  const plan = { id: imp.id, kind: imp.kind, newAccounts: new Map(), newInstruments: new Map(), newBeneficiaries: new Map(), newMerchants: new Map(), txs: [], warnings: [], cardInstrument: null };
+  const H = planHelpers(store, plan), g = ex.grossAmount, out = ex.direction === 'out', pd = ex.postingDate || ex.transactionDate;
+  const tpl = store.get('templates', imp.templateId), isCard = link.sourceType === 'card_statement';
+  let info, noDate = false;
+  if (imp.templateId === 'alinma_card') {
+    plan.cardInstrument = store.all('instruments').find(i => i.accountId === acc.id && i.kind === 'credit_card') || null;
+    info = interpretCardLine({ postingDate: pd, transactionDate: pd, txnNo: null, raw, foreignAmount: null, rate: null, fees: 0, amount: out ? g : -g });
+    noDate = true; // تاريخ العملية في كشف البطاقة عمود لحاله وما انحفظ وقت الدمج
+  } else if (imp.templateId === 'alinma_account' || (tpl && /إنماء|الانماء|alinma/i.test(tpl.bank || ''))) {
+    info = interpretAlinmaLine({ raw, credit: out ? 0 : g, debit: out ? -g : 0, postingDate: pd, balance: null });
+    if (info.family === 'unknown') return null;
+  } else if (tpl) {
+    info = { direction: out ? 'out' : 'in', grossAmount: g, postingDate: pd, transactionDate: pd, time: null, family: isCard ? (out ? 'card_purchase' : 'card_statement_credit') : 'generic', merchantRaw: cleanText(raw).slice(0, 80) };
+    if (!ex.postingDate) noDate = true;
+  } else return null;
+  const tx = await buildTx(store, plan, H, acc, info, { raw, balance: null, rowIndex: 0 }, link.sourceType, link.sourceRecordId);
+  return { tx, plan, noDate };
+}
+async function findOldMergeDiffs(store) {
+  const found = [];
+  const merged = store.all('transactions').filter(t => (t.sourceLinks || []).length > 1 && hasSmsSource(t) && hasStatementLink(t));
+  if (!merged.length) return found;
+  const open = new Set(store.all('reviews').filter(r => r.status === 'open' && r.kind === 'merge_diff' && r.old).map(r => r.existingId));
+  const isStmt = (l) => l && (l.sourceType === 'account_statement' || l.sourceType === 'card_statement');
+  const smsWant = [], stmtWant = [];
+  merged.forEach(t => {
+    if (open.has(t.id)) return;
+    const first = t.sourceLinks[0]; if (!first) return;
+    t.sourceLinks.slice(1).forEach(l => {
+      if (!l) return;
+      if (l.sourceType === 'sms' && l.messageId && isStmt(first)) smsWant.push({ t, l });
+      else if (isStmt(l) && first.sourceType === 'sms') stmtWant.push({ t, l });
+    });
+  });
+  const keepRes = (plan, tx) => ({ merchant: tx.merchantId && plan.newMerchants.get(tx.merchantId) || null, ben: tx.beneficiaryId && plan.newBeneficiaries.get(tx.beneficiaryId) || null,
+    ins: tx.instrumentId && plan.newInstruments.get(tx.instrumentId) || null, acc: plan.newAccounts.get(tx.accountId) || null });
+  const push = (t, l, alt, plan, noDate) => {
+    // الكشف أول وتاريخه يوم القيد بس (والرسالة قبله): مو اختلاف تاريخ، مثل الدمج الجديد. العملية القديمة ما تتغير
+    const stmtOnly = Object.assign({}, t, { sourceLinks: (t.sourceLinks || []).filter(isStmtLink) }); if ((stmtOnly.sourceLinks || []).every(bookLink)) stmtOnly.time = null;
+    const de = t.transactionDate || t.postingDate, dn = alt.transactionDate || alt.postingDate;
+    if (!noDate && l.sourceType === 'sms' && bookOnly(stmtOnly) && de && dn && dn < de) noDate = true;
+    const fields = mergeDiffFields(store, t, alt, { noDate }); if (!fields.length) return;
+    const held = cleanTx(alt); held.sourceLinks = [JSON.parse(JSON.stringify(l))];
+    found.push({ existingId: t.id, fields, src: l.sourceType, altLink: { sourceType: l.sourceType, importId: l.importId || null, sourceRecordId: l.sourceRecordId || null, messageId: l.messageId || null }, heldTx: held, res: keepRes(plan, alt) });
+  };
+  if (smsWant.length) {
+    const keep = new Set(), msgs = [], seen = new Set();
+    smsWant.forEach(({ l }) => {
+      const m = store.get('messages', l.messageId); if (!m || !m.text || seen.has(m.id)) return; seen.add(m.id); keep.add(m.id);
+      msgs.push({ id: m.id, text: m.text, sender: m.sender, receivedAt: m.receivedAt, source: m.source, ids: m.ids, userDate: m.userDate || null, sameContentOk: true, forcedAccountId: m.forcedAccountId || null });
+    });
+    if (msgs.length) {
+      // رسالة وحدة ما تنقرأ ما توقف الفحص كله: لو تعثرت الدفعة تنقرأ الرسائل وحدة وحدة، واللي تتعثر تنترك
+      let plans = [];
+      try { plans = [await prepareSms(store, msgs, { keepRecords: keep, noMatch: true })]; }
+      catch (e) { for (const m of msgs) { try { plans.push(await prepareSms(store, [m], { keepRecords: keep, noMatch: true })); } catch (e2) { /* تنترك */ } } }
+      plans.forEach(plan => {
+        const byMsg = new Map(plan.txs.map(x => [x._msgId, x]));
+        smsWant.forEach(({ t, l }) => { const alt = byMsg.get(l.messageId); if (alt) push(t, l, alt, plan, false); });
+      });
+    }
+  }
+  for (const { t, l } of stmtWant) {
+    let r = null; try { r = await rebuildStatementAlt(store, t, l); } catch (e) { r = null; }
+    if (r && r.tx) push(t, l, r.tx, r.plan, r.noDate);
+  }
+  // نفس السطر جا من كشفين متداخلين: مراجعة وحدة للعملية (لو قلت «عمليتين» ينفصلون سوا عملية وحدة)
+  const out = [];
+  found.forEach(f => {
+    const prev = out.find(x => x.existingId === f.existingId && isStmtLink(x.altLink) && isStmtLink(f.altLink) && x.fields.join() === f.fields.join() && cents(x.heldTx.grossAmount) === cents(f.heldTx.grossAmount)
+      && (x.heldTx.transactionDate || null) === (f.heldTx.transactionDate || null) && (x.heldTx.merchantId || null) === (f.heldTx.merchantId || null) && (x.heldTx.beneficiaryId || null) === (f.heldTx.beneficiaryId || null) && x.heldTx.transactionType === f.heldTx.transactionType);
+    if (prev) { prev.altMore = (prev.altMore || []).concat([f.altLink]); prev.heldTx.sourceLinks = prev.heldTx.sourceLinks.concat(f.heldTx.sourceLinks); }
+    else out.push(f);
+  });
+  return out;
+}
+// 1.8.0 (خصوصية): وصف سطر الكشف كان ينحفظ اسمًا للعملية والمحل بدون إخفاء الأرقام الطويلة (بنك بقالب متعلّم، أو سطر ما انعرف نوعه).
+// ينخفي مرة وحدة في العمليات والمحذوفة واللي ينتظر في المراجعة وأسماء المحلات وكتاباتها. ويتعلّم على عمليات القالب المتعلّم إن «محلها» وصف سطر
+function migrate180mask(store) {
+  const s0 = store.settings; if (s0.migrated180mask) return { changed: false, fixed: 0 };
+  let n = 0; const amap = new Map();
+  const tplOf = new Map();
+  const generic = (l) => {
+    if (!l || l.sourceType !== 'account_statement' || !l.importId) return false;
+    if (!tplOf.has(l.importId)) { const imp = store.get('imports', l.importId), tpl = imp ? store.get('templates', imp.templateId) : null; tplOf.set(l.importId, !!(imp && tpl && imp.templateId !== 'alinma_account' && !/إنماء|الانماء|alinma/i.test(tpl.bank || ''))); }
+    return tplOf.get(l.importId);
+  };
+  const fix = (t) => {
+    let ch = false;
+    if (t.merchantRaw) {
+      const nv = sanitizeText(t.merchantRaw);
+      if (nv !== t.merchantRaw) {
+        if (t.merchantId) { const o = normMerchant(t.merchantRaw), w = normMerchant(nv); if (o && w && o !== w) { if (!amap.has(t.merchantId)) amap.set(t.merchantId, new Map()); amap.get(t.merchantId).set(o, w); if (t.invoiceAlias === o) t.invoiceAlias = w; } }
+        t.merchantRaw = nv; ch = true;
+      }
+    }
+    if (!t.descParty && t.merchantRaw && generic((t.sourceLinks || [])[0])) { t.descParty = true; ch = true; }
+    return ch;
+  };
+  ['transactions', 'deletedTxs'].forEach(tb => store.all(tb).forEach(t => { if (fix(t)) { store.put(tb, t); n++; } }));
+  store.all('reviews').forEach(r => { if (r.heldTx && fix(r.heldTx)) { store.put('reviews', r); n++; } });
+  store.all('merchants').forEach(m => {
+    let ch = false; const mp = amap.get(m.id) || new Map();
+    const fa = (x) => { const v = mp.get(x) || sanitizeText(x); if (v !== x) ch = true; return v; };
+    const nn = sanitizeText(m.name || ''); if (nn !== (m.name || '')) { m.name = nn; ch = true; }
+    if (Array.isArray(m.aliases)) m.aliases = Array.from(new Set(m.aliases.map(fa)));
+    if (Array.isArray(m.defaultFor)) m.defaultFor = Array.from(new Set(m.defaultFor.map(fa)));
+    if (ch) { store.put('merchants', m); n++; }
+  });
+  const s = store.settings; s.migrated180mask = new Date().toISOString(); store.put('settings', s);
+  return { changed: true, fixed: n };
+}
+async function migrate180(store) {
+  const out = { changed: false, raised: 0 };
+  const s0 = store.settings; if (s0.migrated180) return out;
+  let found = [];
+  try { found = await findOldMergeDiffs(store); } catch (e) { out.error = String(e && e.message || e); return out; } // تعثر: ما ينحفظ إنه انفحص، وينعاد مع الفتح الجاي
+  const now = new Date().toISOString();
+  found.forEach(f => {
+    const R = f.res || {};
+    if (R.acc && !store.get('accounts', R.acc.id)) store.put('accounts', R.acc);
+    if (R.ins && !store.get('instruments', R.ins.id)) store.put('instruments', R.ins);
+    if (R.ben && !store.get('beneficiaries', R.ben.id)) { const c = Object.assign({}, R.ben); delete c._new; store.put('beneficiaries', c); }
+    if (R.merchant && !store.get('merchants', R.merchant.id)) { const c = Object.assign({}, R.merchant); delete c._new; delete c._aliasAdded; store.put('merchants', c); }
+    store.put('reviews', { id: uid(), kind: 'merge_diff', status: 'open', createdAt: now, messageId: null, importId: null, existingId: f.existingId, score: null, reason: null, fields: f.fields, src: f.src, old: true, altLink: f.altLink, altMore: f.altMore || [], heldTx: f.heldTx });
+    out.raised++;
+  });
+  store.all('merchants').forEach(m => { if (m._aliasAdded) { delete m._aliasAdded; store.put('merchants', m); } });
+  const s = store.settings; s.migrated180 = now; store.put('settings', s); out.changed = true;
+  return out;
+}
+
 function makeBackup(store) {
   const data = JSON.parse(JSON.stringify(store.exportAll()));
   // مفتاح صندوق الرسائل ما يطلع في النسخة الاحتياطية
@@ -4988,8 +5740,102 @@ function validateBackup(obj) {
   return null;
 }
 
+/* ---------- 1.8.0: بحث «الأسئلة الشائعة» ----------
+   محلي بالكامل. يتحمل الأخطاء الإملائية (الهمزات، ة/ه، ى/ي، التشكيل، «ال»، وغلطة حرف أو حرفين).
+   للأسئلة الشائعة بس: مطابقة الأشخاص والمحلات تبقى دقيقة مثل ما هي. */
+function faqNorm(s) {
+  return String(s == null ? '' : s).toLowerCase()
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/[ً-ٰٟـ]/g, '')
+    .replace(/[أإآٱ]/g, 'ا').replace(/ؤ/g, 'و').replace(/ئ/g, 'ي').replace(/ء/g, '')
+    .replace(/ى/g, 'ي').replace(/ة/g, 'ه')
+    .replace(/[٠-٩]/g, d => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)))
+    .replace(/[^a-z0-9ء-ي]+/g, ' ').trim();
+}
+// أصل الكلمة للبحث: بدون «ال» (ومعها و/ب/ف/ك/ل)، وبدون «ات» الجمع والهاء الأخيرة
+function faqStem(w) {
+  let x = String(w || '');
+  if (/^[a-z0-9]+$/.test(x)) return x;
+  for (let i = 0; i < 2; i++) { const m = /^(?:وال|بال|فال|كال|لل|ال)(.{2,})$/.exec(x); if (!m) break; x = m[1]; }
+  if (x.length >= 5 && x.endsWith('ات')) x = x.slice(0, -2);
+  else if (x.length >= 4 && x.endsWith('ه')) x = x.slice(0, -1);
+  return x;
+}
+const FAQ_STOP = new Set(('كيف وش ايش شنو هل في من على عن الى ابي ابغى ابغي اقدر ممكن لو اذا ما لا هو هي ان او و يا مع بس لي له لها اللي الي التي الذي هذا هذي هذه ذا وين ليش ليه متى اسوي اسوى يصير صار يكون كان انا عندي عند كل شي شيء ثم حق كم the a an to how is in of do i my')
+  .split(' ').map(w => faqStem(faqNorm(w))));
+function faqTokens(s) { return faqNorm(s).split(' ').filter(Boolean).map(faqStem).filter(w => w && !FAQ_STOP.has(w)); }
+// عدد الأغلاط بين كلمتين (حرف زايد، ناقص، مبدّل، أو حرفين متبادلين)، ويوقف إذا تعدى الحد
+function faqDist(a, b, max) {
+  const la = a.length, lb = b.length; if (Math.abs(la - lb) > max) return max + 1;
+  let p2 = null, p1 = Array.from({ length: lb + 1 }, (_, j) => j);
+  for (let i = 1; i <= la; i++) {
+    const cur = [i]; let rowMin = i;
+    for (let j = 1; j <= lb; j++) {
+      const c = a[i - 1] === b[j - 1] ? 0 : 1;
+      let v = Math.min(p1[j] + 1, cur[j - 1] + 1, p1[j - 1] + c);
+      if (p2 && i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) v = Math.min(v, p2[j - 2] + 1);
+      cur[j] = v; if (v < rowMin) rowMin = v;
+    }
+    if (rowMin > max) return max + 1;
+    p2 = p1; p1 = cur;
+  }
+  return p1[lb];
+}
+// جودة تطابق كلمة البحث مع كلمة من السؤال: 1 نفسها، 0.85 بدايتها، 0.7 غلطة حرف، 0.5 غلطتين
+function faqMatch(q, w) {
+  if (q === w) return 1;
+  const n = Math.min(q.length, w.length);
+  if ((q.length >= 3 && w.startsWith(q)) || (w.length >= 4 && q.startsWith(w))) return 0.85;
+  if (/^[0-9]+$/.test(q) || /^[0-9]+$/.test(w)) return 0;
+  const max = n >= 6 ? 2 : n >= 4 ? 1 : 0;
+  if (!max || q[0] !== w[0]) return 0; // الغلطة الإملائية نادر تكون في أول حرف، وبدون هالشرط كلمات مثل «سيار» و«يسار» تتطابق
+  const d = faqDist(q, w, max);
+  return d > max ? 0 : d === 1 ? 0.7 : d === 2 ? 0.5 : 0;
+}
+const faqBigrams = (w) => { const s = new Set(), x = ' ' + w + ' '; for (let i = 0; i < x.length - 1; i++) s.add(x.slice(i, i + 2)); return s; };
+function faqDice(a, b) { const A = faqBigrams(a), B = faqBigrams(b); let n = 0; A.forEach(x => { if (B.has(x)) n++; }); return (2 * n) / (A.size + B.size); }
+const FAQ_IDX = new WeakMap();
+function faqIndex(list) {
+  let ix = FAQ_IDX.get(list);
+  if (!ix) {
+    ix = list.map(f => ({ q: new Set(faqTokens(f.q)), k: new Set(faqTokens(f.k || '')), a: new Set(faqTokens([f.p || ''].concat(f.s || [], f.n || '').join(' '))) }));
+    FAQ_IDX.set(list, ix);
+  }
+  return ix;
+}
+// يرجّع: hits = اللي تطابق (الأقوى أول)، near = الأقرب لو ما فيه تطابق، tokens = كلمات البحث بعد التنظيف
+function faqSearch(list, query, limit) {
+  const qt = Array.from(new Set(faqTokens(String(query == null ? '' : query).slice(0, 200)))).filter(w => w.length <= 30).slice(0, 12);
+  if (!qt.length) return { tokens: [], hits: [], near: [] };
+  const idx = faqIndex(list), hits = [];
+  idx.forEach((ix, i) => {
+    let score = 0, matched = 0;
+    qt.forEach(t => {
+      let best = 0;
+      const scan = (set, w) => { if (best >= w) return; for (const x of set) { const m = faqMatch(t, x) * w; if (m > best) { best = m; if (best >= w) break; } } };
+      scan(ix.q, 3); scan(ix.k, 2.2); scan(ix.a, 1);
+      if (best > 0) { matched++; score += best; }
+    });
+    if (matched >= Math.ceil(qt.length / 2) && score >= 1) hits.push({ item: list[i], score: round2(score), matched });
+  });
+  hits.sort((a, b) => b.matched - a.matched || b.score - a.score);
+  let out = hits;
+  if (hits.length) { const top = hits[0].matched, slack = qt.length >= 4 ? 1 : 0; out = hits.filter(h => h.matched >= top - slack); }
+  if (out.length) return { tokens: qt, hits: out.slice(0, limit || 12).map(h => h.item), near: [] };
+  const near = [];
+  idx.forEach((ix, i) => {
+    const words = Array.from(ix.q).concat(Array.from(ix.k));
+    let sum = 0;
+    qt.forEach(t => { let best = 0; for (const x of words) { const d = faqDice(t, x); if (d > best) best = d; } sum += best; });
+    const avg = sum / qt.length;
+    if (avg >= 0.65) near.push({ item: list[i], avg });
+  });
+  near.sort((a, b) => b.avg - a.avg);
+  return { tokens: qt, hits: [], near: near.filter(h => h.avg >= near[0].avg - 0.2).slice(0, 5).map(h => h.item) };
+}
+
 const Engine = {
-  version: '1.7.1', round2, parseNum, cellToISO, cleanText, sha256Hex, uid, todayISO, addDays, daysBetween, isoDate,
+  version: '1.8.0', round2, parseNum, cellToISO, cleanText, sha256Hex, uid, todayISO, addDays, daysBetween, isoDate,
   CATEGORY_SEED, buildCategoryRecords, Store, STORE_NAMES, DEFAULT_SETTINGS,
   sanitizeText, sanitizeFilename, fingerprintIban, fingerprintAccountNo, fingerprintNum, matchesOwner, normMerchant,
   detectTemplate, signatureOf, parseAlinmaAccount, interpretAlinmaLine, parseAlinmaCard, cardBalanceCheck,
@@ -5022,6 +5868,11 @@ const Engine = {
   setRefundAllocations, itemNet, linkedRefunds, cashReturnCandidates, linkCashReturn, unlinkCashReturn,
   saveGroup, deleteGroup, setTxGroups, setItemGroups, inGroup, itemFinCat, groupStats,
   snapKey, latestSnapshot, refreshAccountBalance, addSnapshot, smsBalanceSnapshot, wallTime,
+  // 1.8.0
+  migrate180mask, mergeDiffFields, mergeFill, sameShop, findNearMatches, resolveMergeDiff, resolveMergeDiffBulk, mergeDiffReviews, mergeDiffGroupOf, recheckMergeDiffs, nearPct, hasStatementLink, migrate180, findOldMergeDiffs,
+  shopCityIgnoreOf, shopCityCounts, sweepShopCity, setShopCityIgnore, clearShopCityIgnore, bulkDismissCity, bulkCityCounts,
+  faqNorm, faqStem, faqTokens, faqMatch, faqSearch,
+  excludedWhy, groupState, setGroupHidden, endGroup, reactivateGroup, nowLocalDT, subName, saveSubgroup, deleteSubgroup, assignSub, subOfTx, groupSubStats, carrySub,
 };
 if (typeof module !== 'undefined' && module.exports) module.exports = Engine;
 else root.Engine = Engine;

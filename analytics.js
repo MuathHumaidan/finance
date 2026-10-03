@@ -925,7 +925,7 @@ function computeAlerts(store, today) {
     const nm = l.scope === 'total' ? 'الإنفاق الكلي' : l.basis === 'products' ? ((store.get('categories', l.categoryId) || {}).name || 'منتجات') + ' (منتجات)' : catName(l.categoryId);
     list.push({ id: `limit:${l.id}:${cur.start}:${l.level}`, kind: 'limit', level: l.level === 'over' ? 'high' : 'mid', title: l.level === 'over' ? `تجاوزت حد «${nm}»` : `وصلت ${Math.floor(l.pct)}% من حد «${nm}»`, body: `${fm(l.spent)} من ${fm(l.amount)}`, ref: { limitId: l.id } });
   });
-  store.all('groups').filter(g => g.active !== false && g.budget).forEach(g => {
+  store.all('groups').filter(g => E.groupState(g, today) !== 'ended' && g.budget).forEach(g => { // 1.8.0: المخفية تنبه، والمنتهية (بزر أو بتاريخها) لا
     const s = E.groupStats(store, g.id); if (!s || !(s.level === 'over' || s.level === 'warn')) return;
     list.push({ id: `group:${g.id}:${s.level}`, kind: 'group', level: s.level === 'over' ? 'high' : 'mid', title: s.level === 'over' ? `تجاوزت ميزانية «${g.name}»` : `وصلت ${Math.floor(s.pct)}% من ميزانية «${g.name}»`, body: `${fm(s.spend)} من ${fm(s.budget)}`, ref: { groupId: g.id } });
   });
