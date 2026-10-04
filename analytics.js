@@ -227,6 +227,13 @@ function recIsFlagged(store, r) {
   const o = r.subjectType === 'merchant' ? store.get('merchants', r.subjectId) : store.get('beneficiaries', r.subjectId);
   return o && typeof o.isCommitment === 'boolean' ? o.isCommitment : !!r.isCommitment;
 }
+// 1.8.1: المتكرر المقترح لجهة «معروفة»: commitment = الجهة معلّمة التزام دائم أصلًا · recurring = لها متكرر مؤكد (من حساب ثاني). null = جديدة.
+// المعروفة ما ينسأل عنها «تبدو متكررة — تضيفها التزام؟»: ينطلب اعتماد جدول الدفع بس
+function recKnown(store, r) {
+  if (!r) return null;
+  if (recIsFlagged(store, r)) return 'commitment';
+  return store.all('recurring').some(x => x.id !== r.id && x.status === 'confirmed' && x.subjectType === r.subjectType && x.subjectId === r.subjectId) ? 'recurring' : null;
+}
 // الالتزامات القادمة: المؤكدة والتزام دائم فقط (المقترح ما يدخل)، من «from» إلى «to». المتأخر لين 7 أيام ينحسب مرة وحدة
 function upcomingCommitments(store, from, to, today) {
   today = today || todayISO(); const out = [];
@@ -570,18 +577,83 @@ function migrateCommit171(store) {
   return out;
 }
 
+/* ---------- 2ج. المتبقي من الالتزامات للدورة (1.8.1) ----------
+   لكل التزام معتمد:  المتبقي المتوقع للدورة = المتوقع للدورة − المدفوع المنسوب للدورة (بحد أدنى صفر).
+   المدفوع المنسوب للدورة من سجل الالتزام نفسه (الدفعة المقسومة «تعثر» أو «مقدم» تنحسب على دوراتها).
+   المتوقع للدورة حسب خطة الالتزام (نفس اللي ينعرض في صفحته):
+     شهري + ثابت = المبلغ المعتمد · شهري + متغير = متوسط آخر N دفعات · دفعات متغيرة = متوسط آخر N دورات كاملة.
+     متكرر مؤكد «سنوي»: المبلغ في الدورة اللي يطيح فيها موعده بس · «أسبوعي» (ونظامه شهري): المبلغ × عدد مواعيده في الدورة.
+   ما نخترع مبلغ: لو ما فيه مبلغ دورة موثوق (ما اكتملت دورة لالتزام دفعاته متغيرة، أو ما اندفع في الدورتين الأخيرتين) الالتزام
+   يطلع «توقعه غير مكتمل» وما ينضاف للتوقع. والموعد القادم ما يضيف المبلغ كامل لحاله: اللي اندفع من الالتزام في الدورة ينطرح. */
+function commitRemaining(store, today) {
+  today = today || todayISO();
+  return store.cached('commitRemaining:' + today, () => {
+    const out = { cycle: null, items: [], total: 0, expectedTotal: 0, paidTotal: 0, incomplete: 0 };
+    const C = commitCycles(store, today), ci = cycleIdx(C, today); if (ci < 0) return out;
+    const cyc = C.list[ci], prev = ci > 0 ? C.list[ci - 1] : null; out.cycle = { start: cyc.start, end: cyc.end };
+    const recs = store.all('recurring').filter(r => r.status === 'confirmed');
+    commitmentList(store, today).forEach(c => {
+      if (c.status !== 'approved') return; // اللي ينتظر اعتماد مبلغه ينحسب صرف عادي في المعدل
+      const L = commitLedger(store, c.key, today);
+      let paid = 0, nPaid = 0, lastIdx = -1; const prior = [];
+      L.entries.forEach(e => { if (!e.cycleStart) return; const j = C.idx.get(e.cycleStart); if (j > lastIdx) lastIdx = j; if (e.cycleStart === cyc.start) { paid = round2(paid + e.amount); nPaid++; } else if (j < ci) prior.push(e); });
+      let expected = null, basis = null, why = null;
+      if (c.pay === 'variable') { expected = c.cycleAvg; basis = 'avgCycle'; }
+      else if (c.value === 'variable') {
+        // شهري (دفعة كل دورة) وقيمته متغيرة. المتوقع = متوسط آخر دفعاته اللي قبل هالدورة: دفعات الدورة نفسها ما تدخل المتوسط، عشان المتوقع ما يتحرك وأنت تدفع.
+        // لو اندفعت فاتورة الدورة (دفعة وحدة): هي مبلغ الدورة الفعلي وما يبقى شي، حتى لو أقل من متوسطها. دفعتين وطالع: المتوقع ناقص المدفوع.
+        const lastN = prior.slice(-commitCfg(store).n);
+        expected = lastN.length ? round2(sum(lastN, e => e.amount) / lastN.length) : (paid > 0 ? paid : null); basis = 'avgPay';
+        if (nPaid === 1) { expected = paid; basis = 'paidBill'; }
+      }
+      else { expected = c.approved; basis = 'approved'; }
+      const rec = recs.filter(r => r.subjectType === c.subjectType && r.subjectId === c.subjectId).sort((a, b) => String(b.lastDate || '').localeCompare(String(a.lastDate || '')))[0] || null;
+      // نمط دفع مقترح غير شهري (سنوي أو أسبوعي) وما اعتمدته للحين: ما ندري جدوله، فما ينضاف له رقم لين تجاوب «تعتمد الجدول؟»
+      const sug = rec ? null : store.all('recurring').find(r => r.status === 'suggested' && r.subjectType === c.subjectType && r.subjectId === c.subjectId && (r.cadence === 'yearly' || r.cadence === 'weekly')) || null;
+      const lastPay = c.last.date;
+      let cadence = null;
+      if (rec && c.pay !== 'variable' && expected > 0 && (rec.cadence === 'yearly' || rec.cadence === 'weekly')) {
+        cadence = rec.cadence;
+        const ad = rec.cadence === 'weekly' ? null : rec.anchorDay;
+        if (rec.cadence === 'yearly') {
+          // أول موعد بعد آخر دفعة. لو آخر دفعة في هالدورة فالموعد انسدد
+          const due = addCadence(lastPay, 'yearly', 1, ad), paidHere = lastPay >= cyc.start && lastPay <= cyc.end;
+          if (paidHere || (due >= cyc.start && due <= cyc.end)) basis = 'yearly';
+          else if (due > cyc.end) { expected = 0; basis = 'yearly_later'; }
+          else { why = 'stale'; }
+        } else {
+          let n = 0; for (let k = -60; k <= 60; k++) { const d = addCadence(lastPay, 'weekly', k); if (d >= cyc.start && d <= cyc.end) n++; }
+          if (lastIdx < ci - 1) why = 'stale'; else { expected = round2(expected * n); basis = 'weekly'; }
+        }
+      } else if (sug && c.pay !== 'variable') why = 'schedule';
+      else if (expected == null || !(expected > 0)) why = 'history';
+      else if (lastIdx < ci - 1) why = 'stale'; // ما اندفع ولا انحسب له شي في هالدورة ولا اللي قبلها
+      const incomplete = !!why;
+      const remaining = incomplete ? null : round2(Math.max(0, expected - paid));
+      if (!incomplete && expected === 0 && paid === 0) return; // سنوي موعده مو في هالدورة: ما له سطر
+      out.items.push({ key: c.key, name: c.name, subjectType: c.subjectType, subjectId: c.subjectId, expected: incomplete ? (expected > 0 ? expected : null) : expected, paid, remaining, basis, cadence, incomplete, why,
+        pay: c.pay, value: c.value, lastTxId: c.last.id, lastDate: lastPay, prevPaid: prev ? round2(sum(L.entries.filter(e => e.cycleStart === prev.start), e => e.amount)) : 0 });
+      if (incomplete) out.incomplete++;
+      else { out.total = round2(out.total + remaining); out.expectedTotal = round2(out.expectedTotal + expected); out.paidTotal = round2(out.paidTotal + paid); }
+    });
+    out.items.sort((a, b) => Number(a.incomplete) - Number(b.incomplete) || (b.remaining || 0) - (a.remaining || 0) || String(a.name).localeCompare(String(b.name)));
+    return out;
+  });
+}
+
 /* ---------- 3. توقع نهاية الدورة ----------
-   = الصرف الفعلي حتى اليوم + الالتزامات المؤكدة المتبقية قبل نهاية الدورة + معدل الإنفاق المتغير × الأيام المتبقية. كل رقم مستقبلي «توقع». */
+   = الصرف الفعلي حتى اليوم + المتبقي المتوقع من الالتزامات للدورة + معدل الإنفاق المتغير × الأيام المتبقية. كل رقم مستقبلي «توقع».
+   1.8.1: المتبقي من الالتزام = المتوقع للدورة − المدفوع المنسوب للدورة (commitRemaining)، مو المبلغ كامل لكل موعد قادم. */
 function cycleForecast(store, today) {
   today = today || todayISO();
   const fr = forecastRate(store, today); if (!fr) return null;
   const cr = fr.rates, cyc = cr.cycle;
-  const upcoming = upcomingCommitments(store, today, cyc.end, today), upcomingTotal = sum(upcoming, u => u.amount);
+  const CR = commitRemaining(store, today), upcoming = CR.items, upcomingTotal = CR.total;
   const variableExpected = round2(fr.rate * cr.remaining), total = round2(cr.all.amount + upcomingTotal + variableExpected);
   const R = computePeriod(store, cyc);
   return { cycle: cyc, today, elapsed: cr.elapsed, remainingDays: cr.remaining, totalDays: cr.totalDays,
     spent: cr.all.amount, spentTxIds: cr.all.txIds, variableSoFar: cr.variable.amount, variableTxIds: cr.variable.txIds,
-    upcoming, upcomingTotal, rate: fr.rate, rateSource: fr.source, confidence: fr.confidence, history: fr.history, rates: cr,
+    upcoming, upcomingTotal, commitIncomplete: CR.incomplete, commitExpected: CR.expectedTotal, commitPaid: CR.paidTotal, rate: fr.rate, rateSource: fr.source, confidence: fr.confidence, history: fr.history, rates: cr,
     variableExpected, total, income: R.income, incomeTxIds: R.incomeItems, surplus: round2(R.income - total) };
 }
 
@@ -756,12 +828,13 @@ function savingsOpportunities(store, today, opts) {
   let actualRange = target, elapsed = daysBetween(target.start, target.end) + 1, remaining = 0;
   if (isForecast) { actualRange = { start: target.start, end: minD(today, target.end) }; elapsed = daysBetween(target.start, actualRange.end) + 1; remaining = Math.max(0, daysBetween(actualRange.end, target.end)); }
   const actual = spendBetween(store, actualRange, eligibleParts), actualVar = spendBetween(store, actualRange, eligibleVariableParts);
-  // الالتزامات المؤكدة المؤهلة (مثل اشتراك) الباقية قبل نهاية الدورة
+  // الالتزامات المعتمدة المؤهلة (مثل اشتراك): المتبقي المتوقع منها للدورة (1.8.1: المتوقع − المدفوع، مو المبلغ كامل لكل موعد)
   const upByCat = new Map();
-  if (isForecast) upcomingCommitments(store, today, target.end, today).forEach(u => {
-    const last = store.get('transactions', (u.rec.evidenceTxIds || []).slice(-1)[0]); if (!last) return;
+  if (isForecast) commitRemaining(store, today).items.forEach(u => {
+    if (u.incomplete || !(u.remaining > 0)) return;
+    const last = store.get('transactions', u.lastTxId); if (!last) return;
     const ps = eligibleParts(store, last); if (!ps.length) return;
-    const c = ps[0].cat; upByCat.set(c, round2((upByCat.get(c) || 0) + u.amount));
+    const c = ps[0].cat; upByCat.set(c, round2((upByCat.get(c) || 0) + u.remaining));
   });
   const histVar = hist.map(c => ({ c, days: daysBetween(c.start, c.end) + 1, v: spendBetween(store, c, eligibleVariableParts) }));
   const cats = new Set(); actual.byCat.forEach((v, k) => cats.add(k)); histCats.forEach(h => h.byCat.forEach((v, k) => cats.add(k))); upByCat.forEach((v, k) => cats.add(k));
@@ -930,7 +1003,7 @@ function computeAlerts(store, today) {
     list.push({ id: `group:${g.id}:${s.level}`, kind: 'group', level: s.level === 'over' ? 'high' : 'mid', title: s.level === 'over' ? `تجاوزت ميزانية «${g.name}»` : `وصلت ${Math.floor(s.pct)}% من ميزانية «${g.name}»`, body: `${fm(s.spend)} من ${fm(s.budget)}`, ref: { groupId: g.id } });
   });
   upcomingCommitments(store, today, addDays(today, 3), today).forEach(u => list.push({ id: `due:${u.recurringId}:${u.date}`, kind: 'due', level: 'mid', title: u.overdue ? `التزام متأخر: ${u.name}` : `التزام قريب: ${u.name}`, body: `${fm(u.amount)} · ${u.date}`, ref: { recurringId: u.recurringId } }));
-  store.all('recurring').filter(r => r.status === 'suggested').forEach(r => list.push({ id: `rec:${r.id}`, kind: 'recurring', level: 'low', title: `متكرر: ${subjectName(store, r)} — تضيفه التزام دائم؟`, body: `${CAD_L[r.cadence] || r.cadence} · ${fm(r.expectedAmount)} تقريبًا`, ref: { recurringId: r.id } }));
+  store.all('recurring').filter(r => r.status === 'suggested').forEach(r => list.push({ id: `rec:${r.id}`, kind: 'recurring', level: 'low', title: recKnown(store, r) ? `نمط دفع لـ«${subjectName(store, r)}» — تعتمد الجدول؟` : `متكرر: ${subjectName(store, r)} — تضيفه التزام دائم؟`, body: `${CAD_L[r.cadence] || r.cadence} · ${fm(r.expectedAmount)} تقريبًا`, ref: { recurringId: r.id } }));
   // 1.7.1: الالتزامات الدائمة: ينتظر اعتماد مبلغه · تغيّر سعره (أكثر من الحد عن المعتمد) · أكثر من دفعة في نفس الدورة
   commitmentList(store, today).forEach(c => {
     if (c.status !== 'approved') list.push({ id: `capprove:${c.key}`, kind: 'commitApprove', level: 'mid', title: `«${c.name}» ينتظر اعتماد مبلغه`, body: `آخر فاتورة ${fm(c.suggest)}. ما ينحسب التزام لين تجاوب`, ref: { commitKey: c.key } });
@@ -969,7 +1042,7 @@ function restoreAlert(store, id) { if (store.get('alertStates', id)) { store.rem
 
 Object.assign(E, {
   median, completeCycles, variableParts, spendBetween, addRateExclusion, removeRateExclusion, isRateExcluded, cycleRates, historyRates, forecastRate,
-  CAD, CAD_L, addCadence, detectRecurring, recIsCommitment, recIsFlagged, commitCfg, setCommitCfg, COMMIT_RANGE, commitmentGroups, commitStates, commitStateOf, commitCounted, commitLedger, commitCycles, syncCommitPlans, commitmentList, commitmentOf, commitApprove, commitPriceDecision, setCommitPay, setCommitAlert, defaultSplit, setCommitSplit, clearCommitMark, commitMultiDecision, commitAlertOf, payAmt, commitSubjKey: subjKey, migrateCommit171, syncRecurringAmount, liveLastDate, subjectName, recurringOfTx, confirmRecurring, dismissRecurring, setRecurringReserve, nextDue, upcomingCommitments,
+  CAD, CAD_L, addCadence, detectRecurring, recIsCommitment, recIsFlagged, recKnown, commitCfg, setCommitCfg, COMMIT_RANGE, commitmentGroups, commitRemaining, commitStates, commitStateOf, commitCounted, commitLedger, commitCycles, syncCommitPlans, commitmentList, commitmentOf, commitApprove, commitPriceDecision, setCommitPay, setCommitAlert, defaultSplit, setCommitSplit, clearCommitMark, commitMultiDecision, commitAlertOf, payAmt, commitSubjKey: subjKey, migrateCommit171, syncRecurringAmount, liveLastDate, subjectName, recurringOfTx, confirmRecurring, dismissRecurring, setRecurringReserve, nextDue, upcomingCommitments,
   cycleForecast, saveReserve, deleteReserve, reservesTotal, liquidityClassOf, accountNow, cardNow, liquidity, setLiquidityClass,
   partAttr, undefinedSpend, necOfPart, necessityBreakdown, necessityTrendMonths, necessityTrendCycles, monthPeriod, eligibleParts, savingsOpportunities,
   itemRows, productSpend, cityStats, citiesSummary, periodSummary, comparePeriodsFull, acrossPeriods, annualView,
