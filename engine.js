@@ -948,6 +948,8 @@ async function buildTx(store, plan, H, acc, info, line, sourceType, recordId) {
       tx.transactionType = 'CreditCardPayment'; tx.classificationStatus = 'confirmed'; tx.targetCardLast4 = info.targetCardLast4 || null;
       tx.merchantRaw = info.targetCardLast4 ? 'سداد بطاقة ' + info.targetCardLast4 : 'تسوية بطاقة ائتمانية (البطاقة غير معروفة)';
       tx.cardPaymentStatus = 'unmatched'; tx.transferLinkStatus = 'one_sided';
+      // 1.8.2: الطرف الطالع من حسابك: ينحسب صرف أو لا حسب خيار البطاقة (ما قررت = محسوب لين تقرر). السداد المسجل على البطاقة نفسها يبقى مثل قبل
+      if (tx.direction === 'out' && acc.type !== 'credit_card' && !(acc.last4 && acc.last4 === tx.targetCardLast4)) initCardPay(store, tx);
       break;
     }
     case 'card_statement_payment': {
@@ -1208,13 +1210,14 @@ function genericBalanceCheck(lines) {
 }
 
 function summarizePlan(store, plan) {
-  const s = { total: plan.txs.length, autoMerged: 0, deletedAgain: 0, possible: 0, newTx: 0, internal: 0, cardPayments: 0, roundUps: 0, unclassified: 0, temporary: 0, uncategorized: 0, unknownMerchants: 0, personTransfers: 0 };
+  const s = { total: plan.txs.length, autoMerged: 0, deletedAgain: 0, possible: 0, newTx: 0, internal: 0, cardPayments: 0, cardAsk: 0, roundUps: 0, unclassified: 0, temporary: 0, uncategorized: 0, unknownMerchants: 0, personTransfers: 0 };
   const mergedIds = new Set(plan.matches.auto.map(a => a.newId)), possibleIds = new Set(plan.matches.review.map(r => r.newId)), nearIds = new Set((plan.matches.near || []).map(r => r.newId));
   s.diff = plan.diffCount || 0; s.near = 0;
   plan.txs.forEach(t => {
     if (mergedIds.has(t.id)) s.autoMerged++; else if (plan.deletedMatches && plan.deletedMatches.has(t.id)) s.deletedAgain++; else if (possibleIds.has(t.id)) s.possible++; else if (nearIds.has(t.id)) s.near++; else s.newTx++;
     if (t.transactionType === 'InternalTransfer' && t.transferSubtype !== 'round_up') s.internal++;
     if (t.transactionType === 'CreditCardPayment') s.cardPayments++;
+    else if (t.cardPaySrc === 'ask' && cardBorn(t) && !mergedIds.has(t.id)) s.cardAsk++; // 1.8.2: سداد بطاقة جديد ما قررت لبطاقته (محسوب لين تقرر)
     if (t.transferSubtype === 'round_up') s.roundUps++;
     if (t.classificationStatus === 'unclassified') s.unclassified++;
     if (t.classificationStatus === 'temporary') s.temporary++;
@@ -1495,7 +1498,7 @@ function commitImport(store, plan, decisions) {
     previousBalance: plan.kind === 'credit_card' ? plan.header.previousBalance : null, previousBalanceDirection: plan.kind === 'credit_card' ? bc.direction : null,
     header: plan.header, balanceCheck: bc, balanceValidated: bc.ok === true ? true : bc.ok === false ? false : null, cardPaymentsStatus: null, createdAt: now };
   store.put('imports', imp);
-  applyRulesTo(store, plan.txs.filter(t => !idRemap.has(t.id) && !skipped.has(t.id)).map(t => t.id));
+  applyNewTx(store, plan.txs.filter(t => !idRemap.has(t.id) && !skipped.has(t.id)).map(t => t.id)); // 1.8.2: خيار البطاقة الحالي أول، ثم القواعد
   // آخر رصيد للحساب
   // 1.5.0: الرصيد الختامي ينحفظ في سجل الأرصدة (ما ينمسح السابق)، ورصيد الحساب = الأحدث
   const acc = plan.account ? store.get('accounts', plan.account.id) : null;
@@ -2096,7 +2099,8 @@ function resolveSmsAccount(store, plan, info, ids, forcedId) {
   const own = (ids || []).filter(f => f.type === 'account');
   for (const f of own) { const a = accs.find(x => x.numFingerprint === f.fingerprint || (f.alt || []).includes(x.accountFingerprint)); if (a && info.family !== 'sms_transfer_out') return a; }
   if (info.accountLast4) { const c = accs.filter(a => a.last4 === info.accountLast4 && a.type !== 'credit_card'); if (c.length === 1) return c[0]; const cc = accs.filter(a => a.last4 === info.accountLast4); if (cc.length === 1) return cc[0]; }
-  if (info.instrumentLast4) {
+  // 1.8.2: في سداد البطاقة، البطاقة المكتوبة هي المسدَّدة مو اللي دفعت. لو الرسالة فيها رقم حسابك وهو مو مسجل، ما نحط السداد على البطاقة (يتسجل حساب مؤقت برقمه)
+  if (info.instrumentLast4 && !(info.family === 'card_payment' && info.accountLast4 && info.accountLast4 !== info.instrumentLast4)) {
     const ins = store.all('instruments').filter(i => i.last4 === info.instrumentLast4);
     const accIds = Array.from(new Set(ins.map(i => i.accountId)));
     if (accIds.length === 1) return store.get('accounts', accIds[0]) || null;
@@ -2228,7 +2232,7 @@ async function prepareSms(store, msgs, opts) {
     if (!acc) { newReview(plan, rec, 'sms_no_account', { info: stripInfo(info) }); continue; }
     const line = { raw: text, balance: info.balanceAfter != null ? info.balanceAfter : null, rowIndex: row };
     const tx = await buildTx(store, plan, H, acc, info, line, 'sms', m.id);
-    if (acc.autoCreated && !tx.instrumentId && acc.last4) tx.instrumentId = H.ensureInstrument(acc.id, info.instrumentLast4 ? 'card' : 'account', acc.last4, 'unknown').id;
+    if (acc.autoCreated && !tx.instrumentId && acc.last4) tx.instrumentId = H.ensureInstrument(acc.id, info.instrumentLast4 && info.instrumentLast4 === acc.last4 ? 'card' : 'account', acc.last4, 'unknown').id;
     tx.sourceLinks[0].messageId = m.id;
     if (info.online || info.family === 'online_purchase' || tx.paymentMethod === 'Online' || ONLINE_SHOP.test(tx.merchantRaw || '')) tx.onlineHint = true; // 1.6.1: موقعك وقت الشراء الأونلاين مو مكان المتجر
     tx.dateSource = info.dateSource || null; tx.dateShape = info.dateShape || null;
@@ -2616,12 +2620,13 @@ function mergeDiffFields(store, ex, tx, opts) {
     const night = (ex.dateArrival && dn === addDays(de, 1)) || (tx.dateArrival && de === addDays(dn, 1));
     if (!book && !night) out.push('date');
   }
-  if (ex.typeSource !== 'user' && typeSure(ex) && typeSure(tx) && ex.transactionType !== tx.transactionType) out.push('type');
+  if (ex.typeSource !== 'user' && typeSure(ex) && typeSure(tx) && ex.transactionType !== tx.transactionType && !(cardBorn(ex) && cardBorn(tx))) out.push('type');
   return out;
 }
 function takeType(ex, tx) {
   TYPE_BUNDLE.forEach(k => { ex[k] = tx[k] === undefined ? null : tx[k]; });
   if (tx.cardPaymentByUser) ex.cardPaymentByUser = true; else delete ex.cardPaymentByUser;
+  if (tx.cardPay) { ex.cardPay = true; if (tx.cardPaySrc) ex.cardPaySrc = tx.cardPaySrc; else delete ex.cardPaySrc; } else { delete ex.cardPay; delete ex.cardPaySrc; }
   const type = ex.transactionType;
   if (type !== 'Refund') { delete ex.refundOfId; ex.refundItemAllocations = []; }
   if (type !== 'CashWithdrawal') delete ex.cashParts;
@@ -2662,7 +2667,9 @@ function mergeFill(store, ex, tx, score) {
   }
   // النوع غير المؤكد = معلومة ناقصة: يتعبى من المصدر اللي يعرفه (إلا لو غيّرت النوع بيدك)
   if (ex.typeSource !== 'user' && !typeSure(ex) && typeSure(tx) && ex.transferSubtype !== 'round_up') takeType(ex, tx);
-  else if (!ex.categoryId && tx.categoryId && ex.categorySource !== 'user_txn' && ex.transactionType === tx.transactionType && ex.transferSubtype !== 'round_up') { ex.categoryId = tx.categoryId; ex.subcategoryId = tx.subcategoryId || null; ex.categorySource = tx.categorySource || null; if (ex.transactionType === 'PersonTransfer') ex.classificationStatus = 'confirmed'; }
+  else if (!ex.categoryId && tx.categoryId && tx.categorySource !== 'card' && ex.categorySource !== 'user_txn' && ex.transactionType === tx.transactionType && ex.transferSubtype !== 'round_up') { ex.categoryId = tx.categoryId; ex.subcategoryId = tx.subcategoryId || null; ex.categorySource = tx.categorySource || null; if (ex.transactionType === 'PersonTransfer') ex.classificationStatus = 'confirmed'; }
+  // 1.8.2: سداد بطاقة رقم بطاقته ما كان معروف (سطر كشف) وجا المصدر الثاني برقمها: الرقم يتعبى. ولو العملية ما زالت تنتظر قرارك وهالبطاقة لها خيار، تمشي عليه
+  if (!ex.targetCardLast4 && tx.targetCardLast4 && cardBorn(ex) && cardBorn(tx)) { ex.targetCardLast4 = tx.targetCardLast4; followIfAsking(store, ex); }
   const hadCity = !!ex.suggestedCityId;
   carry150(ex, tx); carryShop(ex, tx); carrySub(ex, tx);
   // 1.8.1: الرسالة جابت مدينة الموقع للعملية الموجودة (مثل رسالة اندمجت مع سطر كشف): نفس قاعدة الاعتماد التلقائي، مثل لو وصلت المدينة متأخرة
@@ -2785,7 +2792,7 @@ function resolveMergeDiff(store, reviewId, d) {
   const asNew = () => {
     const t = Object.assign({}, held, { duplicateStatus: 'independent', updatedAt: new Date().toISOString() }); normTx150(t);
     autoApproveCity(store, t); // 1.8.1: نفس قاعدة مدينة الموقع مهما كان طريق حفظ العملية
-    store.put('transactions', t); applyRulesTo(store, [t.id]);
+    store.put('transactions', t); applyNewTx(store, [t.id]);
     return t;
   };
   if (d.action === 'separate' || (!ex && !r.old && !store.get('deletedTxs', r.existingId))) {
@@ -2872,7 +2879,7 @@ function resolveDuplicate(store, reviewId, decision, existingId) {
       // العملية الموجودة ما عادت موجودة أبدًا (مثل كشف انحذف): الرسالة تصير عملية مستقلة بدل ما تضيع
       const t = Object.assign({}, held, { duplicateStatus: 'independent' });
       autoApproveCity(store, t);
-      store.put('transactions', t); applyRulesTo(store, [t.id]);
+      store.put('transactions', t); applyNewTx(store, [t.id]);
       if (msg) { msg.status = 'tx'; msg.txId = t.id; store.put('messages', msg); }
       pairTransfers(store); sweepPeriods(store);
       closeReview(store, r, 'separate'); store.touch(); return r;
@@ -2880,7 +2887,7 @@ function resolveDuplicate(store, reviewId, decision, existingId) {
   } else {
     const t = Object.assign({}, held, { duplicateStatus: 'independent' });
     autoApproveCity(store, t);
-    store.put('transactions', t); applyRulesTo(store, [t.id]);
+    store.put('transactions', t); applyNewTx(store, [t.id]);
     if (msg) { msg.status = 'tx'; msg.txId = t.id; store.put('messages', msg); }
     pairTransfers(store); sweepPeriods(store); // 1.7.0: داخل «الفترات» تاخذ مدينتها ومجموعتها
   }
@@ -2915,6 +2922,7 @@ function resolveTwin(store, reviewId, decision) {
   // الثانية هي اللي تنشال (النتيجة نفسها: رسالة وحدة محسوبة). لو الثنتين مربوطين بمصدر ثاني: عمليتين، ما ينفع «نفس الرسالة»
   let drop = tx, dropMsg = m, keep = other, keepMsg = om;
   if (!twinOnly(tx, m)) { if (twinOnly(other, om)) { drop = other; dropMsg = om; keep = tx; keepMsg = m; } else return { review: r, error: 'linked' }; }
+  if (cardBorn(keep) && cardBorn(drop) && keep.cardPaySrc === 'ask' && drop.cardPaySrc && drop.cardPaySrc !== 'ask') setCardPayState(store, keep, cardPayCounted(drop), drop.cardPaySrc); // 1.8.2: جوابك على سؤال السداد ما يضيع
   if (!keep.note && drop.note) keep.note = drop.note;
   if (!keep.categoryId && drop.categoryId) { keep.categoryId = drop.categoryId; keep.subcategoryId = drop.subcategoryId; keep.categorySource = drop.categorySource; }
   carry150(keep, drop); carryShop(keep, drop); carrySub(keep, drop);
@@ -2941,7 +2949,7 @@ function resolveDeletedAgain(store, reviewId, decision) {
   if (decision === 'restore') {
     let t = null;
     if (exists) t = r.heldTx ? attachToDeleted(store, r.deletedId, r.heldTx, true) : restoreTx(store, r.deletedId);
-    else if (r.heldTx) { t = Object.assign({}, r.heldTx, { duplicateStatus: 'independent' }); store.put('transactions', t); pairTransfers(store); }
+    else if (r.heldTx) { t = Object.assign({}, r.heldTx, { duplicateStatus: 'independent' }); syncNewCardPay(store, t); store.put('transactions', t); pairTransfers(store); }
     else t = store.get('transactions', r.deletedId) || null;
     if (msg) { msg.status = t ? 'merged' : 'ignored'; msg.txId = t ? t.id : null; if (t) msg.userMerged = true; store.put('messages', msg); }
   } else {
@@ -3138,6 +3146,7 @@ function forEachCatRef(store, fn) {
   store.all('beneficiaries').forEach(b => { if (fn(b, 'categoryId', 'subcategoryId')) store.put('beneficiaries', b); });
   store.all('rules').forEach(r => { if (r.then && fn(r.then, 'categoryId', 'subcategoryId')) { if (!r.then.categoryId && !r.then.type && !r.then.merchantId) r.enabled = false; store.put('rules', r); } });
   store.all('reviews').forEach(r => { if (r.heldTx && fn(r.heldTx, 'categoryId', 'subcategoryId')) store.put('reviews', r); });
+  { const s = store.settings, all = s && s.cardPay; let ch = false; if (all) Object.keys(all).forEach(k => { const e = all[k]; if (e && (e.cat || e.sub) && fn(e, 'cat', 'sub')) ch = true; }); if (ch) store.put('settings', s); } // 1.8.2
 }
 function moveSubCategory(store, subId, newParent) {
   forEachCatRef(store, (o, ck, sk) => { if (o[sk] !== subId || o[ck] === newParent) return false; o[ck] = newParent; return true; });
@@ -3214,6 +3223,7 @@ function bulkEdit(store, txIds, ch) {
       promoteUnknown(t, ch.categoryId);
       t.categoryId = ch.categoryId || null; t.subcategoryId = ch.subcategoryId || null; t.categorySource = 'user_txn';
       if (t.transactionType === 'PersonTransfer') t.classificationStatus = ch.categoryId ? 'confirmed' : 'temporary';
+      rememberCardCat(store, t); // 1.8.2
       changed = true;
     }
     if (ch.recurrenceType !== undefined) { t.recurrenceType = ch.recurrenceType || null; t.recurrenceTypeUser = !!ch.recurrenceType; changed = true; }
@@ -3238,12 +3248,13 @@ function pairTransfers(store) {
   const cardByLast4 = (l4) => store.all('accounts').find(a => a.type === 'credit_card' && a.last4 === l4);
   // تصفير الربط السابق
   txs.forEach(t => {
-    if (t.transactionType === 'CreditCardPayment' || (t.transactionType === 'InternalTransfer' && t.transferSubtype !== 'round_up')) {
+    if (cardLeg(t) || (t.transactionType === 'InternalTransfer' && t.transferSubtype !== 'round_up')) {
       t._pair = null;
     }
   });
   // سداد البطاقات: الطرف الخارج من الجاري ↔ الطرف الداخل في حساب البطاقة
-  const outLegs = txs.filter(t => t.transactionType === 'CreditCardPayment' && t.direction === 'out');
+  // 1.8.2: السداد المحسوب صرف («دفع») يبقى طرف سداد (cardLeg): ينربط بطرفه في كشف البطاقة وينقص المستحق عليها
+  const outLegs = txs.filter(t => cardLeg(t) && t.direction === 'out');
   const inLegs = txs.filter(t => t.transactionType === 'CreditCardPayment' && t.direction === 'in');
   const used = new Set();
   outLegs.forEach(o => {
@@ -3273,12 +3284,12 @@ function pairTransfers(store) {
     if (best) { usedIn.add(best.id); o._pair = best.id; best._pair = o.id; }
   });
   txs.forEach(t => {
-    const isCard = t.transactionType === 'CreditCardPayment';
+    const isCard = cardLeg(t);
     const isIT = t.transactionType === 'InternalTransfer' && t.transferSubtype !== 'round_up';
     if (!isCard && !isIT) { if (t._pair !== undefined) { delete t._pair; } return; }
     const pairId = t._pair || null; delete t._pair;
     const status = pairId ? 'linked' : 'one_sided';
-    const links = (t.linkedTransactionIds || []).filter(id => { const x = store.get('transactions', id); return x && x.transactionType !== t.transactionType; });
+    const links = (t.linkedTransactionIds || []).filter(id => { const x = store.get('transactions', id); return x && (isCard ? !cardLeg(x) : x.transactionType !== t.transactionType); });
     if (pairId) links.push(pairId);
     const cps = isCard ? (pairId ? 'matched' : 'unmatched') : t.cardPaymentStatus;
     const changed = t.transferLinkStatus !== status || cps !== t.cardPaymentStatus || JSON.stringify(links) !== JSON.stringify(t.linkedTransactionIds || []);
@@ -3851,7 +3862,9 @@ function setCategory(store, txId, categoryId, subcategoryId, scope) {
   if (scope === 'this' || (!tx.merchantId && !tx.beneficiaryId)) {
     tx.categoryId = categoryId; tx.subcategoryId = subcategoryId || null; tx.categorySource = 'user_txn';
     if (tx.transactionType === 'PersonTransfer') tx.classificationStatus = categoryId ? 'confirmed' : 'temporary';
-    tx.updatedAt = new Date().toISOString(); store.put('transactions', tx); store.touch(); return 1;
+    tx.updatedAt = new Date().toISOString(); store.put('transactions', tx);
+    rememberCardCat(store, tx); // 1.8.2: تصنيفك لسداد بطاقة محسوب ينحفظ للبطاقة ويتطبق على سداداتها الجاية
+    store.touch(); return 1;
   }
   if (tx.beneficiaryId) {
     const b = store.get('beneficiaries', tx.beneficiaryId); b.categoryId = categoryId; b.subcategoryId = subcategoryId || null; store.put('beneficiaries', b);
@@ -3911,8 +3924,9 @@ function setType(store, txId, type, extra) {
   t.transactionType = type; t.classificationStatus = type === 'Unknown' ? 'unclassified' : (type === 'PersonTransfer' && !t.categoryId ? 'temporary' : 'confirmed');
   if (type === 'InternalTransfer') { t.counterpartyAccountId = extra.counterpartyAccountId || null; t.transferLinkStatus = 'one_sided'; t.categoryId = null; t.subcategoryId = null; }
   if (type === 'Income') t.incomeSubtype = extra.incomeSubtype || t.incomeSubtype || 'other';
-  if (type === 'CreditCardPayment') { t.targetCardLast4 = extra.targetCardLast4 || null; }
+  if (type === 'CreditCardPayment') { t.targetCardLast4 = extra.targetCardLast4 || t.targetCardLast4 || null; } // 1.8.2: رقم البطاقة المعروف (من الرسالة) يبقى
   if (type !== 'CreditCardPayment') delete t.cardPaymentByUser;
+  if (t.cardPay) t.cardPaySrc = 'user'; // 1.8.2: غيّرت نوع سداد بطاقة بيدك = اختيارك لهذي العملية
   if (type !== 'Refund') { delete t.refundOfId; t.refundItemAllocations = []; }
   if (type !== 'CashWithdrawal') delete t.cashParts;
   if (type !== 'CashDeposit') { t.cashReturnOfId = null; t.cashReturnPartId = null; }
@@ -3940,6 +3954,7 @@ function deleteTx(store, txId) {
 function restoreTx(store, txId) {
   const d = store.get('deletedTxs', txId); if (!d) return null;
   const t = Object.assign({}, d); delete t.deletedAt; t.updatedAt = new Date().toISOString(); normTx150(t);
+  followIfAsking(store, t); // 1.8.2: كان ينتظر قرارك وبطاقته صار لها خيار وهو محذوف: يمشي عليه مثل باقي اللي كانت تنتظر
   store.put('transactions', t); store.remove('deletedTxs', txId);
   refreshProductsOf(store, t);
   store.all('messages').filter(m => m.deletedTxId === txId).forEach(m => { m.status = 'tx'; m.txId = txId; delete m.deletedTxId; store.put('messages', m); });
@@ -4041,6 +4056,247 @@ function cashExpenseToPart(store, txId, withdrawalId) {
 /* ---------- 15هـ. نوع التحويل الطالع: صرف / بين حساباتي / سداد بطاقة ----------
    إذا للتحويل رقم حساب معروف (مستفيد)، الاختيار ينحفظ على رقم الحساب ويتطبق على كل تحويلاته السابقة والقادمة
    (ما عدا اللي غيرت نوعها بنفسك لعملية وحدة). بدون رقم حساب: لهذي العملية بس. */
+/* ---------- 15و. سداد البطاقة الائتمانية: ينحسب صرف أو لا (1.8.2) ----------
+   سداد البطاقة (الطرف الطالع من حسابك) له حالتين:
+     ما ينحسب = نوعه «سداد بطاقة» (CreditCardPayment): مشتريات البطاقة تجي للتطبيق وانحسبت وقت الشراء.
+     ينحسب    = نوعه «دفع» (Payment): مشتريات البطاقة ما تجي للتطبيق، فالسداد نفسه هو الصرف.
+   الخيار ينحفظ على آخر 4 أرقام من البطاقة: settings.cardPay[رقم] = {mode: 'count' | 'skip' | null (يسألك), cat, sub}.
+   السداد اللي ما ينعرف رقم بطاقته (مثل سطر «تسوية بطاقة» في الكشف) له خيار واحد مشترك بالمفتاح '?'.
+   على العملية: cardPay = سداد بطاقة · cardPaySrc = 'ask' (ما قررت لبطاقته: محسوب لين تقرر) | 'card' (مشى على خيار البطاقة) | 'user' (اختيارك لهذي العملية بس).
+   سدادات قبل 1.8.2 ما عليها cardPaySrc وتنعرف من اسمها. الأولوية مثل ما هي: تعديلك لعملية وحدة ← القاعدة ← خيار البطاقة.
+   القاعدة الأساسية: عملية موجودة ما تتغير حالتها إلا بقرارك (جوابك على السؤال، أو «طبّق على السابقة»). الخيار يمشي لحاله على:
+     السداد الجديد وقت حفظه، والسداد اللي ما زال ينتظر قرارك (cardPaySrc = 'ask').
+   ما يدخل هنا: تحويل غيّرت نوعه بيدك أو علّمت مستفيده «سداد بطاقة» (يبقى على الأزرار الثلاثة)، والسداد المسجل على البطاقة نفسها (جهة البطاقة). */
+const CARD_PAY_NAME = /^(?:سداد بطاقة \d{4}|تسوية بطاقة ائتمانية \(البطاقة غير معروفة\))$/; // الاسمين اللي يحطهم التطبيق نفسه لسداد البطاقة، بالضبط
+const CARD_UNKNOWN = '?';
+const CARD_SPEND_TYPES = new Set(['Payment', 'PersonTransfer', 'CashExpense', 'CashWithdrawal', 'Unknown']);
+// «مولودة سداد بطاقة» (الطرف الطالع): من علامتها، أو من اسمها للي انبنت قبل 1.8.2
+function cardBorn(t) {
+  if (!t || t.direction !== 'out' || t.transferSubtype === 'round_up') return false;
+  const ty = t.transactionType;
+  if (ty !== 'CreditCardPayment' && ty !== 'Payment' && ty !== 'PersonTransfer') return false;
+  return t.cardPay === true || CARD_PAY_NAME.test(String(t.merchantRaw || ''));
+}
+// طرف سداد: نوعه «سداد بطاقة»، أو سداد محسوب صرف عليه علامة 1.8.2 (انبنى فيه، أو قررت فيه). السداد القديم المحسوب (بدون علامة) يبقى مثل 1.8.1: مو طرف
+const cardLeg = (t) => !!t && (t.transactionType === 'CreditCardPayment' || (t.cardPay === true && cardBorn(t)));
+// السداد مسجل على البطاقة نفسها (رسالة من جهة البطاقة، ما فيها حسابك): مو الطرف الطالع من حسابك، فما له خيار وما ينحسب صرف
+function cardSideTx(store, t) { const a = t && t.accountId ? store.get('accounts', t.accountId) : null; return !!a && (a.type === 'credit_card' || (!!a.last4 && a.last4 === t.targetCardLast4)); }
+function isCardPay(store, t) { return cardBorn(t) && !cardSideTx(store, t); }
+const cardKeyOf = (t) => (t && t.targetCardLast4) || CARD_UNKNOWN;
+const cardPayCounted = (t) => t.transactionType !== 'CreditCardPayment';
+const cardAskOpen = (store, t) => !!t && t.cardPaySrc === 'ask' && isCardPay(store, t);
+function cardPolicyOf(store, key) { const all = (store.settings && store.settings.cardPay) || {}; return Object.prototype.hasOwnProperty.call(all, key) ? all[key] : null; }
+function putCardPolicy(store, key, patch) {
+  const s = store.settings, all = Object.assign({}, s.cardPay || {});
+  all[key] = Object.assign({ mode: null, cat: null, sub: null }, all[key] || {}, patch, { at: new Date().toISOString() });
+  s.cardPay = all; store.put('settings', s); return all[key];
+}
+// يحط السداد على حالته (محسوب أو لا): النوع بس. ما يلمس مبلغه ولا تاريخه ولا حسابه ولا تصنيفه. src: 'ask' | 'card' | 'user'
+function setCardPayState(store, t, count, src) {
+  t.cardPay = true; t.cardPaySrc = src;
+  if (count) {
+    if (!cardPayCounted(t)) t.transactionType = 'Payment';
+    t.classificationStatus = t.transactionType === 'PersonTransfer' && !t.categoryId ? 'temporary' : 'confirmed';
+    delete t.cardPaymentByUser;
+  } else {
+    t.transactionType = 'CreditCardPayment'; t.classificationStatus = 'confirmed';
+    t.cardPaymentStatus = t.cardPaymentStatus || 'unmatched'; t.transferLinkStatus = t.transferLinkStatus || 'one_sided';
+  }
+  if (src === 'user') t.typeSource = 'user'; else delete t.typeSource;
+  t.updatedAt = new Date().toISOString();
+  return t;
+}
+// سداد جديد (وقت بنائه أو حفظه): على خيار بطاقته، وإذا ما قررت لها = محسوب لين تقرر. والمحسوب ياخذ تصنيفك المحفوظ للبطاقة
+function initCardPay(store, tx) {
+  const e = cardPolicyOf(store, cardKeyOf(tx));
+  if (e && e.mode) setCardPayState(store, tx, e.mode === 'count', 'card'); else setCardPayState(store, tx, true, 'ask');
+  if (cardPayCounted(tx) && !tx.categoryId && tx.categorySource !== 'user_txn' && e && e.cat) {
+    const lc = liveCat(store, e.cat, e.sub);
+    if (lc[0]) { tx.categoryId = lc[0]; tx.subcategoryId = lc[1]; tx.categorySource = 'card'; }
+  }
+  return tx;
+}
+// عملية تنحفظ الحين وهي انبنت قبل (كانت معلّقة في مراجعة، أو خطة استيراد مفتوحة): تمشي على خيار بطاقتها الحالي. للعمليات الجديدة بس
+function syncNewCardPay(store, t) {
+  if (!t || t.cardPaySrc === 'user' || t.typeSource === 'user' || !isCardPay(store, t)) return false;
+  if (t.cardPay !== true && t.transactionType !== 'CreditCardPayment') return false; // انبنت قبل 1.8.2 ونوعها تغيّر: تبقى مثل ما هي
+  const was = t.transactionType + '|' + t.cardPaySrc + '|' + (t.categoryId || '');
+  if (t.categorySource === 'card') { t.categoryId = null; t.subcategoryId = null; t.categorySource = null; }
+  initCardPay(store, t);
+  return was !== t.transactionType + '|' + t.cardPaySrc + '|' + (t.categoryId || '');
+}
+// سداد ما زال ينتظر قرارك وبطاقته صار لها خيار (رجع من المحذوفة، أو انعرف رقم بطاقته): يمشي عليه مثل باقي اللي تنتظر
+function followIfAsking(store, t) {
+  if (!cardAskOpen(store, t) || t.typeSource === 'user' || t.typeSource === 'rule') return false;
+  const e = cardPolicyOf(store, cardKeyOf(t)); if (!e || !e.mode) return false;
+  setCardPayState(store, t, e.mode === 'count', 'card'); return true;
+}
+// العملية الجديدة: خيار البطاقة أول، ثم القواعد (القاعدة أقوى)
+function applyNewTx(store, txIds) {
+  let synced = 0;
+  (txIds || []).forEach(id => { const t = store.get('transactions', id); if (t && syncNewCardPay(store, t)) { store.put('transactions', t); synced++; } });
+  const n = applyRulesTo(store, txIds);
+  if (synced && !n) pairTransfers(store);
+  return n;
+}
+function rememberCardCat(store, t) {
+  if (!isCardPay(store, t) || !cardPayCounted(t)) return;
+  const key = cardKeyOf(t), e = cardPolicyOf(store, key), cat = t.categoryId || null, sub = t.subcategoryId || null;
+  if ((e ? e.cat || null : null) === cat && (e ? e.sub || null : null) === sub) return;
+  putCardPolicy(store, key, { cat, sub });
+}
+// مشتريات على نفس رقم البطاقة موجودة في التطبيق (معلومة تساعدك تقرر، مو قرار): على حساب البطاقة، أو على أداة بنفس الآخر 4
+function cardPurchases(store, key) {
+  if (!key || key === CARD_UNKNOWN) return 0;
+  const accs = new Set(store.all('accounts').filter(a => a.last4 === key && (a.type === 'credit_card' || a.autoCreated)).map(a => a.id));
+  const ins = new Set(store.all('instruments').filter(i => i.last4 === key && i.kind !== 'account' && i.kind !== 'cash').map(i => i.id));
+  if (!accs.size && !ins.size) return 0;
+  let n = 0;
+  store.all('transactions').forEach(t => { if (t.transactionType === 'Payment' && !cardBorn(t) && (accs.has(t.accountId) || (t.instrumentId && ins.has(t.instrumentId)))) n++; });
+  return n;
+}
+// السداد ينتظر قرارك فعلًا (ما قررت لبطاقته، وما غيّرته بيدك، وما حوّلته قاعدة)
+function cardPayAsking(store, t) {
+  if (!cardAskOpen(store, t) || t.typeSource === 'user' || t.typeSource === 'rule') return false;
+  const e = cardPolicyOf(store, cardKeyOf(t)); return !(e && e.mode);
+}
+// حالة السداد للعرض: محسوب؟ ومن وين جات الحالة
+function cardPayInfo(store, t) {
+  if (!isCardPay(store, t)) return null;
+  const key = cardKeyOf(t), e = cardPolicyOf(store, key), counted = cardPayCounted(t), mode = e ? e.mode || null : null;
+  let src = t.cardPaySrc || 'old';
+  if (t.typeSource === 'rule') src = 'rule'; else if (t.typeSource === 'user') src = 'user';
+  else if (src === 'card' && (!mode || (mode === 'count') !== counted)) src = 'old'; // خيار البطاقة تغيّر بعدها وما انطبق عليها
+  else if (src === 'ask' && mode) src = 'old';
+  const rule = src === 'rule' && t.ruleId ? store.get('rules', t.ruleId) : null;
+  return { key, last4: key === CARD_UNKNOWN ? null : key, counted, src, mode, cat: e ? e.cat || null : null, sub: e ? e.sub || null : null,
+    ruleId: rule ? rule.id : null, ruleName: rule ? (rule.name || 'قاعدة') : null, purchases: cardPurchases(store, key) };
+}
+const cardPaysOf = (store, key) => store.all('transactions').filter(x => isCardPay(store, x) && cardKeyOf(x) === key);
+// سدادات نفس البطاقة اللي حالتها غير خيارها الحين (ما عدا اللي اخترت لها بنفسك لعملية وحدة): الأحدث أول
+function cardPayPast(store, key, exceptId) {
+  const e = cardPolicyOf(store, key); if (!e || !e.mode) return [];
+  const count = e.mode === 'count';
+  return cardPaysOf(store, key).filter(x => x.id !== exceptId && x.cardPaySrc !== 'user' && x.typeSource !== 'user' && cardPayCounted(x) !== count)
+    .sort((a, b) => String(b.transactionDate || '').localeCompare(String(a.transactionDate || ''))).map(x => x.id);
+}
+function applyCardPayPast(store, key, ids) {
+  const e = cardPolicyOf(store, key); if (!e || !e.mode) return 0;
+  const ok = new Set(cardPayPast(store, key)); let n = 0;
+  (ids || []).forEach(id => { if (!ok.has(id)) return; const x = store.get('transactions', id); setCardPayState(store, x, e.mode === 'count', 'card'); store.put('transactions', x); n++; });
+  if (n) { pairTransfers(store); sweepPeriods(store); store.touch(); }
+  return n;
+}
+// اللي ما زالت تنتظر قرارك لنفس البطاقة تمشي على خيارها («ما راجعتها» تبقى مثل ما هي: المراجعة شي ثاني).
+// اللي حوّلت نوعها قاعدة ما تمشي لحالها: تنسأل عنها مع السابقة
+function followCardPolicy(store, key, exceptId) {
+  let n = 0;
+  cardPaysOf(store, key).forEach(x => { if (x.id !== exceptId && followIfAsking(store, x)) { store.put('transactions', x); n++; } });
+  return n;
+}
+/* قواعد مفعّلة بتغيّر نوع سداد هالبطاقة لعكس اللي اخترته. القاعدة أقوى من خيار البطاقة، فلازم توقف عشان الخيار يمشي.
+   نفس ترتيب التطبيق: أول قاعدة تنطبق هي اللي تشتغل؛ لو وقفت يجي دور اللي بعدها. السداد ينفحص بالنوع اللي بيجي عليه مع خيارك
+   («ما ينحسب» = سداد بطاقة، «ينحسب» = دفع)، فقاعدة شرطها نوع ثاني ما تنعد */
+function ruleCouldMatchCard(store, rule, probe) {
+  const w = rule.when || {};
+  if (!(w.merchantId || w.beneficiaryId || w.text || w.accountId || w.instrumentId || w.amountMin || w.amountMax)) return false;
+  return ruleMatches(store, { when: { text: w.text, direction: w.direction, type: w.type, merchantId: w.merchantId, beneficiaryId: w.beneficiaryId, amountMax: Infinity } }, probe);
+}
+function cardPayRuleConflicts(store, t, count, loose) {
+  if (!t) return [];
+  const probe = Object.assign({}, t, { transactionType: count ? 'Payment' : 'CreditCardPayment' }), out = [];
+  const hit = loose ? ruleCouldMatchCard : ruleMatches;
+  let left = activeRules(store);
+  for (;;) {
+    const r = left.find(x => hit(store, x, probe)); if (!r) break;
+    const ty = r.then && r.then.type;
+    if (!ty || ty === probe.transactionType || (count ? CARD_SPEND_TYPES.has(ty) : !CARD_SPEND_TYPES.has(ty))) break; // ما تغيّر النوع، أو نوعها يوافق خيارك
+    out.push(r.id); left = left.filter(x => x.id !== r.id);
+  }
+  return out;
+}
+// لكل سدادات البطاقة الموجودة + سداد افتراضي باسمها (للبطاقة اللي ما لها سداد للحين)
+function cardRuleConflictsFor(store, key, count, first) {
+  const fake = { id: '', direction: 'out', transactionType: 'CreditCardPayment', merchantRaw: key === CARD_UNKNOWN ? 'تسوية بطاقة ائتمانية (البطاقة غير معروفة)' : 'سداد بطاقة ' + key,
+    targetCardLast4: key === CARD_UNKNOWN ? null : key, grossAmount: 0, principalAmount: 0, accountId: null, instrumentId: null, merchantId: null, beneficiaryId: null, sourceLinks: [] };
+  const out = [];
+  const real = (first ? [first] : []).concat(cardPaysOf(store, key));
+  real.forEach(t => cardPayRuleConflicts(store, t, count).forEach(id => { if (!out.includes(id)) out.push(id); }));
+  if (!real.length) cardPayRuleConflicts(store, fake, count, true).forEach(id => { if (!out.includes(id)) out.push(id); }); // ما فيه سداد حقيقي نفحص عليه
+  return out;
+}
+function setRulesEnabled(store, ids, on) {
+  let n = 0;
+  (ids || []).forEach(id => { const r = store.get('rules', id); if (!r || (r.enabled !== false) === !!on) return; r.enabled = !!on; store.put('rules', r); n++; });
+  if (n) store.touch(); return n;
+}
+/* قرارك على سداد: count = ينحسب صرف؟ · always = ينحفظ على البطاقة (وإلا لهذي العملية بس، والبطاقة تبقى تسألك).
+   الناتج: {key, mode, followed (اللي كانت تنتظر قرارك ومشت عليه), past (سدادات سابقة حالتها غير الخيار: تنسأل عنها), rules (قواعد تعارض)} */
+function decideCardPay(store, txId, count, always) {
+  const t = store.get('transactions', txId); if (!t || !isCardPay(store, t)) return null;
+  const key = cardKeyOf(t); count = !!count; let followed = 0;
+  if (always) {
+    putCardPolicy(store, key, { mode: count ? 'count' : 'skip' });
+    setCardPayState(store, t, count, 'card'); store.put('transactions', t);
+    followed = followCardPolicy(store, key, t.id);
+  } else { setCardPayState(store, t, count, 'user'); store.put('transactions', t); }
+  pairTransfers(store); sweepPeriods(store); store.touch();
+  return { key, mode: always ? (count ? 'count' : 'skip') : null, followed, past: always ? cardPayPast(store, key, t.id) : [], rules: always ? cardRuleConflictsFor(store, key, count, t) : [] };
+}
+// تغيير خيار البطاقة من «بطاقات تسددها». mode: 'count' | 'skip' | null (يسألك مع كل سداد)
+function setCardPolicy(store, key, mode) {
+  if (!key) return null;
+  mode = mode === 'count' || mode === 'skip' ? mode : null;
+  putCardPolicy(store, key, { mode });
+  const followed = mode ? followCardPolicy(store, key) : 0;
+  if (followed) { pairTransfers(store); sweepPeriods(store); }
+  store.touch();
+  return { key, mode, followed, past: mode ? cardPayPast(store, key) : [], rules: mode ? cardRuleConflictsFor(store, key, mode === 'count') : [] };
+}
+function clearCardCat(store, key) { const e = cardPolicyOf(store, key); if (!e || (!e.cat && !e.sub)) return false; putCardPolicy(store, key, { cat: null, sub: null }); store.touch(); return true; }
+// كل البطاقات اللي لها خيار: بطاقاتك الائتمانية المسجلة + أي رقم بطاقة جا في سداد + اللي حفظت لها خيار
+function cardPayCards(store) {
+  const map = new Map(), pol = (store.settings && store.settings.cardPay) || {};
+  const ent = (key) => { if (!map.has(key)) map.set(key, { key, last4: key === CARD_UNKNOWN ? null : key, accountId: null, name: null, n: 0, counted: 0, skipped: 0, ask: 0, total: 0, lastDate: null }); return map.get(key); };
+  store.all('accounts').filter(a => a.type === 'credit_card' && a.last4 && a.active !== false).forEach(a => { const e = ent(a.last4); if (!e.accountId) { e.accountId = a.id; e.name = a.name; } });
+  Object.keys(pol).forEach(k => ent(k));
+  store.all('transactions').forEach(t => {
+    if (!isCardPay(store, t)) return;
+    const e = ent(cardKeyOf(t)); e.n++; e.total = round2(e.total + (t.principalAmount || 0));
+    if (cardPayCounted(t)) e.counted++; else e.skipped++;
+    if (cardPayAsking(store, t)) e.ask++;
+    const d = t.transactionDate || t.postingDate || null; if (d && (!e.lastDate || d > e.lastDate)) e.lastDate = d;
+  });
+  return Array.from(map.values()).map(e => { const p = cardPolicyOf(store, e.key); return Object.assign(e, { mode: p ? p.mode || null : null, cat: p ? p.cat || null : null, sub: p ? p.sub || null : null, purchases: cardPurchases(store, e.key) }); })
+    .filter(e => e.key !== CARD_UNKNOWN || e.n || e.mode)
+    .sort((a, b) => (a.key === CARD_UNKNOWN) - (b.key === CARD_UNKNOWN) || (b.accountId ? 1 : 0) - (a.accountId ? 1 : 0) || String(b.lastDate || '').localeCompare(String(a.lastDate || '')) || a.key.localeCompare(b.key));
+}
+// لتنبيه التحديث: قواعد مفعّلة بتحوّل سداد بطاقة عندك إلى صرف لو اخترت لها «ما ينحسب» (بنفس ترتيب التطبيق)
+function cardPaySpendRules(store) {
+  const keys = new Set(); store.all('transactions').forEach(t => { if (isCardPay(store, t)) keys.add(cardKeyOf(t)); });
+  const out = [];
+  keys.forEach(k => cardRuleConflictsFor(store, k, false).forEach(id => { if (!out.some(x => x.id === id)) { const r = store.get('rules', id); out.push({ id, name: (r && r.name) || 'قاعدة' }); } }));
+  return out;
+}
+// ترقية 1.8.2: ما تغيّر أي عملية. تتعلّم إنها مرّت، وتعلّم إن تنبيه التحديث ما انعرض للحين (ينعرض مرة، وينشال لما ينعرض فعلًا)
+function migrate182(store) {
+  const s = store.settings; if (s.migrated182) return { changed: false };
+  s.migrated182 = true; s.notice182 = true; store.put('settings', s);
+  return { changed: true };
+}
+function notice182Info(store) {
+  if (!store.settings.notice182) return null;
+  const pays = store.all('transactions').filter(t => isCardPay(store, t));
+  return { pays: pays.length, counted: pays.filter(cardPayCounted).length, rules: cardPaySpendRules(store) };
+}
+// التعليم ينشال من نسخ الإعدادات المحفوظة في التراجع والإعادة كمان، عشان «تراجع» عن خطوة قبله ما يرجّع التنبيه
+function notice182Done(store) {
+  const s = store.settings; if (!s.notice182) return false;
+  delete s.notice182; store.put('settings', s);
+  if (store.patchHistory) store.patchHistory('settings', null, (o) => { if (!o.notice182) return false; delete o.notice182; return true; }, 'notice182');
+  return true;
+}
+
 function transferKindOf(t) {
   if (t.transactionType === 'InternalTransfer' && t.transferSubtype !== 'round_up') return 'mine';
   if (t.transactionType === 'CreditCardPayment') return 'card';
@@ -4052,7 +4308,7 @@ function setTransferKind(store, txId, kind) {
   const b = t.beneficiaryId ? store.get('beneficiaries', t.beneficiaryId) : null;
   const cards = store.all('accounts').filter(a => a.type === 'credit_card');
   if (!b) {
-    setType(store, t.id, kind === 'mine' ? 'InternalTransfer' : kind === 'card' ? 'CreditCardPayment' : 'PersonTransfer', { targetCardLast4: cards.length === 1 ? cards[0].last4 : null });
+    setType(store, t.id, kind === 'mine' ? 'InternalTransfer' : kind === 'card' ? 'CreditCardPayment' : 'PersonTransfer', { targetCardLast4: t.targetCardLast4 || (cards.length === 1 ? cards[0].last4 : null) });
     const t2 = store.get('transactions', t.id); if (kind === 'card') { t2.cardPaymentByUser = true; store.put('transactions', t2); }
     return 1;
   }
@@ -4085,8 +4341,9 @@ function setTransferKind(store, txId, kind) {
    رسالة ببطاقة (أو حساب) ما يعرفها التطبيق: تنحفظ مباشرة على «بطاقة …XXXX» مؤقتة، مالكها غير محدد، وتنحسب في صرفك بعلامة.
    لو استوردت كشفًا فيه نفس البطاقة أو الحساب، تنتقل عملياتها للحساب الحقيقي وتندمج مع أسطر الكشف المطابقة. */
 function autoAccountFor(store, plan, H, info, text) {
-  const l4 = info.instrumentLast4 || info.accountLast4; if (!l4) return null;
-  const isCard = !!info.instrumentLast4;
+  const payAcc = info.family === 'card_payment' && !!info.accountLast4 && info.accountLast4 !== info.instrumentLast4; // 1.8.2: سداد بطاقة فيه رقم حسابك: الحساب المؤقت للحساب
+  const l4 = payAcc ? info.accountLast4 : (info.instrumentLast4 || info.accountLast4); if (!l4) return null;
+  const isCard = !payAcc && !!info.instrumentLast4;
   const found = H.findAccount(a => a.autoCreated && a.last4 === l4); if (found) return found;
   const credit = isCard && /(ائتمان|credit)/i.test(text);
   return H.addAccount({ name: (isCard ? 'بطاقة …' : 'حساب …') + l4, type: credit ? 'credit_card' : 'unknown', last4: l4, autoCreated: true, isMine: true });
@@ -5193,9 +5450,14 @@ async function correctTxFromMessage(store, txId, msgId, W, opts) {
   t.referenceSource = t.reference ? (info.referenceSource || 'generic_parser') : null;
   if (t.time && readTime && String(readTime).slice(0, 5) === String(t.time).slice(0, 5) && readTimeSrc) t.timeSource = readTimeSrc;
   // النوع وتوابعه (البطاقة المسددة، المستفيد، الحساب المقابل) يتصحح بس إذا ما غيّرته بيدك
+  // 1.8.2: سداد بطاقة موجود يبقى على حالته (محسوب أو لا، وليش) وتصنيفه لو القراءة الجديدة تقول سداد بطاقة بعد: العملية الموجودة ما تتغير إلا بقرارك
+  let wasCard = cardBorn(t) && cardBorn(nt) ? { transactionType: t.transactionType, classificationStatus: t.classificationStatus } : null;
   if (t.typeSource !== 'user') {
     ['direction', 'transactionType', 'transferSubtype', 'incomeSubtype', 'classificationStatus', 'counterpartyAccountId', 'transferLinkStatus', 'targetCardLast4'].forEach(k => { t[k] = nt[k] === undefined ? null : nt[k]; });
     t.beneficiaryId = nt.beneficiaryId || null;
+    if (wasCard) Object.assign(t, wasCard);
+    else if (nt.cardPay) { t.cardPay = true; t.cardPaySrc = nt.cardPaySrc; }
+    else { delete t.cardPay; delete t.cardPaySrc; }
   }
   if (info.online || t.paymentMethod === 'Online' || ONLINE_SHOP.test(t.merchantRaw || '')) t.onlineHint = true; else delete t.onlineHint;
   if (!t.merchantLocked && (t.merchantId || null) !== (nt.merchantId || null) && !(nt.merchantId && t.shopChoicePending === false && t.invoiceAlias && invoiceAliasOf(nt) === t.invoiceAlias)) {
@@ -5204,7 +5466,8 @@ async function correctTxFromMessage(store, txId, msgId, W, opts) {
     const nm = t.merchantId ? store.get('merchants', t.merchantId) : null;
     if (nm && nm.cityIgnore && t.cityId && !(t.shopCity && t.shopCity.mid === nm.id)) t.shopCityKeep = nm.id;
   }
-  if (t.categorySource !== 'user_txn' && t.categorySource !== 'user_rule') { t.categoryId = nt.categoryId || null; t.subcategoryId = nt.subcategoryId || null; t.categorySource = nt.categorySource || null; }
+  // 1.8.2: سداد بطاقة موجود: تصنيفه يبقى. وتصنيف البطاقة المحفوظ (للسداد الجديد بس) ما ينحط على عملية موجودة
+  if (!wasCard && t.categorySource !== 'user_txn' && t.categorySource !== 'user_rule') { const nc = nt.categorySource === 'card'; t.categoryId = nc ? null : (nt.categoryId || null); t.subcategoryId = nc ? null : (nt.subcategoryId || null); t.categorySource = nc ? null : (nt.categorySource || null); }
   t.updatedAt = now; t.wordsCorrectedAt = now; store.put('transactions', t);
   m.readAs = readKey(info); store.put('messages', m); closePartial(store, t, info);
   applyRulesTo(store, [t.id]);
@@ -6322,7 +6585,7 @@ function faqSearch(list, query, limit) {
 }
 
 const Engine = {
-  version: '1.8.1', round2, parseNum, cellToISO, cleanText, sha256Hex, uid, todayISO, addDays, daysBetween, isoDate,
+  version: '1.8.2', round2, parseNum, cellToISO, cleanText, sha256Hex, uid, todayISO, addDays, daysBetween, isoDate,
   CATEGORY_SEED, buildCategoryRecords, Store, STORE_NAMES, DEFAULT_SETTINGS,
   sanitizeText, sanitizeFilename, fingerprintIban, fingerprintAccountNo, fingerprintNum, matchesOwner, normMerchant,
   detectTemplate, signatureOf, parseAlinmaAccount, interpretAlinmaLine, parseAlinmaCard, cardBalanceCheck,
@@ -6339,6 +6602,7 @@ const Engine = {
   isExcluded, spendAnchor, spendDate, effParts, setExcluded, deleteTx, restoreTx, findDeletedMatches, resolveDeletedAgain,
   refundIndex, refundedOf, refundCandidates, linkRefund, unlinkRefund, addCashPart, removeCashPart, recentWithdrawals, cashExpenseToPart, cashRemaining,
   transferKindOf, setTransferKind, absorbAutoAccounts, migrate141,
+  isCardPay, cardBorn, cardLeg, cardPayInfo, cardPayAsking, cardPolicyOf, cardPayCounted, decideCardPay, setCardPolicy, clearCardCat, cardPayPast, applyCardPayPast, cardPayRuleConflicts, cardRuleConflictsFor, setRulesEnabled, cardPayCards, cardPaySpendRules, cardPurchases, migrate182, notice182Info, notice182Done, CARD_UNKNOWN,
   // 1.5.0
   senderKey, sendersOf, bankOf, bankRec, bankLabel, isIgnoredBank, isTrusted, isNewBank, setBankName, untrustFamily, setSenderIgnored, mergeBanks, unmergeBank, approveBankReading, migrate162, shapeKey, rawSig, OLD_DAYS,
   PRODUCT_CATEGORY_SEED, CITY_SEED, TX150, normTx150, migrate150, carry150, migrate152, splitSmsMerges, sameSmsMessage, maskStored181, smsRelation, linkedStmtRow, refTrusted, timeTrusted, resolveTwin, twinValid, twinParts, migrate160, ensureSeedSubs, PC_MAP, itemCatPair, itemNetInfo, unitemizedParts,

@@ -220,6 +220,7 @@ function txTitle(tx) {
   return tx.merchantRaw || tx.beneficiaryRaw || TYPE_L[tx.transactionType];
 }
 function catLabel(tx) {
+  if (tx.transactionType === 'CreditCardPayment') return TYPE_L.CreditCardPayment; // 1.8.2
   if (tx.transactionType === 'CashWithdrawal') { const n = (tx.cashParts || []).length; const base = tx.categoryId ? E.catName(store(), tx.categoryId) : 'سحب نقدي'; return n ? `${base} · مقسّم (${n === 1 ? 'جزء واحد' : n === 2 ? 'جزءان' : n + ' أجزاء'})` : base; }
   if (tx.categoryId) { const c = E.catName(store(), tx.categoryId); const s = tx.subcategoryId ? store().get('categories', tx.subcategoryId) : null; return s ? `${c} › ${s.name}` : c; }
   if (tx.transactionType === 'Payment' || tx.transactionType === 'CashExpense' || (tx.transactionType === 'Unknown' && tx.direction === 'out')) return 'بدون تصنيف';
@@ -264,6 +265,7 @@ function badges(tx) {
   if (tx.classificationStatus === 'unclassified') catMarks.push(`<span class="b w">${tx.transferSubtype === 'round_up' ? 'الوجهة غير معروفة' : 'نوعها غير معروف'}</span>`);
   if ((tx.transactionType === 'Payment' || tx.transactionType === 'CashExpense') && !tx.categoryId) catMarks.push(`<span class="b n">بدون تصنيف</span>`);
   if (!igC || tx.transferSubtype === 'round_up') catMarks.forEach(x => b.push(x)); else if (catMarks.length && ignoredFilterOn('category')) b.push(`<span class="b n">متجاهلة</span>`);
+  if (tx.cardPaySrc === 'ask' && E.cardPayAsking(store(), tx)) b.push(`<span class="b w">سداد بطاقة: ينحسب؟</span>`); // 1.8.2: محسوب لين تقرر
   if (tx.needsReview) b.push(`<span class="b">ما راجعتها</span>`);
   if (tx.shopChoicePending) b.push(`<span class="b w">أي محل؟</span>`);
   if (ins && ins.instrumentOwner === 'unknown' && E.spendEffect(tx) !== 0) b.push(`<span class="b w">مالك الأداة غير محدد</span>`);
@@ -389,6 +391,8 @@ async function boot() {
     // ترقية 1.8.1 (استقرار): مصدر الوقت والمرجع، «مكررة تلقائيًا» القديمة بدون دليل حاسم ترجع تسألك، وتنظيف الأرقام بالإخفاء الموسّع. ما تغيّر أي رقم لحالها
     let m181 = { changed: false }; try { m181 = await E.migrate181(S.store); } catch (e) { console.error(e); }
     { const n181 = notice181Of(m181); if (n181) { if (S.notice180) S.notice180.n181 = n181; else S.notice181 = n181; } }
+    // ترقية 1.8.2: خيار سداد البطاقة. ما تغيّر أي عملية؛ بس تنبيه مرة وحدة لو عندك سداد بطاقات أو قاعدة تمسّها
+    try { E.migrate182(S.store); } catch (e) { console.error(e); }
     const needDates = !S.store.settings.migrated170dates; if (needDates) { S.store.settings.migrated170dates = true; S.store.put('settings', S.store.settings); }
     E.sweepPeriods(S.store); // الفترات: اللي وصل وما أخذ مدينته أو مجموعته
     E.detectRecurring(S.store);
@@ -409,6 +413,7 @@ async function boot() {
   if (S.notice171) { const n = S.notice171; S.notice171 = null; const show = (left) => setTimeout(() => { if (!$('sheet').innerHTML) sheetNotice171(n); else if (left > 0) show(left - 1); }, left === 6 ? 700 : 5000); show(6); }
   if (S.notice180) { const n = S.notice180; S.notice180 = null; const show = (left) => setTimeout(() => { if (!$('sheet').innerHTML) sheetNotice180(n); else if (left > 0) show(left - 1); }, left === 6 ? 900 : 5000); show(6); }
   if (S.notice181) { const n = S.notice181; S.notice181 = null; const show = (left) => setTimeout(() => { if (!$('sheet').innerHTML) sheetNotice181(n); else if (left > 0) show(left - 1); }, left === 6 ? 1100 : 5000); show(6); }
+  queueNotice182();
   try { if (sessionStorage.getItem('fm_repaired')) { sessionStorage.removeItem('fm_repaired'); setTimeout(() => toast(`تم إصلاح التحديث. نسختك الحين ${E.version}، وبياناتك مثل ما هي`, 8000), 1200); } } catch (e) { /* التخزين المؤقت مو متاح: بدون رسالة */ }
   if (S.notice170dates || S.notice170items) { const a = S.notice170dates, b = S.notice170items; S.notice170dates = S.notice170items = 0; setTimeout(() => toast([a ? `تصحح تاريخ ${a === 1 ? 'عملية وحدة' : a + ' عمليات'} كان البنك كاتب فيها تاريخ اليوم الجاي (تلقاها في سجل التعديلات)` : '', b ? `${b === 1 ? 'غرض واحد' : b + ' أغراض'} صار له تصنيف فاتورته` : ''].filter(Boolean).join('. '), 9000), 900); }
   if (S.notice152) { const n = S.notice152; toast(n === 1 ? 'انفصلت رسالة كانت مدموجة بالغلط مع رسالة ثانية' : `انفصلت ${n === 2 ? 'رسالتين' : n + (n <= 10 ? ' رسائل' : ' رسالة')} كانت مدموجة بالغلط مع رسائل ثانية`, 7000); S.notice152 = 0; }
@@ -759,7 +764,7 @@ function vSpend() {
 
 /* ---------- العمليات ---------- */
 // 1.7.0: أسماء أوضح («تصنيف مؤقت» ← «تحويلات لأشخاص ما صنفتها»، «خارج ما عُرف نوعه» ← «نوعها غير معروف»)
-const KIND_L = { all: 'الكل', spend: 'إنفاق', income: 'دخل', internal: 'تحويلات داخلية', card: 'سداد بطاقات', card_unmatched: 'سداد بطاقة غير مطابق', unclassified_out: 'نوعها غير معروف (طالعة)', unclassified_in: 'نوعها غير معروف (داخلة)', unclassified_all: 'نوعها غير معروف', temporary: 'تحويلات لأشخاص ما صنفتها', uncategorized: 'بدون تصنيف', commitments: 'الالتزامات الدائمة', roundup: 'تقريب', unowned: 'مالك الأداة غير محدد', fees: 'فيها رسوم', excluded: 'ما تنحسب في الصرف', cash: 'سحب نقدي', refunds: 'استردادات', transfers: 'تحويلات', loans: 'سلف' };
+const KIND_L = { all: 'الكل', spend: 'إنفاق', income: 'دخل', internal: 'تحويلات داخلية', card: 'سداد بطاقات', card_unmatched: 'سداد بطاقة غير مطابق', card_ask: 'سداد بطاقة: ينحسب؟', unclassified_out: 'نوعها غير معروف (طالعة)', unclassified_in: 'نوعها غير معروف (داخلة)', unclassified_all: 'نوعها غير معروف', temporary: 'تحويلات لأشخاص ما صنفتها', uncategorized: 'بدون تصنيف', commitments: 'الالتزامات الدائمة', roundup: 'تقريب', unowned: 'مالك الأداة غير محدد', fees: 'فيها رسوم', excluded: 'ما تنحسب في الصرف', cash: 'سحب نقدي', refunds: 'استردادات', transfers: 'تحويلات', loans: 'سلف' };
 function matchKind(t, kind) {
   const st = store();
   switch (kind) {
@@ -771,6 +776,7 @@ function matchKind(t, kind) {
     case 'transfers': return ['InternalTransfer', 'CreditCardPayment', 'CashDeposit'].includes(t.transactionType); // 1.7.0: التحويل بين حساباتك وسداد البطاقات والإيداع النقدي
     case 'loans': return t.transactionType === 'LoanToPerson' || t.transactionType === 'LoanRepayment'; // 1.7.0: السلف (عطيتها أو رجعت لك)
     case 'card_unmatched': return isCardUnmatched(t);
+    case 'card_ask': return t.cardPaySrc === 'ask' && E.cardPayAsking(st, t); // 1.8.2
     case 'unclassified_out': return (t.transactionType === 'Unknown' && t.direction === 'out') || isRoundUpUnknown(t);
     case 'excluded': return E.isExcluded(st, t) && (E.spendEffect(t) !== 0 || E.feeOf(t) > 0);
     case 'oldcash': return isOldCash(t);
@@ -790,7 +796,7 @@ function matchKind(t, kind) {
 // 1.7.0: صف النوع (أزرار ثابتة بدون سحب)
 const TGROUPS = [['all', 'الكل'], ['spend', 'إنفاق'], ['income', 'دخل'], ['transfers', 'تحويلات'], ['loans', 'سلف']];
 // 1.7.0: «يحتاج منك»: كل اللي ينتظر منك قرار، بعدده (المتجاهل بفترة ما ينحسب)
-const NEED_L = { uncategorized: 'بدون تصنيف', noCity: 'بدون مدينة', temporary: 'تحويلات لأشخاص ما صنفتها', unknownType: 'نوعها غير معروف', review: 'ما راجعتها', shop: 'أي محل؟', owner: 'مالك البطاقة غير محدد', cardUnmatched: 'سداد بطاقة غير مطابق' };
+const NEED_L = { uncategorized: 'بدون تصنيف', noCity: 'بدون مدينة', temporary: 'تحويلات لأشخاص ما صنفتها', unknownType: 'نوعها غير معروف', review: 'ما راجعتها', shop: 'أي محل؟', owner: 'مالك البطاقة غير محدد', cardUnmatched: 'سداد بطاقة غير مطابق', cardAsk: 'سداد بطاقة: ينحسب؟' };
 function needsOf(t) {
   const st = store(), out = [], igC = E.isIgnored(st, t, 'category');
   if (!igC && t.transactionType !== 'Refund' && matchKind(t, 'uncategorized')) out.push('uncategorized'); // الاسترداد يتبع شراءه
@@ -801,6 +807,7 @@ function needsOf(t) {
   if (t.shopChoicePending) out.push('shop');
   { const i = insOf(t); if (i && i.instrumentOwner === 'unknown' && E.spendEffect(t) !== 0) out.push('owner'); }
   if (isCardUnmatched(t)) out.push('cardUnmatched');
+  if (t.cardPaySrc === 'ask' && E.cardPayAsking(st, t)) out.push('cardAsk'); // 1.8.2: سداد بطاقة ما قررت لها (محسوب لين تقرر)
   return out;
 }
 // 1.7.0: أنواع العملية في الفلاتر (أكثر من نوع مع بعض) + خاصة
@@ -993,7 +1000,7 @@ function vReview() {
   h += `</div>`;
   // ملخص
   const tile = (l, v, sub) => `<div class="kpi" style="cursor:default"><div class="l">${l}</div><div class="v num">${v}</div>${sub ? `<div class="s">${sub}</div>` : ''}</div>`;
-  h += `<div class="kpis k5">${tile('عمليات جديدة', s.newTx)}${tile('تندمج تلقائيًا', s.autoMerged - (s.diff || 0), 'موجودة من مصدر سابق')}${tile('تكرار محتمل', s.possible, s.possible ? 'تحتاج قرارك تحت' : '')}${tile('تحويلات داخلية', s.internal)}${tile('سداد بطاقات', s.cardPayments)}</div>`;
+  h += `<div class="kpis k5">${tile('عمليات جديدة', s.newTx)}${tile('تندمج تلقائيًا', s.autoMerged - (s.diff || 0), 'موجودة من مصدر سابق')}${tile('تكرار محتمل', s.possible, s.possible ? 'تحتاج قرارك تحت' : '')}${tile('تحويلات داخلية', s.internal)}${tile('سداد بطاقات', s.cardPayments + (s.cardAsk || 0), s.cardAsk ? `${s.cardAsk} محسوب لين تقرر` : '')}</div>`;
   // 1.8.0: ما فيه «مرجع كامل»: اللي فيها اختلاف عن الموجود تنتظر قرارك، والموجودة تبقى مثل ما هي
   if ((s.diff || 0) + (s.near || 0)) h += `<div class="banner i" style="display:block"><b>${cnt((s.diff || 0) + (s.near || 0), 'op')} بتنتظر قرارك في «المراجعة» بعد الاعتماد.</b> ${[s.diff ? `${s.diff === 1 ? 'وحدة تطابقت' : s.diff + ' تطابقت'} مع عملية موجودة وفيها اختلاف (المحل أو التاريخ أو النوع)` : '', s.near ? `${s.near === 1 ? 'وحدة مبلغها' : s.near + ' مبلغها'} قريب من عملية موجودة من نفس المحل (يمكن نفس العملية)` : ''].filter(Boolean).join('، و')}. العملية الموجودة تبقى بقيمها، والجديدة ما تنحسب لين تقرر.</div>`;
   if (s.deletedAgain) h += `<div class="banner w">${cnt(s.deletedAgain, 'op')} في هذا الملف حذفتها قبل. تبقى محذوفة إلا إذا اخترت «رجّعها» تحت.</div>`;
@@ -1079,6 +1086,7 @@ function vAccounts() {
   const st = store();
   let h = `<div class="card"><h2>الحسابات</h2><div class="list">${E.accountBalances(st).map(a => `<div class="it" data-action="editAccount" data-id="${a.id}">${icCircle(a.type === 'credit_card' ? { color: PAL.blue, icon: 'card' } : a.type === 'cash' ? { color: PAL.green, icon: 'cash' } : a.type === 'wallet' ? { color: PAL.violet, icon: 'wallet' } : { color: '#3A49D6', icon: 'bank' }, 's')}<div class="m"><div class="t">${esc(a.name)}</div><div class="s">${esc(a.bank || '')} · ${ACC_L[a.type]}${a.last4 ? ' · …' + a.last4 : ''}${a.isMine ? '' : ' · ليس لك'}${a.type !== 'credit_card' && a.type !== 'cash' ? ' · ' + LIQ_L[E.liquidityClassOf(a) || 'none'] : ''}</div></div>${a.balance == null ? '<span class="muted small">الرصيد غير معروف</span>' : num(a.type === 'credit_card' ? Math.abs(a.balance) : a.balance)}</div>`).join('') || '<div class="muted">لا توجد حسابات بعد.</div>'}</div>
     <div class="btns" style="margin-top:10px"><button class="btn" data-action="newAccount">+ حساب</button></div></div>`;
+  h += cardPayCard(); // 1.8.2
   h += `<div class="card"><h2>أدوات الدفع</h2><p class="small muted">الأداة اللي مالكها غير محدد تنحسب في إنفاقك مؤقتًا مع علامة، وتقدر تستبعدها إذا طلعت لشخص ثاني.</p><div class="list">${st.all('instruments').map(i => { const a = accOf(i.accountId); return `<div class="it" data-action="editInstrument" data-id="${i.id}">${icCircle({ color: i.instrumentOwner === 'unknown' ? PAL.yellow : PAL.blue, icon: i.kind === 'cash' ? 'cash' : 'card' }, 's')}<div class="m"><div class="t">${esc(i.label)}</div><div class="s">${esc(a ? a.name : '')} · المالك: ${OWNER_L[i.instrumentOwner]}${i.includeInPersonalSpend === false ? ' · خارج مصروفك' : ''}</div></div>${i.instrumentOwner === 'unknown' ? '<span class="b w">غير محدد</span>' : ''}</div>`; }).join('') || '<div class="muted">لا يوجد.</div>'}</div></div>`;
   h += `<div class="card"><h2>المستفيدون <span class="sp"></span><button class="btn" data-action="go" data-view="beneficiaries">عرض الكل</button></h2><p class="small muted">${st.all('beneficiaries').length} مستفيد. التصنيف اللي تختاره لمستفيد ينحفظ لحوالاته الجاية.</p></div>`;
   return h;
@@ -1309,14 +1317,15 @@ function vMethods() {
   return `<div class="card prose"><h2>طريقة الحساب</h2>
   <p>هذه الصفحة تتحدث مع كل تغيير في طريقة الحساب. ولو سؤالك «كيف أسوي كذا؟» فجوابه بخطوات قصيرة في «الأسئلة الشائعة» (في «المزيد»).</p>
   <h3 id="m-types">أثر كل نوع عملية</h3>
-  <p><b>القاعدة (من 1.4.1):</b> أي فلوس طالعة صرف، ما عدا التحويل بين حساباتك وسداد البطاقة والسلفة لشخص، لأن هذي الفلوس باقية معك أو انحسبت قبل.</p>
+  <p><b>القاعدة (من 1.4.1):</b> أي فلوس طالعة صرف، ما عدا التحويل بين حساباتك وسداد البطاقة والسلفة لشخص، لأن هذي الفلوس باقية معك أو انحسبت قبل. <b>(1.8.2)</b> سداد البطاقة الائتمانية ينحسب أو ما ينحسب حسب خيارك للبطاقة، والتطبيق ما يقرر عنك: تختار «ما ينحسب» للبطاقة اللي مشترياتها تجي للتطبيق، و«ينحسب» للي مشترياتها ما تجي. واللي ما قررت لها سدادها محسوب لين تقرر (التفاصيل تحت: <a data-action="faqMethod" data-m="m-cardpay">سداد البطاقة الائتمانية</a>).</p>
   <table><thead><tr><th>النوع</th><th>الإنفاق</th><th>الدخل (صفحة «الدخل»)</th></tr></thead><tbody>
   <tr><td>دفع (شراء، فاتورة، قسط، تبرع، رسوم)</td><td>+ الأصل</td><td>0</td></tr>
   <tr><td>سحب نقدي</td><td>+ الأصل، تحت «سحب نقدي» أو الأجزاء اللي قسّمته عليها</td><td>0</td></tr>
   <tr><td>تحويل لشخص</td><td>+ (ينحسب صرف حتى لو ما صنفته)</td><td>0</td></tr>
   <tr><td>عملية خارجة نوعها غير معروف</td><td>+ الإجمالي، تحت «بدون تصنيف»</td><td>0</td></tr>
   <tr><td>تقريب وجهته غير محددة</td><td>+ تحت «تقريب (وجهته غير محددة)» لين تحدد وجهته</td><td>0</td></tr>
-  <tr><td>تحويل بين حساباتك، سداد بطاقة، إيداع نقدي، سلفة وسدادها</td><td>0</td><td>0</td></tr>
+  <tr><td>تحويل بين حساباتك، سداد بطاقة اخترت إنه ما ينحسب، إيداع نقدي، سلفة وسدادها</td><td>0</td><td>0</td></tr>
+  <tr><td>سداد بطاقة اخترت إنه ينحسب، أو ما قررت لبطاقته للحين (1.8.2)</td><td>+ الأصل. يتسجل «دفع» تحت تصنيفه («بدون تصنيف» لين تصنفه)</td><td>0</td></tr>
   <tr><td>استرداد</td><td>− من دورة الشراء وتصنيفه إذا ربطته بشرائه، وإلا من دورته هو ونفس تصنيف التاجر</td><td>0</td></tr>
   <tr><td>مصروف نقدي يدوي</td><td>+ إذا «صرف مباشر» (نقد من مصدر ثاني). 0 إذا من سحب: يصير جزء من السحب</td><td>0</td></tr>
   <tr><td>دخل</td><td>0</td><td>+ (المؤكد فقط)</td></tr><tr><td>داخل نوعه غير معروف</td><td>0</td><td>يظهر «داخل غير مصنف»</td></tr></tbody></table>
@@ -1344,11 +1353,21 @@ function vMethods() {
   <li><b>اخترت لها «لا تحسبها في الصرف»</b>: المبلغ = اللي كان بينحسب لو ما استبعدتها (الأصل ناقص المسترد، مع الرسوم).</li>
   <li><b>بطاقة أو حساب مستثنى من مصروفك</b>: عمليات أداة شلت عنها «تدخل عملياتها في إنفاقي الشخصي». لو العملية عليها السببين تنعد تحت «لا تحسبها في الصرف» بس.</li>
   <li><b>تحويلات بين حساباتك</b>: أصل التحويل (كل تحويل مرة وحدة). رسومه تنحسب صرف فما تدخل هنا.</li>
-  <li><b>سداد البطاقات الائتمانية</b>: أصل السداد.</li>
+  <li><b>سداد البطاقات الائتمانية</b>: أصل السداد اللي ما ينحسب. (1.8.2) السداد اللي ينحسب صرف (اخترت له كذا، أو ما قررت لبطاقته للحين) ما يطلع هنا: هو داخل «الإنفاق الحقيقي».</li>
   <li><b>سلف لأشخاص</b>: السلفة اللي عطيتها (سدادها لك ما ينعد لأنه مو فلوس طالعة).</li></ul>
   <p>الأرقام نفس أرقام «صرفياتك» لنفس الفترة بالضبط (سطور «أرقام أكثر» هناك باقية). ما فيه مجموع كلي لأن الأنواع أسبابها مختلفة. استرداد شراء مستبعد يتبع سبب شرائه ويطرح من مجموعه. المحذوفة ما تدخل (ما لها وجود في أي رقم)، إلا استرداد مربوط بشراء حذفته: ينعد تحت «لا تحسبها في الصرف» بالسالب (ينقص المجموع) لين ترجّع الشراء أو تفك الربط، مثل ما هو في «صرفياتك». والتحويل اللي له طرف واحد بس (غير مكتمل الربط) ينعد بطرفه الموجود. واللي ينتظر قرارك في «المراجعة» ما يطلع هنا.</p>
   <h3 id="m-newcard">بطاقة أو حساب جديد من رسالة</h3><p>رسالة ببطاقة (أو حساب) ما يعرفها التطبيق تنحفظ مباشرة على «بطاقة …XXXX» مؤقتة، مالكها غير محدد، وتنحسب في صرفك بعلامة. أول ما تطلع لك عمليتها («عملية جديدة») يجي فوقها سؤال «بطاقة جديدة: لمن؟»: لي، أو لشخص ثاني (ما تنحسب). إذا استوردت بعدين كشفًا فيه نفس البطاقة أو الحساب، عملياتها تنقارن مع أسطر الكشف وقت الاستيراد كأنها على نفس الحساب (بنفس قواعد منع التكرار): المطابق يندمج (ولو بينهم اختلاف ينتظر قرارك في «المراجعة»، 1.8.0)، والمشكوك فيه يطلع لك «تكرار محتمل» في مراجعة الاستيراد. بعد الاعتماد تنتقل للحساب الحقيقي، وتصنيفك وقرارك على البطاقة يبقون. رسالة ما فيها بطاقة ولا حساب أبدًا تسألك «أي حساب؟».</p>
-  <h3 id="m-kind">نوع التحويل الطالع</h3><p>على كل تحويل طالع (أو عملية خارجة نوعها غير معروف) ثلاث أزرار: «صرف»، «بين حساباتي»، «سداد بطاقة». إذا للتحويل رقم حساب معروف، الاختيار ينحفظ على بصمة رقم الحساب (مو على الاسم) ويتطبق على تحويلاته السابقة والجاية، ما عدا اللي غيرت نوعها أو صنفتها بنفسك لعملية وحدة. «بين حساباتي» يضيف الحساب لحساباتك. «بين حساباتي» و«سداد بطاقة» ما ينحسبون صرف.</p>
+  <h3 id="m-kind">نوع التحويل الطالع</h3><p>على كل تحويل طالع (أو عملية خارجة نوعها غير معروف) ثلاث أزرار: «صرف»، «بين حساباتي»، «سداد بطاقة». إذا للتحويل رقم حساب معروف، الاختيار ينحفظ على بصمة رقم الحساب (مو على الاسم) ويتطبق على تحويلاته السابقة والجاية، ما عدا اللي غيرت نوعها أو صنفتها بنفسك لعملية وحدة. «بين حساباتي» يضيف الحساب لحساباتك. «بين حساباتي» و«سداد بطاقة» ما ينحسبون صرف. <b>(1.8.2)</b> سداد البطاقة المقروء من رسالة أو كشف (الطرف الطالع من حسابك) ما تطلع عليه هالأزرار؛ له خياره (تحت). والتحويل اللي تعلّمه «سداد بطاقة» من هنا يبقى على اختيارك هذا.</p>
+  <h3 id="m-cardpay">سداد البطاقة الائتمانية: ينحسب صرف أو لا (1.8.2)</h3><p>سداد البطاقة (الطرف الطالع من حسابك) له حالتين: <b>ما ينحسب</b> (نوعه «سداد بطاقة»: مشتريات البطاقة تجي للتطبيق وانحسبت وقت الشراء، فلو انحسب السداد ينحسب نفس المبلغ مرتين)، أو <b>ينحسب</b> (نوعه «دفع»: مشتريات البطاقة ما تجي للتطبيق، فالسداد نفسه هو الصرف، تحت تصنيفه). اللي يتغير نوع العملية بس؛ مبلغها وتاريخها وحسابها ما يتغيرون.</p><ul>
+  <li><b>الخيار على البطاقة</b>: ينحفظ على آخر 4 أرقام منها، في «الحسابات» ← «بطاقات تسددها»: «ما ينحسب صرف»، «ينحسب صرف»، أو «يسألك مع كل سداد». البطاقات هناك: بطاقاتك الائتمانية المسجلة في «الحسابات»، وأي رقم بطاقة جا في سداد (رسالة أو كشف) حتى لو البطاقة مو مسجلة، وأي رقم حفظت له خيار أو تصنيف من قبل. السدادات اللي ما فيها رقم البطاقة (مثل «تسوية بطاقة» في كشف الحساب) لها خيار واحد مشترك.</li>
+  <li><b>سداد جديد لبطاقة ما قررت لها</b>: ينحسب صرف لين تقرر، ويطلع فوقه السؤال بأربع خيارات: «لا تحسبه» أو «احسبه صرف»، وكل واحد «دايم لهالبطاقة» أو «هالمرة بس». «دايم» يحفظ الخيار للبطاقة، ويمشي على سداداتها اللي ما زالت تنتظر قرارك وعلى الجديدة بدون سؤال. «هالمرة بس» لهذا السداد، والسداد الجاي يسألك. تحت السؤال معلومة: كم عملية شراء على نفس رقم البطاقة لقاها في التطبيق (معلومة تساعدك، والتطبيق ما يقرر عنك). السداد من رسالة يطلع «ما راجعتها» مثل أي عملية جديدة من الرسائل. السداد من كشف ما ينعلّم «ما راجعتها» (مثل باقي عمليات الكشف). وكل سداد ما قررت له عليه شارة «سداد بطاقة: ينحسب؟»، وتلقاه في «العمليات» ← «يحتاج منك»، وفي «المراجعة» تحت «بيانات تحتاج قرارك»، ومعاينة الاستيراد ورسالة «تم الاستيراد» تذكر عدده.</li>
+  <li><b>العملية الموجودة ما تتغير إلا بقرارك</b>: خيار البطاقة يمشي لحاله على السداد الجديد وقت حفظه، وعلى السداد اللي ما زال ينتظر قرارك. أي سداد ثاني موجود ما يغيّر خيار البطاقة حالته ولا تصنيفه إلا بجوابك (السؤال، أو «طبّق على السابقة»)، حتى لو انعادت قراءة رسالته أو تغيّر خيار البطاقة بعدين. القواعد شي ثاني: القاعدة المفعّلة تنطبق من جديد على العملية لما تنعاد قراءة رسالتها (تعديل صيغة أو كلمات)، مثل أي عملية، إلا اللي اخترت لها بنفسك.</li>
+  <li><b>السدادات السابقة</b>: التحديث ما غيّر أي سداد قديم ولا أي رقم (اللي كان محسوب بقي محسوب، واللي ما ينحسب بقي). لما تختار «دايم» (من السداد أو من «بطاقات تسددها») ولهالبطاقة سدادات حالتها غير خيارك، يوريك عددها ومجموعها ويسألك تطبّق عليها أو لا. اللي اخترت لها «هالمرة بس» أو غيّرت نوعها بيدك ما تدخل.</li>
+  <li><b>التصنيف</b>: السداد المحسوب «بدون تصنيف» لين تصنفه. تصنيفك لسداد محسوب (لوحده أو بالتعديل الجماعي) ينحفظ للبطاقة، وينحط على سداداتها المحسوبة الجديدة وقت وصولها. السدادات الموجودة ما يتغير تصنيفها. تمسح التصنيف المحفوظ من نافذة البطاقة في «بطاقات تسددها»، ولو حذفت التصنيف أو نقلته ينتقل معه.</li>
+  <li><b>الأولوية</b>: تعديلك لعملية وحدة («هالمرة بس» أو تغيير النوع بيدك) ← القاعدة ← خيار البطاقة. قاعدة تغيّر نوع السداد أقوى من خيار البطاقة. لما تختار «دايم» وفيه قاعدة مفعّلة تنطبق على سداد موجود لهالبطاقة وتغيّر نوعه لعكس خيارك، يسألك توقفها (الإيقاف ما يحذف القاعدة ولا يغيّر عملية سابقة). لو البطاقة ما لها سداد للحين، يفحص القاعدة على اسم السداد («سداد بطاقة» ورقمها)، وشروط الحساب والمصدر والمبلغ يعتبرها «يمكن تنطبق»؛ قاعدة شرطها نص من الرسالة نفسها ما تنعرف إلا لما يجي السداد. لو خليت القاعدة شغالة (أو ما انعرفت)، السدادات الجديدة تمشي عليها، وسطرها يكتب «من قاعدة» واسمها وإن خيار البطاقة ما انطبق عليها.</li>
+  <li><b>مصدرين لنفس السداد</b> (رسالة وكشف): واحد محسوب والثاني لا مو «اختلاف نوع»، والعملية الموجودة تبقى على حالتها (إلا لو نوعها غير مؤكد، مثل «تحويل لشخص ما صنفته»: تاخذ نوع المصدر الثاني مثل قبل). لو المصدر الثاني فيه رقم البطاقة والموجودة ما فيها، الرقم يتعبى؛ ولو الموجودة ما زالت تنتظر قرارك ولهالبطاقة خيار، تمشي عليه.</li>
+  <li><b>ما يدخل هنا</b>: تحويل علّمت مستفيده «سداد بطاقة» من الأزرار الثلاثة (بطاقة في بنك ثاني)، أو غيّرت نوعه بيدك إلى «سداد بطاقة»، يبقى على اختيارك هناك. والسداد المسجل على البطاقة نفسها (رسالة من جهة البطاقة ما فيها حسابك) والطرف الداخل في كشف البطاقة ما لهم سؤال وما ينحسبون صرف. رسالة السداد اللي فيها رقم حسابك وحسابك مو مسجل تتسجل على حساب مؤقت برقمه (مو على البطاقة) ولها السؤال.</li>
+  <li><b>الأرقام</b>: السداد اللي ما ينحسب يطلع في «مبالغ غير محسوبة» تحت «سداد البطاقات الائتمانية»، وفي «العمليات» تحت «تحويلات» ونوع «سداد بطاقة». السداد المحسوب صرف عادي في كل الأرقام (صرفياتك، التصنيفات، الحدود، التوقع)، وفي «العمليات» تحت «إنفاق» ونوع «شراء». في الحالتين، لو البطاقة مسجلة ورقمها مكتوب في السداد: السداد ينقص المستحق عليها في «السيولة»، وينربط بطرفه الداخل في كشف البطاقة لو الكشف مستورد (فالطرف الداخل ما يطلع لحاله في «مبالغ غير محسوبة»). هذا للسداد من 1.8.2 وطالع واللي قررت فيه؛ السداد القديم المحسوب صرف يبقى مثل قبل (ما ينقص المستحق وما ينربط) لين تقرر فيه.</li></ul>
   <h3 id="m-exclude">«لا تحسبها في الصرف» والحذف</h3><ul>
   <li><b>لا تحسبها في الصرف</b>: العملية تبقى ظاهرة بعلامة، وما تدخل الإنفاق ولا التصنيفات ولا الحدود. ترجعها بزر «احسبها في الصرف».</li>
   <li><b>الحذف</b>: العملية (من أي مصدر) تنتقل لـ«المحذوفة»: ما تظهر ولا تنحسب في أي رقم. ترجعها من «المحذوفة» (آخر صفحة العمليات) أو بزر التراجع. لو جات نفس العملية مرة ثانية (كشف أو رسالة، بنفس قواعد الدمج التلقائي: دليل حاسم أو 90+ أو استثناء كشف البطاقة)، ما ترجع تلقائيًا: الاستيراد يعرضها تحت «عمليات حذفتها قبل» والرسالة تروح المراجعة، ويسألك «رجّعها» أو «خلها محذوفة».</li></ul>
@@ -1425,7 +1444,7 @@ function vMethods() {
   <h3 id="m-undo">التراجع وسجل التعديلات</h3><p>كل حفظ خطوة وحدة (بما فيها الاستيراد وجلب الرسائل). التراجع والإعادة لآخر 30 خطوة في الجلسة. <b>(1.7.0)</b> فوق زر «تراجع» (كلمة)، وبعد ما تتراجع يطلع جنبه «إعادة»؛ وكل تراجع أو إعادة (من فوق أو من الرسالة تحت أو من «سجل التعديلات») يسألك «تتراجع عن: …؟» قبل. «إعادة» تختفي لما ما يبقى شي تعيده أو لما تسوي تعديل جديد. سجل التعديلات يبقى (آخر 2000) ويدخل النسخة الاحتياطية. المفتاح السري لصندوق الرسائل ما يدخل النسخة الاحتياطية أبدًا.</p>
   <h3 id="m-txs">صفحة العمليات (1.7.0)</h3><ul>
   <li><b>صف النوع</b>: «الكل | إنفاق | دخل | تحويلات | سلف». «إنفاق» = كل اللي ينحسب صرف. «تحويلات» = التحويل بين حساباتك وسداد البطاقات والإيداع النقدي. «سلف» = السلفة اللي عطيتها وسدادها لك (ما تنحسب صرف ولا دخل).</li>
-  <li><b>يحتاج منك</b>: يظهر بس إذا فيه شي، بعدد العمليات. تحته (لما تضغطه) الأنواع اللي فيها عدد بس: بدون تصنيف، بدون مدينة، تحويلات لأشخاص ما صنفتها، نوعها غير معروف، ما راجعتها، أي محل؟، مالك البطاقة غير محدد، سداد بطاقة غير مطابق. الأعداد حسب الفترة والفلاتر المعروضة، والمتجاهل بفترة ما ينعد.</li>
+  <li><b>يحتاج منك</b>: يظهر بس إذا فيه شي، بعدد العمليات. تحته (لما تضغطه) الأنواع اللي فيها عدد بس: بدون تصنيف، بدون مدينة، تحويلات لأشخاص ما صنفتها، نوعها غير معروف، ما راجعتها، أي محل؟، مالك البطاقة غير محدد، سداد بطاقة غير مطابق، سداد بطاقة: ينحسب؟ (1.8.2: سداد ما قررت لبطاقته). الأعداد حسب الفترة والفلاتر المعروضة، والمتجاهل بفترة ما ينعد.</li>
   <li><b>الفلاتر</b> (أيقونة القمع): نوع العملية (أكثر من نوع)، التصنيف (رئيسي أو فرعي) «حسب الفواتير» = نفس رقم «صرفياتك»، أو «حسب المنتجات» = كل فاتورة فيها أغراض من التصنيف (والغير مفصّل) وجنبها مبلغ الأغراض بس، نفس رقم «المنتجات». والمدينة والمجموعة والحساب والبطاقة وطريقة الدفع والمصدر. كل فلتر شغال فقاعة عليها × تشيله لحاله.</li>
   <li><b>الجزء من العملية</b>: لما الفلتر يخص جزء منها (مثل جزء سحب نقدي أو أغراض)، المبلغ يطلع «200 من 500»، ومجموع القائمة = رقم التصنيف.</li>
   <li><b>التحديد</b>: ضغطة مطوّلة على عملية، أو «تحديد» في سطر العدد. الأزرار: تصنيف، النوع، تكرار/ضرورة، ملاحظة، <b>تجاهل الموقع (1.8.0)</b>، حذف. «تجاهل الموقع» يمس اللي ينطلب لها مدينة بس (مشتريات، سحب، مصروف نقدي)، واللي لها مدينة تنشال مدينتها بعد تأكيد بعددها.</li>
@@ -1469,7 +1488,9 @@ function sheetTx(id) {
   const m = merchantOf(t), b = benOf(t), ins = insOf(t), acc = accOf(t.accountId);
   // 1.7.0: عملية رسومها بس (مثل رسوم تحويل) تقبل تصنيف، لأن رسومها تنحسب على تصنيفها
   const canCat = (['Payment', 'CashExpense', 'PersonTransfer', 'Refund', 'Unknown', 'CashWithdrawal'].includes(t.transactionType) && t.transferSubtype !== 'round_up') || (E.feeOf(t) > 0 && E.spendEffect(t) === 0);
-  const types = ['Payment', 'Income', 'InternalTransfer', 'CreditCardPayment', 'PersonTransfer', 'Refund', 'CashWithdrawal', 'Unknown'];
+  const types0 = ['Payment', 'Income', 'InternalTransfer', 'CreditCardPayment', 'PersonTransfer', 'Refund', 'CashWithdrawal', 'Unknown'];
+  // 1.8.2: نوع العملية الحالي يطلع في القائمة دايم (مصروف نقدي، سلفة، إيداع نقدي…). قبل كانت القائمة تطلع «دفع» لهالأنواع، و«حفظ» يحوّلها «دفع» بدون ما تقصد
+  const types = types0.includes(t.transactionType) || !TYPE_L[t.transactionType] ? types0 : [t.transactionType].concat(types0);
   const recDef = E.effective(st, Object.assign({}, t, { recurrenceType: null }), 'rec'), necDef = E.effective(st, Object.assign({}, t, { necessityType: null }), 'nec');
   const recL = { recurring: 'متكرر', variable: 'متغير' }, necL = { essential: 'ضروري', discretionary: 'كمالي' };
   const u = txUi(t);
@@ -1501,7 +1522,7 @@ function sheetTx(id) {
     h += `<div class="banner i" style="margin-top:10px"><div>تقريب لأقرب ريال${orig ? ` لشراء ${fmt(orig.grossAmount)} من ${esc(txTitle(orig))}` : ''}. <a data-action="setRoundUp">حدد وجهة التقريب</a> (تنطبق على كل عمليات التقريب).</div></div>`;
   }
   h += `<details class="more"><summary>تعديل النوع والخصائص والتفاصيل</summary>
-    <label class="f">النوع</label><select id="s_type">${types.map(x => `<option value="${x}" ${x === t.transactionType ? 'selected' : ''}>${TYPE_L[x]}</option>`).join('')}</select>
+    <label class="f">النوع</label><select id="s_type" data-init="${types.includes(t.transactionType) ? t.transactionType : types[0]}">${types.map(x => `<option value="${x}" ${x === t.transactionType ? 'selected' : ''}>${TYPE_L[x]}</option>`).join('')}</select>
     <div id="s_cp_wrap" class="${t.transactionType === 'InternalTransfer' ? '' : 'hide'}"><label class="f">الحساب الآخر (لك)</label><select id="s_cp">${ownAccountOptions(t.counterpartyAccountId, true)}</select></div>`;
   if (canCat) h += `<div class="grid2"><div><label class="f">التكرار</label><select id="s_rec"><option value="">افتراضي (${recL[recDef] || 'غير محدد'})</option><option value="recurring" ${t.recurrenceType === 'recurring' ? 'selected' : ''}>متكرر</option><option value="variable" ${t.recurrenceType === 'variable' ? 'selected' : ''}>متغير</option></select></div>
       <div><label class="f">الضرورة</label><select id="s_nec"><option value="">افتراضي (${necL[necDef] || 'غير محدد'})</option><option value="essential" ${t.necessityType === 'essential' ? 'selected' : ''}>ضروري</option><option value="discretionary" ${t.necessityType === 'discretionary' ? 'selected' : ''}>كمالي</option></select></div></div>${txChainFields(t)}`;
@@ -1533,11 +1554,12 @@ function txExcludeBtn(t) {
 function txBlocks(t) {
   const st = store(), b = benOf(t); let h = '';
   // 1.7.0: عملية رسومها بس أو اسمها «رسوم»: اقتراح بس، ما تتصنف إلا إذا وافقت
+  h += cardPayBlock(t); // 1.8.2
   const fs = E.feeSuggestion(st, t);
   if (fs) h += `<div class="txblock sug"><div class="small">مقترح: <b>${esc(E.catName(st, fs))}</b>${E.feeOf(t) > 0 && E.spendEffect(t) === 0 ? ' (العملية رسوم بس)' : ''}. ما تتصنف إلا إذا وافقت.</div><div class="btns" style="margin-top:6px"><button class="btn" data-action="feeAccept" data-id="${t.id}">صنّفها «${esc(E.catName(st, fs))}»</button></div></div>`;
   if (t.excludedByUser) h += `<div class="banner i" style="margin-top:10px"><div>هذي العملية ما تنحسب في الصرف ولا في أي رقم. تقدر ترجعها بزر «احسبها في الصرف».</div></div>`;
   const tk = E.transferKindOf(t);
-  if (tk && t.direction === 'out' && t.transferSubtype !== 'round_up') {
+  if (tk && t.direction === 'out' && t.transferSubtype !== 'round_up' && !E.isCardPay(st, t)) { // 1.8.2: سداد البطاقة له بلوكه (فوق)
     h += `<div class="txblock"><div class="small muted" style="margin-bottom:6px">${t.transactionType === 'Unknown' ? 'هذي العملية' : 'هذا التحويل'}:</div><div class="seg"><button class="${tk === 'spend' ? 'on' : ''}" data-action="txKind" data-id="${t.id}" data-v="spend">صرف</button><button class="${tk === 'mine' ? 'on' : ''}" data-action="txKind" data-id="${t.id}" data-v="mine">بين حساباتي</button><button class="${tk === 'card' ? 'on' : ''}" data-action="txKind" data-id="${t.id}" data-v="card">سداد بطاقة</button></div>
       <div class="small muted" style="margin-top:6px">${b ? `اختيارك ينحفظ على رقم الحساب …${esc(b.accountLast4 || '')}، ويتطبق على تحويلاته السابقة والجاية.` : 'لهذي العملية بس.'} «بين حساباتي» و«سداد بطاقة» ما ينحسبون صرف، عشان ما ينحسب نفس المبلغ مرتين.</div></div>`;
   }
@@ -1567,6 +1589,109 @@ function txBlocks(t) {
 }
 const isOldCash = (t) => t.transactionType === 'CashExpense' && !t.cashDirectOk && settings().migrated141At && String(t.createdAt || '') < settings().migrated141At && (t.sourceLinks || []).every(sl => sl.sourceType === 'manual' || sl.sourceType === 'cash_reconciliation');
 // بعد أي تعديل داخل نافذة العملية: تبقى النافذة مفتوحة محدثة (وفيها زر الرجوع لـ«العمليات الجديدة» إذا جيت منها)
+/* ---------- 1.8.2: سداد البطاقة الائتمانية: ينحسب صرف أو لا ---------- */
+const payCardName = (ci) => ci.last4 ? `بطاقة …${esc(ci.last4)}` : 'بطاقة ما ينعرف رقمها';
+const payCnt = (n) => n === 1 ? 'سداد واحد' : n === 2 ? 'سدادين' : `${n} ${n <= 10 ? 'سدادات' : 'سداد'}`;
+const buyCnt = (n) => n === 1 ? 'عملية شراء وحدة' : n === 2 ? 'عمليتين شراء' : `${n} ${n <= 10 ? 'عمليات' : 'عملية'} شراء`;
+function cardPayOpts(id, ci) {
+  const perm = ci.last4 ? 'دايم لهالبطاقة' : 'دايم لكل سداد ما ينعرف رقم بطاقته';
+  const b = (c, a, l, s) => `<div class="it" data-action="cardPaySet" data-id="${id}" data-c="${c}" data-a="${a}"><div class="m"><div class="t">${l}</div><div class="s">${s}</div></div></div>`;
+  return `<div class="list">${b(0, 1, 'لا تحسبه: ' + perm, 'مشترياتها تجي للتطبيق. السدادات الجاية ما تنحسب وما يسألك.')}${b(0, 0, 'لا تحسبه: هالمرة بس', 'هذا السداد بس، والجاي يسألك.')}${b(1, 1, 'احسبه صرف: ' + perm, 'مشترياتها ما تجي للتطبيق. السدادات الجاية تنحسب وما يسألك.')}${b(1, 0, 'احسبه صرف: هالمرة بس', 'هذا السداد بس، والجاي يسألك.')}</div>`;
+}
+function cardFact(ci) {
+  if (!ci.last4) return 'رقم البطاقة مو مكتوب في هذا السداد.';
+  return ci.purchases ? `في التطبيق ${buyCnt(ci.purchases)} على هالبطاقة.` : 'ما لقيت عمليات شراء على هالبطاقة في التطبيق.';
+}
+function cardPayBlock(t) {
+  const st = store(), ci = E.cardPayInfo(st, t); if (!ci) return '';
+  if (ci.src === 'ask') return `<div class="txblock sug" id="cardpay"><div><b>سداد ${payCardName(ci)}: ينحسب في صرفك؟</b></div>
+    <div class="small" style="margin-top:4px">محسوب الحين لين تقرر. لو مشتريات البطاقة تجي للتطبيق (رسائل أو كشف) فهي انحسبت وقت الشراء، وسدادها ما ينحسب عشان ما ينحسب نفس المبلغ مرتين. لو ما تجي، السداد هو صرفك.</div>
+    <div class="small muted" style="margin-top:4px">${cardFact(ci)}</div>${cardPayOpts(t.id, ci)}</div>`;
+  const SRC = { card: `خيار ${payCardName(ci)}: دايم`, user: 'اختيارك لهذي العملية بس', rule: `من قاعدة «${esc(ci.ruleName || 'قاعدة')}»`, old: '' };
+  const stale = (ci.src === 'old' || ci.src === 'rule') && ci.mode && (ci.mode === 'count') !== ci.counted ? ` خيار البطاقة الحين «${ci.mode === 'count' ? 'ينحسب' : 'ما ينحسب'}»، وهذي العملية ما انطبق عليها.` : '';
+  return `<div class="txblock" id="cardpay"><div class="small">سداد ${payCardName(ci)}: <b>${ci.counted ? 'ينحسب في صرفك' : 'ما ينحسب في صرفك'}</b>${SRC[ci.src] ? ` (${SRC[ci.src]})` : ''}.${stale}</div>
+    <div class="btns" style="margin-top:6px"><button class="btn" data-action="cardPayAsk" data-id="${t.id}">غيّر</button></div></div>`;
+}
+function sheetCardPayAsk(id) {
+  const st = store(), t = st.get('transactions', id), ci = t && E.cardPayInfo(st, t); if (!ci) return;
+  openSheet(`<h3>سداد ${payCardName(ci)}<span class="sp"></span><button class="close" data-action="cardPayBack" data-id="${id}">×</button></h3>
+    <div class="small">الحين: <b>${ci.counted ? 'ينحسب في صرفك' : 'ما ينحسب في صرفك'}</b>. ${cardFact(ci)}</div>${cardPayOpts(id, ci)}`);
+}
+// بعد خيار «دايم»: القاعدة اللي تعارضه، ثم السدادات السابقة. كل وحدة بسؤال، وما يتغير شي بدون جوابك
+async function cardPolicyFollowUps(res) {
+  const st = store(), out = { rules: 0, past: 0, rulesLeft: [] };
+  const rs = (res.rules || []).map(id => st.get('rules', id)).filter(Boolean);
+  if (rs.length) {
+    const one = rs.length === 1, th = rs[0].then || {};
+    const ok = await ask(`<h3>${one ? 'قاعدة تعارض خيارك' : 'قواعد تعارض خيارك'}<span class="sp"></span><button class="close" data-action="answer" data-val="">×</button></h3>
+      <div class="small">${one ? 'القاعدة' : 'القواعد'} ${rs.map(r => `<b>«${esc(r.name || 'قاعدة')}»</b>`).join(' و')} ${one ? 'تحوّل' : 'يحوّلون'} سداد هالبطاقة إلى «${TYPE_L[th.type] || ''}»${th.categoryId ? ` و${one ? 'تصنفه' : 'يصنفونه'} «${esc(E.catName(st, th.categoryId))}»` : ''}. القاعدة أقوى من خيار البطاقة، فلو بقيت شغالة السدادات الجاية ${res.mode === 'skip' ? 'بترجع تنحسب صرف' : 'ما راح تنحسب صرف'}.</div>
+      <div class="small muted" style="margin-top:6px">الإيقاف ما يحذف القاعدة ولا يغيّر عملية سابقة. ترجع تشغّلها متى ما بغيت من «المزيد» ← «القواعد».</div>
+      <div class="btns" style="margin-top:12px"><button class="btn p" data-action="answer" data-val="yes">${one ? 'وقّف القاعدة' : 'وقّف القواعد'}</button><button class="btn" data-action="answer" data-val="">خلّها شغالة</button></div>`);
+    if (ok === 'yes') { out.rules = E.setRulesEnabled(st, res.rules, false); await persist('إيقاف قاعدة تعارض خيار البطاقة'); render(); }
+    else out.rulesLeft = rs.map(r => r.name || 'قاعدة');
+  }
+  const past = E.cardPayPast(st, res.key);
+  if (past.length) {
+    const txs = past.map(id => st.get('transactions', id)).filter(Boolean), total = E.round2(txs.reduce((s, x) => s + (x.principalAmount || 0), 0)), skip = res.mode === 'skip';
+    const ok = await ask(`<h3>سدادات سابقة<span class="sp"></span><button class="close" data-action="answer" data-val="">×</button></h3>
+      <div class="small">لهالبطاقة <b>${payCnt(txs.length)}</b> قبل، ${skip ? 'محسوبة في صرفك' : 'مو محسوبة في صرفك'} الحين، ومجموعها <b class="num">${fmt(total)}</b>. تطبّق خيارك عليها؟ لو طبّقت، صرف فتراتها ${skip ? 'ينقص' : 'يزيد'} بمبالغها.</div>
+      <div class="list" style="margin-top:8px;max-height:36vh;overflow:auto">${txs.slice(0, 40).map(x => `<div class="it"><div class="m"><div class="t">${fdate(x.transactionDate, true)}</div><div class="s">${esc(accOf(x.accountId) ? accOf(x.accountId).name : '')}${x.typeSource === 'rule' ? ' · من قاعدة' : ''}</div></div>${num(x.principalAmount)}</div>`).join('')}</div>${txs.length > 40 ? `<div class="small muted" style="margin-top:4px">المعروض أحدث 40 من ${txs.length}. التطبيق يشملها كلها.</div>` : ''}
+      <div class="small muted" style="margin-top:6px">اللي اخترت لها بنفسك «هالمرة بس» أو غيّرت نوعها بيدك ما تدخل هنا. وتقدر تغيّر أي سداد لحاله من صفحته.</div>
+      <div class="btns" style="margin-top:12px"><button class="btn p" data-action="answer" data-val="yes">طبّق على السابقة</button><button class="btn" data-action="answer" data-val="">لا، الجاية بس</button></div>`);
+    if (ok === 'yes') { out.past = E.applyCardPayPast(st, res.key, past); await persist('خيار البطاقة على السدادات السابقة'); render(); }
+  }
+  return out;
+}
+async function runCardPay(id, count, always) {
+  const st = store(), res = E.decideCardPay(st, id, count, always); if (!res) return;
+  await persist(count ? 'سداد بطاقة: ينحسب صرف' : 'سداد بطاقة: ما ينحسب صرف'); render();
+  const fu = always ? await cardPolicyFollowUps(res) : { rules: 0, past: 0, rulesLeft: [] };
+  afterTx(id);
+  const bits = [count ? 'ينحسب في صرفك' : 'ما ينحسب في صرفك', always ? 'وانحفظ للبطاقة' : 'لهذي العملية بس'];
+  if (res.followed) bits.push(`ومشى عليه ${payCnt(res.followed)} كان ينتظر قرارك`);
+  if (fu.past) bits.push(`وانطبق على ${payCnt(fu.past)} سابق`);
+  if (fu.rulesLeft.length) bits.push(`والقاعدة «${fu.rulesLeft.join('» و«')}» باقية شغالة: السدادات الجاية تمشي عليها مو على الخيار`);
+  toast(bits.join('، '), fu.rulesLeft.length ? 9000 : 5000);
+}
+// قسم «بطاقات تسددها» في «الحسابات»
+const CARD_MODE_L = { skip: 'ما ينحسب صرف', count: 'ينحسب صرف' };
+function cardPayCard() {
+  const st = store(), cards = E.cardPayCards(st); if (!cards.length) return '';
+  return `<div class="card" id="cardpays"><h2>بطاقات تسددها</h2><p class="small muted">لكل بطاقة ائتمانية: سدادها ينحسب في صرفك أو لا. البطاقة اللي مشترياتها تجي للتطبيق (رسائل أو كشف) سدادها ما ينحسب، عشان ما ينحسب نفس المبلغ مرتين. واللي مشترياتها ما تجي، سدادها هو صرفك. اللي ما قررت لها يسألك مع كل سداد، وسدادها محسوب لين تقرر.</p>
+    <div class="list">${cards.map(c => `<div class="it" data-action="cardPol" data-k="${esc(c.key)}">${icCircle({ color: c.mode ? PAL.blue : PAL.yellow, icon: 'card' }, 's')}<div class="m"><div class="t">${c.last4 ? (c.name ? esc(c.name) : 'بطاقة …' + esc(c.last4)) : 'سداد ما ينعرف رقم بطاقته'}</div><div class="s">${c.last4 ? '…' + esc(c.last4) + ' · ' + (c.accountId ? 'مسجلة عندك' : 'مو مسجلة (رقمها من السداد)') + ' · ' : ''}${c.n ? payCnt(c.n) : 'ما فيه سداد للحين'}${c.ask ? ` · ${c.ask === c.n ? 'ينتظر' : c.ask + ' منها ينتظر'} قرارك` : ''}</div></div><span class="b ${c.mode ? 'n' : 'w'}">${c.mode ? CARD_MODE_L[c.mode] : 'يسألك'}</span></div>`).join('')}</div></div>`;
+}
+function sheetCardPolicy(key) {
+  const st = store(), c = E.cardPayCards(st).find(x => x.key === key); if (!c) return;
+  const ids = st.all('transactions').filter(t => E.isCardPay(st, t) && ((t.targetCardLast4 || E.CARD_UNKNOWN) === key)).map(t => t.id);
+  const row = (v, l, s) => `<div class="it" data-action="cardPolSet" data-k="${esc(key)}" data-v="${v}"><div class="m"><div class="t">${l}</div><div class="s">${s}</div></div>${(c.mode || '') === v ? '<span class="b g">الحالي</span>' : ''}</div>`;
+  const title = c.last4 ? (c.name ? esc(c.name) : 'بطاقة …' + esc(c.last4)) : 'سداد ما ينعرف رقم بطاقته';
+  openSheet(`<h3>${title}<span class="sp"></span><button class="close" data-action="closeSheet">×</button></h3>
+    <div class="small muted">${c.last4 ? `…${esc(c.last4)} · ${c.accountId ? 'مسجلة في حساباتك' : 'مو مسجلة عندك، ورقمها انعرف من السداد'}. ${c.purchases ? `في التطبيق ${buyCnt(c.purchases)} عليها.` : 'ما لقيت عمليات شراء عليها في التطبيق.'}` : 'سدادات ما فيها رقم البطاقة (سطر كشف أو رسالة). الخيار هنا يمشي عليها كلها.'}</div>
+    <div class="small" style="margin-top:6px">${c.n ? `سداداتها: <b>${payCnt(c.n)}</b> (${c.counted} محسوبة صرف، ${c.skipped} ما تنحسب).` : 'ما فيه سداد لها للحين.'}</div>
+    <label class="f">سدادها</label><div class="list">${row('skip', 'ما ينحسب صرف', 'مشترياتها تجي للتطبيق وانحسبت وقت الشراء.')}${row('count', 'ينحسب صرف', 'مشترياتها ما تجي للتطبيق، فسدادها هو صرفك.')}${row('', 'يسألك مع كل سداد', 'والسداد محسوب لين تقرر.')}</div>
+    ${c.cat ? `<div class="small" style="margin-top:10px">تصنيف سدادها المحسوب: <b>${esc(catPath(c.cat, c.sub))}</b> (من آخر تصنيف حطيته لسدادها، ويتطبق على الجاية). <a data-action="cardCatClear" data-k="${esc(key)}">امسحه</a></div>` : ''}
+    ${ids.length ? `<div class="btns" style="margin-top:12px"><button class="btn" ${drillAttr(ids, 'سداد ' + (c.last4 ? 'بطاقة …' + c.last4 : 'بطاقة ما ينعرف رقمها'))}>افتح سداداتها</button></div>` : ''}`);
+}
+// التنبيه معلّم في الإعدادات «ما انعرض» لين ينعرض فعلًا. لو فيه نافذة ثانية مفتوحة يجرّب بعدين، ولو ما قدر هالجلسة ينعرض الفتحة الجاية
+function queueNotice182() {
+  if (!S.store || !settings().notice182) return;
+  const show = (left) => setTimeout(async () => {
+    if (!S.store || !settings().notice182) return;
+    if ($('sheet').innerHTML || S.plan || S.teachSms) { if (left > 0) show(left - 1); return; }
+    const n = E.notice182Info(store());
+    if (n && (n.pays || n.rules.length)) sheetNotice182(n);
+    E.notice182Done(store());
+    try { await persist(null, { noStep: true }); } catch (e) { /* فشل الحفظ: persist يرجّع آخر حالة محفوظة، والتنبيه ينعرض الفتحة الجاية */ }
+  }, left === 12 ? 1300 : 5000);
+  show(12);
+}
+function sheetNotice182(n) {
+  openSheet(`<h3>تحديث 1.8.2<span class="sp"></span><button class="close" data-action="closeSheet">×</button></h3>
+    <div class="rv"><b>سداد البطاقة الائتمانية: ينحسب صرف أو لا؟</b><div class="small" style="margin-top:4px">صار لكل بطاقة ائتمانية خيار ينحفظ على آخر 4 أرقام منها. البطاقة اللي مشترياتها تجي للتطبيق: سدادها ما ينحسب صرف. واللي مشترياتها ما تجي: سدادها هو صرفك. أول سداد جديد لبطاقة ما قررت لها يسألك («دايم لهالبطاقة» أو «هالمرة بس»)، ولين تجاوب السداد محسوب.</div>
+    <div class="small" style="margin-top:6px">${n.pays ? `عندك ${payCnt(n.pays)} بطاقة من قبل (${n.counted} محسوبة صرف، ${n.pays - n.counted} ما تنحسب). <b>ما تغيّر فيها شي.</b> لما تختار «دايم» لبطاقة، يوريك سداداتها السابقة ويسألك تطبّق عليها أو لا.` : 'سداداتك القديمة ما تغيّر فيها شي.'}</div>
+    ${n.rules.length ? `<div class="small" style="margin-top:6px">${n.rules.length === 1 ? 'عندك قاعدة تحوّل' : 'عندك قواعد تحوّل'} سداد البطاقة إلى صرف: ${n.rules.map(r => `<b>«${esc(r.name)}»</b>`).join('، ')}. القاعدة أقوى من خيار البطاقة. لما تختار «لا تحسبه: دايم» لبطاقة تمسّها قاعدة، التطبيق يسألك توقفها.</div>` : ''}
+    <div class="btns" style="margin-top:8px"><button class="btn p" data-action="noticeCards">افتح «بطاقات تسددها»</button></div></div>`);
+}
 function afterTx(id) { if (store().get('transactions', id)) sheetTx(id); else if (S.flow) flowAdvance(); else if (S.newList) renderNewList(); else closeSheet(); }
 
 /* ---------- «نتيجة الرسائل» بعد الجلب أو اللصق (العمليات الجديدة نفسها تطلع وحدة ورا الثانية: startFlow) ---------- */
@@ -1888,6 +2013,8 @@ function dataIssues() {
   st.all('accounts').filter(a => a.type === 'unknown' && !a.autoCreated).forEach(a => items.push({ t: `نوع «${esc(a.name)}» غير محدد`, a: `<a data-action="editAccount" data-id="${a.id}">حدده</a>` }));
   const cp = st.all('transactions').filter(isCardUnmatched);
   if (cp.length) items.push({ t: `${cnt(cp.length, 'op')} سداد بطاقة غير مطابق`, a: `<a data-action="issueTxs" data-kind="card_unmatched">اعرضها</a>` });
+  { const ca = st.all('transactions').filter(t => t.cardPaySrc === 'ask' && E.cardPayAsking(st, t)); // 1.8.2: محسوبة في الصرف لين تقرر
+    if (ca.length) items.push({ t: `${payCnt(ca.length)} بطاقة محسوب في الصرف لين تقرر: ينحسب أو لا؟`, a: `<a data-action="issueTxs" data-kind="card_ask">اعرضها</a>` }); }
   st.all('imports').filter(i => i.balanceValidated === false).forEach(i => items.push({ t: `كشف «${esc(i.filename)}» الرصيد فيه ما تطابق`, a: `<a data-action="go" data-view="imports">سجل الاستيراد</a>` }));
   return items;
 }
@@ -2214,7 +2341,7 @@ function refreshSel() { const box = $('txlist'); if (box) box.innerHTML = txList
 const A = {
   go: (el) => { if ($('sheet').innerHTML) { S.newList = null; closeSheet(null); } go(el.dataset.view, { nav: !!el.closest('.nav') }); },
   closeSheet: () => closeSheet(null),
-  sheetBg: async (el, ev) => { if (ev.target !== el) return; if (S.sheetKind === 'tx' && (S.flow || itemsDirty())) return; const back = S.newList && S.sheetKind === 'tx'; closeSheet(null); if (back) renderNewList(); else if (S.sheetKind !== 'tx' || !S.newList) S.newList = null; },
+  sheetBg: async (el, ev) => { if (ev.target !== el) return; if (S.sheetResolve && Date.now() - (S.askAt || 0) < 600) return; /* 1.8.2 */ if (S.sheetKind === 'tx' && (S.flow || itemsDirty())) return; const back = S.newList && S.sheetKind === 'tx'; closeSheet(null); if (back) renderNewList(); else if (S.sheetKind !== 'tx' || !S.newList) S.newList = null; },
   answer: (el) => { if (Date.now() - (S.askAt || 0) < 350) return; closeSheet(el.dataset.val || null); }, // 1.8.0: ضغطتين ورا بعض ما تجاوب السؤال اللي توه طلع
   undo: async () => { const s = store().undo(); if (!s) return toast('ما فيه خطوة للتراجع'); await persist(null, { noStep: true }); closeSheet(); render(); toast('تراجعت عن: ' + s.label); },
   redo: async () => { const s = store().redo(); if (!s) return toast('ما فيه خطوة للإعادة'); await persist(null, { noStep: true }); closeSheet(); render(); toast('أعدت: ' + s.label); },
@@ -2291,15 +2418,15 @@ const A = {
     const form = { type: $('s_type').value, cp: $('s_cp') ? $('s_cp').value : null, hasCat: !!$('s_cat'), cat: $('s_cat') ? ($('s_cat').value || null) : null,
       sub: $('s_sub') ? ($('s_sub').value || null) : null, rec: $('s_rec') ? ($('s_rec').value || null) : null, nec: $('s_nec') ? ($('s_nec').value || null) : null, note: $('s_note') ? $('s_note').value : (t.note || ''),
       com: $('s_com') ? triVal($('s_com').value) : undefined, sav: $('s_sav') ? triVal($('s_sav').value) : undefined, rx: $('s_rx') ? $('s_rx').checked : undefined };
-    const type = form.type;
-    if (type !== t.transactionType) {
+    const type = form.type, typeTouched = !$('s_type') || $('s_type').dataset.init === undefined || $('s_type').dataset.init !== type; // 1.8.2
+    if (type !== t.transactionType && typeTouched) {
       let extra = {};
       if (type === 'InternalTransfer') {
         let cp = form.cp;
         if (cp === '__new') { const name = prompt('اسم الحساب الجديد (مثل: محفظة STC Bank)'); if (!name) return; cp = st.put('accounts', { id: E.uid(), name, bank: null, type: 'unknown', last4: null, isMine: true, active: true, currency: 'SAR', createdAt: new Date().toISOString() }).id; }
         extra.counterpartyAccountId = cp || null;
       }
-      if (type === 'CreditCardPayment') { const cards = st.all('accounts').filter(a => a.type === 'credit_card'); extra.targetCardLast4 = cards.length === 1 ? cards[0].last4 : null; }
+      if (type === 'CreditCardPayment') { const cards = st.all('accounts').filter(a => a.type === 'credit_card'); extra.targetCardLast4 = t.targetCardLast4 || (cards.length === 1 ? cards[0].last4 : null); }
       E.setType(st, t.id, type, extra);
     } else if (type === 'InternalTransfer' && form.cp && form.cp !== '__new' && form.cp !== t.counterpartyAccountId) { E.setType(st, t.id, type, { counterpartyAccountId: form.cp }); }
     S.savedCount = 0;
@@ -2342,6 +2469,26 @@ const A = {
     if (S.flow) afterTx(S.flow.ids[S.flow.i]); else if (S.newList) renderNewList(); else closeSheet();
     toast(el.dataset.v === 'me' ? 'تمام، البطاقة لك' : 'تمام، عملياتها ما تنحسب في صرفك');
   },
+  // 1.8.2: سداد البطاقة
+  cardPaySet: async (el) => { await runCardPay(el.dataset.id, el.dataset.c === '1', el.dataset.a === '1'); },
+  cardPayAsk: (el) => sheetCardPayAsk(el.dataset.id),
+  cardPayBack: (el) => afterTx(el.dataset.id),
+  cardPol: (el) => sheetCardPolicy(el.dataset.k),
+  cardPolSet: async (el) => {
+    const st = store(), key = el.dataset.k, mode = el.dataset.v || null, cur = (E.cardPolicyOf(st, key) || {}).mode || null;
+    if (cur === mode) return closeSheet(null);
+    const res = E.setCardPolicy(st, key, mode); if (!res) return;
+    await persist('خيار سداد البطاقة'); render();
+    const fu = mode ? await cardPolicyFollowUps(res) : { rules: 0, past: 0, rulesLeft: [] };
+    if ($('sheet').innerHTML) closeSheet(null);
+    const bits = [mode ? `سدادها ${CARD_MODE_L[mode]}` : 'يسألك مع كل سداد'];
+    if (res.followed) bits.push(`ومشى عليه ${payCnt(res.followed)} كان ينتظر قرارك`);
+    if (fu.past) bits.push(`وانطبق على ${payCnt(fu.past)} سابق`);
+    if (fu.rulesLeft.length) bits.push(`والقاعدة «${fu.rulesLeft.join('» و«')}» باقية شغالة: السدادات الجاية تمشي عليها مو على الخيار`);
+    toast(bits.join('، '), fu.rulesLeft.length ? 9000 : 5000);
+  },
+  cardCatClear: async (el) => { if (!E.clearCardCat(store(), el.dataset.k)) return; await persist('مسح تصنيف سداد البطاقة'); sheetCardPolicy(el.dataset.k); toast('انمسح. السدادات المحسوبة الجاية «بدون تصنيف»'); },
+  noticeCards: () => { closeSheet(null); go('accounts', { nav: true }); setTimeout(() => { const x = $('cardpays'); if (x) x.scrollIntoView({ block: 'start' }); }, 120); },
   txKind: async (el) => {
     const id = el.dataset.id, n = E.setTransferKind(store(), id, el.dataset.v);
     await persist('نوع التحويل'); render(); afterTx(id);
@@ -2539,10 +2686,12 @@ const A = {
   commitPlan: async () => {
     if (S.busy) return; S.busy = true;
     try {
+      const planTxIds = S.plan.txs.map(x => x.id);
       const r = E.commitImport(store(), S.plan, S.decisions); await E.splitSmsMerges(store()); E.detectRecurring(store());
       await persist(); DB.requestPersistence();
       S.plan = null; S.planFile = null; S.decisions = {};
-      toast(`تم الاستيراد: ${r.created} جديدة${r.merged ? `، ${r.merged} مدمجة` : ''}${r.held ? `، ${r.held} تنتظر قرارك في «المراجعة» (اختلاف)` : ''}${r.restored ? `، ${r.restored} رجعت من المحذوفة` : ''}${r.keptDeleted ? `، ${r.keptDeleted} بقيت محذوفة` : ''}${r.skippedFuture ? `، ${r.skippedFuture} ما انحفظت (تاريخها في المستقبل)` : ''}`, r.held ? 6000 : 3500);
+      const nAsk = r.created ? planTxIds.map(id => ({ id })).filter(x => !(r.idRemap && r.idRemap.has(x.id))).map(x => store().get('transactions', x.id)).filter(t => t && t.cardPaySrc === 'ask' && E.cardPayAsking(store(), t)).length : 0; // 1.8.2: من الجديدة بس
+      toast(`تم الاستيراد: ${r.created} جديدة${nAsk ? ` (منها ${payCnt(nAsk)} بطاقة محسوب لين تقرر: افتحه من «العمليات» ← «يحتاج منك»)` : ''}${r.merged ? `، ${r.merged} مدمجة` : ''}${r.held ? `، ${r.held} تنتظر قرارك في «المراجعة» (اختلاف)` : ''}${r.restored ? `، ${r.restored} رجعت من المحذوفة` : ''}${r.keptDeleted ? `، ${r.keptDeleted} بقيت محذوفة` : ''}${r.skippedFuture ? `، ${r.skippedFuture} ما انحفظت (تاريخها في المستقبل)` : ''}`, nAsk ? 9000 : r.held ? 6000 : 3500);
       S.period = null;
       if (S.queue.length) { const next = S.queue.shift(); await processFile(next); } else go('home', { nav: true });
     } finally { S.busy = false; }
@@ -2945,7 +3094,7 @@ function onClick(ev) {
     });
   }
 }
-const ONCE_ACTIONS = new Set(['rvTwin', 'updRepair', 'fmtScopeApply', 'teachSmsSave', 'rvInfoFmt', 'rvInfoOnce', 'fmtApprove', 'fmtToInfo', 'commitApprove', 'commitDecide', 'commitPay', 'commitAmount', 'commitAlertSave', 'commitMulti', 'commitSplitSave', 'commitMarkClear',
+const ONCE_ACTIONS = new Set(['cardPaySet', 'cardPolSet', 'rvTwin', 'updRepair', 'fmtScopeApply', 'teachSmsSave', 'rvInfoFmt', 'rvInfoOnce', 'fmtApprove', 'fmtToInfo', 'commitApprove', 'commitDecide', 'commitPay', 'commitAmount', 'commitAlertSave', 'commitMulti', 'commitSplitSave', 'commitMarkClear',
   'mdApply', 'mdSeparate', 'mdBulk', 'fmtPastApply', 'bulkCity', 'shopCityBack', 'shopCityOn', 'groupHide', 'groupUnhide', 'groupReact', 'groupEnd', 'subSave', 'subDel', 'gselSub', 'grpHide', 'grpUnhide', 'grpReact', 'grpEndedReact', 'mdApplyGone']);
 function onChange(ev) {
   const el = ev.target;
@@ -3036,6 +3185,7 @@ async function restoreFrom(file) {
   let m180 = { changed: false }; try { m180 = await E.migrate180(S.store); } catch (e) { console.error(e); } // 1.8.0: الدمج القديم ينفحص
   let m181 = { changed: false }; try { m181 = await E.migrate181(S.store); } catch (e) { console.error(e); } // 1.8.1: نسخة من إصدار أقدم تمر على نفس الترقية
   const n181 = notice181Of(m181);
+  try { E.migrate182(S.store); } catch (e) { console.error(e); } // 1.8.2: نسخة من إصدار أقدم: تتعلّم بس (ما تغيّر عملية)
   E.sweepPeriods(S.store); E.detectRecurring(S.store); // 1.7.0 و1.7.1
   let fx = { fixed: 0 }; if (!S.store.settings.migrated170dates) { S.store.settings.migrated170dates = true; S.store.put('settings', S.store.settings); fx = E.fixNextDayDates(S.store); }
   await persist(null, { noStep: true });
@@ -3046,6 +3196,7 @@ async function restoreFrom(file) {
   else if (m171.changed && (m171.shapes || (m171.commit && m171.commit.asked))) setTimeout(() => sheetNotice171({ shapes: m171.shapes, asked: m171.commit ? m171.commit.asked : 0, auto: m171.commit ? m171.commit.auto : 0, groups: m171.groupsDropped }), 900);
   else if (m180.changed && m180.raised) setTimeout(() => sheetNotice180({ raised: m180.raised, n181 }), 900);
   else if (n181) setTimeout(() => sheetNotice181(n181), 900);
+  queueNotice182(); // 1.8.2: نسخة من إصدار أقدم
 }
 
 
@@ -6027,13 +6178,20 @@ const FAQ = [
   { id: 'tx-bulk', t: 'txs', q: 'كيف أعدّل أكثر من عملية مرة وحدة؟', k: 'تحديد جماعي كل العمليات مرة وحدة تعديل جماعي ضغطة مطولة اختيار متعدد',
     s: ['افتح «العمليات».', 'اضغط ضغطة مطوّلة على عملية، أو «تحديد» في سطر العدد.', 'حدد العمليات (أو «تحديد الكل»).', 'اختر من تحت: «تصنيف»، «النوع»، «تكرار/ضرورة»، «ملاحظة»، «تجاهل الموقع»، أو «حذف».'], go: 'txs', m: 'm-txs' },
   { id: 'tx-need', t: 'txs', q: 'وش يعني «يحتاج منك» في صفحة العمليات؟', k: 'يحتاج منك علامات بدون تصنيف ناقص تنبيه برتقالي',
-    p: 'عمليات ناقصها قرار منك. لما تضغطه تطلع الأنواع اللي فيها عدد: بدون تصنيف، بدون مدينة، تحويلات لأشخاص ما صنفتها، نوعها غير معروف، ما راجعتها، أي محل؟، مالك البطاقة غير محدد، سداد بطاقة غير مطابق.',
+    p: 'عمليات ناقصها قرار منك. لما تضغطه تطلع الأنواع اللي فيها عدد: بدون تصنيف، بدون مدينة، تحويلات لأشخاص ما صنفتها، نوعها غير معروف، ما راجعتها، أي محل؟، مالك البطاقة غير محدد، سداد بطاقة غير مطابق، سداد بطاقة: ينحسب؟.',
     n: 'يطلع بس إذا فيه شي. والأعداد حسب الفترة والفلاتر المعروضة.', go: 'txs', m: 'm-txs' },
   { id: 'tx-type', t: 'txs', q: 'كيف أغيّر نوع العملية (دفع، دخل، استرداد…)؟', k: 'نوع العملية تغيير دفع دخل تحويل استرداد سحب غير معروف',
     s: ['افتح العملية.', 'اضغط «تعديل النوع والخصائص والتفاصيل».', 'اختر «النوع» الصحيح.', 'اضغط «حفظ».'], m: 'm-types' },
   { id: 'tx-transfer', t: 'txs', q: 'حوّلت لحسابي الثاني وانحسب صرف، كيف أصلحه؟', k: 'تحويل بين حساباتي داخلي حسابي الثاني سداد بطاقة انحسب صرف حوالة لنفسي',
     s: ['افتح التحويل.', 'تحت اسمه ثلاث أزرار: «صرف»، «بين حساباتي»، «سداد بطاقة». اختر «بين حساباتي».', 'لو للتحويل رقم حساب معروف، اختيارك ينحفظ ويمشي على تحويلاته السابقة والجاية.'],
     n: 'ولو تكتب اسمك مثل ما يطلع في الكشوف في «الإعدادات» ← «أسماؤك كما تظهر في الكشوف»، التحويلات لاسمك تصير داخلية لحالها.', m: 'm-kind' },
+  { id: 'card-pay-count', t: 'txs', q: 'سددت بطاقتي الائتمانية: السداد ينحسب في صرفي؟', k: 'سداد بطاقة ائتمانية فيزا ينحسب صرف مرتين مشتريات البطاقة سددت الفيزا ماستركارد',
+    p: 'حسب خيارك للبطاقة، والتطبيق ما يقرر عنك. لو مشترياتها تجي للتطبيق (رسائل أو كشف) فهي انحسبت وقت الشراء، فتختار إن سدادها ما ينحسب عشان ما ينحسب نفس المبلغ مرتين. لو مشترياتها ما تجي، تختار إنه ينحسب لأنه هو صرفك.',
+    s: ['أول سداد لبطاقة ما قررت لها يطلع فوقه السؤال. لين تجاوب، السداد محسوب.', 'اختر «لا تحسبه» أو «احسبه صرف»، ومع كل واحد «دايم لهالبطاقة» أو «هالمرة بس».', '«دايم» ينحفظ على آخر 4 أرقام من البطاقة، وسداداتها الجاية تمشي عليه بدون سؤال.'],
+    n: 'لو عندك قاعدة تغيّر نوع السداد فهي أقوى من خيار البطاقة، والتطبيق يسألك توقفها.', m: 'm-cardpay' },
+  { id: 'card-pay-change', t: 'txs', q: 'كيف أغيّر خيار سداد بطاقة، أو أشوف البطاقات اللي أسددها؟', k: 'بطاقات تسددها خيار البطاقة تغيير سداد ينحسب ما ينحسب يسألك بطاقة ائتمانية',
+    s: ['افتح «الحسابات» وانزل لقسم «بطاقات تسددها».', 'اضغط البطاقة واختر: «ما ينحسب صرف»، «ينحسب صرف»، أو «يسألك مع كل سداد».', 'لو لها سدادات سابقة حالتها غير خيارك، يوريك عددها ومجموعها ويسألك تطبّق عليها أو لا.'],
+    n: 'ولسداد واحد بس: افتحه واضغط «غيّر» في سطر «سداد بطاقة».', go: 'accounts', m: 'm-cardpay' },
   { id: 'tx-loan', t: 'txs', q: 'كيف أسجل سلفة عطيتها لشخص عشان ما تنحسب صرف؟', k: 'سلفة سلف دين قرض اقرضت عطيت شخص ترجع',
     s: ['افتح «العمليات».', 'اضغط مطوّل على التحويل (أو «تحديد» وحدده).', 'اضغط «النوع» واختر «سلفة».'],
     n: 'السلفة ما تنحسب صرف، وتلقاها في «المزيد» ← «مبالغ غير محسوبة في الصرفيات».', go: 'txs', m: 'm-outside' },

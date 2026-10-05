@@ -716,7 +716,8 @@ function cardNow(store, a) {
     delta += t.direction === 'out' ? t.grossAmount : -t.grossAmount; ids.push(t.id); counted.add(t.id);
   });
   store.all('transactions').forEach(t => {
-    if (t.transactionType !== 'CreditCardPayment' || t.direction !== 'out' || t.targetCardId !== a.id || !afterSnap(t, snap, sDate, sTime)) return;
+    // 1.8.2: سداد البطاقة ينقص المستحق عليها سواء ينحسب صرف («دفع» بعلامة 1.8.2) أو لا («سداد بطاقة»): الفلوس وصلت البطاقة في الحالتين. السداد القديم المحسوب يبقى مثل 1.8.1
+    if (!E.cardLeg(t) || t.direction !== 'out' || t.targetCardId !== a.id || !afterSnap(t, snap, sDate, sTime)) return;
     if ((t.linkedTransactionIds || []).some(x => counted.has(x))) return; // طرفها الثاني على البطاقة انحسب فوق
     delta -= t.principalAmount; ids.push(t.id);
   });
