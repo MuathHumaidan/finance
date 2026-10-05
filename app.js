@@ -321,7 +321,7 @@ function ownAccountOptions(selected, withNew) {
 function ensurePeriod() {
   if (S.period) return;
   S.period = E.currentCycle(store()) || (E.listCycles(store())[0]) || { start: E.addDays(E.todayISO(), -29), end: E.todayISO(), kind: 'custom' };
-  S.selDay = null;
+  S.selDay = null; S.selMulti = null;
 }
 function periodTxs() {
   const p = S.period;
@@ -460,7 +460,7 @@ function render() {
 }
 // الرجوع: كل انتقال من صفحة لصفحة (أو لفلتر جديد) ينحفظ، وزر الرجوع يرجعك لنفس المكان بنفس الفترة والفلاتر.
 // الشريط السفلي بداية جديدة.
-function navSnapshot() { return { view: S.view, filters: JSON.parse(JSON.stringify(S.filters)), q: S.q, period: S.period, selDay: S.selDay, spendBy: S.spendBy, cardOpen: S.cardOpen, itemsF: S.itemsF ? JSON.parse(JSON.stringify(S.itemsF)) : null, y: window.scrollY || 0 }; }
+function navSnapshot() { return { view: S.view, filters: JSON.parse(JSON.stringify(S.filters)), q: S.q, period: S.period, selDay: S.selDay, selMulti: S.selMulti ? Array.from(S.selMulti) : null, selMultiKey: S.selMulti ? S.selMultiKey : null, spendBy: S.spendBy, cardOpen: S.cardOpen, itemsF: S.itemsF ? JSON.parse(JSON.stringify(S.itemsF)) : null, y: window.scrollY || 0 }; }
 function go(view, opts) {
   opts = opts || {};
   if (view !== 'txs') S.sel = null;
@@ -484,7 +484,7 @@ function goBack() {
   if (!p) return go(NAV_OF[S.view] || 'home', { noPush: true });
   if (p.view !== 'txs') S.sel = null;
   if (p.view !== 'group') { S.gsel = null; S.subOpen = null; }
-  Object.assign(S, { view: p.view, filters: p.filters, q: p.q, period: p.period, selDay: p.selDay, spendBy: p.spendBy, cardOpen: p.cardOpen }); if (p.itemsF) S.itemsF = p.itemsF;
+  Object.assign(S, { view: p.view, filters: p.filters, q: p.q, period: p.period, selDay: p.selDay, selMulti: p.selMulti && p.selMulti.length ? new Set(p.selMulti) : null, selMultiKey: p.selMulti && p.selMulti.length ? (p.selMultiKey || null) : null, spendBy: p.spendBy, cardOpen: p.cardOpen }); if (p.itemsF) S.itemsF = p.itemsF;
   if (history.replaceState) history.replaceState(null, '', '#' + p.view);
   render(); window.scrollTo(0, p.y || 0); unlockScrollTo(p.y || 0);
 }
@@ -642,10 +642,12 @@ function chartSvg(ser, p, opts) {
   let g = '';
   const axf = (v) => nice >= 1000 ? Math.round(v).toLocaleString('en-US') : fmt(v);
   [0, 0.5, 1].forEach(f => { const yy = y(nice * f); g += `<line x1="0" x2="${plotW}" y1="${yy}" y2="${yy}" stroke="#ECEEF3" stroke-width="1"/><text x="${W - 2}" y="${yy + 4}" text-anchor="end">${max ? axf(nice * f) : f === 0 ? '0' : ''}</text>`; });
-  const sel = S.selDay;
+  // 1.8.3: المحدد يوم واحد (ضغطة) أو أكثر من يوم (ضغط مطوّل ثم ضغطات). صفحة الفترة اللي جنبها (وقت السحب) بدون تحديد
+  const selSet = opts.noSel ? null : ((!opts.action && S.selMulti) || (S.selDay ? new Set([S.selDay]) : null));
+  const holdOk = !opts.action && !opts.noSel && p.kind !== 'year';
   ser.buckets.forEach((b, i) => {
     const cx = plotW - (i + 0.5) * slot, x = cx - bw / 2;
-    const dim = sel && sel !== b.key ? ' opacity="0.3"' : '';
+    const dim = selSet && !selSet.has(b.key) ? ' opacity="0.3"' : '';
     const future = b.start > today;
     if (b.total > 0) {
       let acc = 0; const segs = [];
@@ -666,27 +668,32 @@ function chartSvg(ser, p, opts) {
     if (p.kind === 'week') lab = DAY_S[dparts(b.key).wd];
     else if (p.kind === 'year') lab = MON_S[Number(b.key.slice(5, 7)) - 1];
     else { const d = dparts(b.key).d; if (i === 0 || i === n - 1 || (n > 10 ? i % 5 === 0 : true)) lab = String(d); }
-    if (lab) g += `<text class="dl ${sel === b.key ? 'on' : ''}" x="${cx}" y="${H - 6}" text-anchor="middle"${future ? ' opacity="0.5"' : ''}${p.kind === 'year' ? ' style="font-size:10px"' : ''}>${lab}</text>`;
-    if (!future || b.total) g += `<rect class="bar" x="${cx - slot / 2}" y="0" width="${slot}" height="${H}" fill="transparent" data-action="${opts.action || 'selDay'}" data-d="${b.key}"><title>${b.key}: ${fmt(b.total)}</title></rect>`;
+    if (lab) g += `<text class="dl ${selSet && selSet.has(b.key) ? 'on' : ''}" x="${cx}" y="${H - 6}" text-anchor="middle"${future ? ' opacity="0.5"' : ''}${p.kind === 'year' ? ' style="font-size:10px"' : ''}>${lab}</text>`;
+    if (!future || b.total) g += `<rect class="bar" x="${cx - slot / 2}" y="0" width="${slot}" height="${H}" fill="transparent" data-action="${opts.action || 'selDay'}" data-d="${b.key}"${holdOk ? ' data-hold="selDayHold"' : ''}><title>${b.key}: ${fmt(b.total)}</title></rect>`;
   });
   let legend = '';
   if (!opts.compact && ser.total > 0) {
     const anyRest = ser.buckets.some(b => E.round2(b.total - shown.reduce((s, k) => s + (b.cats[k] || 0), 0)) > 0);
     legend = `<div class="legend">${shown.map(k => `<span><i style="background:${catUi(k).color}"></i>${esc(bucketName(k))}</span>`).join('')}${anyRest ? `<span><i style="background:${REST_C}"></i>باقي التصنيفات</span>` : ''}</div>`;
   }
-  return `<div class="chart"><svg viewBox="0 0 ${W} ${H}" direction="ltr" style="direction:ltr" role="img" aria-label="الإنفاق حسب ${p.kind === 'year' ? 'الشهر' : 'اليوم'}">${g}</svg>${legend}</div>`;
+  const svg = `<svg viewBox="0 0 ${W} ${H}" direction="ltr" style="direction:ltr" role="img" aria-label="الإنفاق حسب ${p.kind === 'year' ? 'الشهر' : 'اليوم'}">${g}</svg>`;
+  if (opts.bare) return svg;
+  // 1.8.3: الأعمدة داخل «مسار» يتحرك لحاله وقت السحب (الصفحة ثابتة)، وأعمدة الفترة اللي جنبها تنحط جنبه وقتها
+  if (opts.action) return `<div class="chart">${svg}${legend}</div>`; // الرئيسية والسنوي: مثل ما هو (ما فيه سحب)
+  return `<div class="chart"><div class="cview"><div class="ctrack"><div class="cpage c0">${svg}</div></div></div>${legend}</div>`;
 }
-function whereList(R) {
+function whereList(R, opts) {
+  opts = opts || {}; // opts.idsLabel: التصنيف يفتح عملياته هو (مثل الأيام المحددة) بدل فلتر الفترة
   const cats = R.categories.filter(c => c.amount > 0);
-  if (!cats.length) return `<div class="muted">لا يوجد إنفاق في هذي الفترة.</div>`;
+  if (!cats.length) return `<div class="muted">${opts.empty || 'لا يوجد إنفاق في هذي الفترة.'}</div>`;
   const max = cats[0].amount;
   return `<div class="where">${cats.map(c => {
     const key = c.categoryId || '__none', u = catUi(key === '__none' ? null : key);
-    const pct = R.spend ? c.amount / R.spend * 100 : 0;
+    const pct = R.spend ? c.amount / R.spend * 100 : 0, pctOk = !opts.idsLabel || (R.spend > 0 && !R.categories.some(x => x.amount < 0)); // 1.8.3: في الأيام المحددة، المجموع صفر أو سالب أو فيه تصنيف سالب = بدون نسبة
     const w = Math.max(40, Math.min(100, c.amount / max * 100));
-    const s0 = c.subs.find(s => s.subcategoryId && s.amount < c.amount - 0.005);
+    const s0 = pctOk ? c.subs.find(s => s.subcategoryId && s.amount < c.amount - 0.005) : null;
     const sc = s0 ? `<span class="sc" style="color:${u.color}">${glyph(catUi(s0.subcategoryId))}<span class="num" style="color:var(--ink-2)">${(s0.amount / R.spend * 100).toFixed(2)}%</span></span>` : '';
-    return `<div class="w" data-action="catDrill" data-cat="${key}"><div class="bar" style="background:${tint(u.color, '24')};width:${w}%"><span style="color:${u.color}">${glyph(u)}</span><div class="m"><div class="t">${esc(bucketName(c.categoryId))}</div><div class="p"><span class="num">${pct.toFixed(2)}%</span>${sc}</div></div></div><div class="a">${money(c.amount)}</div></div>`;
+    return `<div class="w" ${opts.idsLabel ? drillAttr(c.txIds || [], bucketName(c.categoryId) + ' · ' + opts.idsLabel) : `data-action="catDrill" data-cat="${key}"`}><div class="bar" style="background:${tint(u.color, '24')};width:${w}%"><span style="color:${u.color}">${glyph(u)}</span><div class="m"><div class="t">${esc(bucketName(c.categoryId))}</div><div class="p">${pctOk ? `<span class="num">${pct.toFixed(2)}%</span>` : ''}${sc}</div></div></div><div class="a">${money(c.amount)}</div></div>`;
   }).join('')}</div>`;
 }
 // الصرف حسب البطاقة (أو الحساب للعمليات اللي ما لها بطاقة)، وكل بطاقة تنفتح على تصنيفاتها
@@ -715,8 +722,13 @@ function vSpend() {
   const bucket = p.kind === 'year' ? 'month' : 'day';
   const ser = E.spendSeries(st, p, bucket);
   if (S.selDay && !ser.buckets.some(b => b.key === S.selDay)) S.selDay = null;
+  // 1.8.3: أكثر من يوم محدد (أعمدة الأيام بس: الأسبوعي والدورة). اليوم اللي طلع من الفترة ينشال من التحديد
+  if (S.selMulti && S.selMultiKey !== pKey(p)) S.selMulti = null; // الفترة تغيّرت من أي مكان (اختيار فترة، الإعدادات، الرئيسية…): التحديد ينشال
+  if (S.selMulti) { const keep = bucket === 'day' ? Array.from(S.selMulti).filter(d => ser.buckets.some(b => b.key === d)) : []; S.selMulti = keep.length ? new Set(keep) : null; }
+  if (S.selMulti) S.selDay = null;
   const sel = S.selDay;
   let h = `<div class="tabs">${['week', 'cycle', 'year'].map(k => `<button class="${pk === k ? 'on' : ''}" data-action="setPKind" data-v="${k}">${k === 'cycle' && settings().cycleMode === 'calendar' ? 'شهري' : PK_L[k]}</button>`).join('')}</div>`;
+  if (S.selMulti) return h + spendDaysHtml(st, p, ser);
   if (sel) {
     const b = ser.buckets.find(x => x.key === sel);
     const lab = bucket === 'month' ? `${MONTHS[Number(sel.slice(5, 7)) - 1]} ${sel.slice(0, 4)}` : fday(sel);
@@ -1347,6 +1359,8 @@ function vMethods() {
   <li>الألوان لأكبر خمسة تصنيفات في الفترة، ولكل تصنيف لونه الثابت. إذا تصنيفان لهما نفس اللون، الأصغر ينضم لـ«باقي التصنيفات» (رمادي).</li>
   <li><b>المقارنة</b>: الفترة اللي ما انتهت تُقارن أيامها اللي مضت (حتى اليوم) بنفس عدد الأيام من بداية الفترة السابقة. الفترة المنتهية تُقارن بالسابقة كاملة. <b>(1.8.0)</b> المقارنة تطلع دايمًا، إلا لو الفترة السابقة ما فيها ولا عملية: يطلع «ما فيه عمليات في الفترة السابقة». تنبيه «بيانات الحساب ناقصة» انشال من «صرفياتك» و«الرئيسية» و«التقرير»: الرسالة والكشف مصدرين سوا، وما فيه «مرجع كامل». <b>(1.8.1)</b> لو فيه حساب كشوفه ما تغطي كل أيام الفترة المعروضة (أو السابقة اللي تنقارن بها) يطلع تحت المقارنة سطر صغير «قد تكون بيانات هذه الفترة غير مكتملة.» (وفي ملاحظات «التقرير»). ما يمنع المقارنة ولا يغيّر أي رقم، وما يقول إن فيه عمليات ناقصة أكيد (رسائل البنك يمكن غطت هالأيام). تضغطه يطلع لك الحساب والأيام اللي ما يغطيها كشف وزر «ارفع كشف». ما يطلع مع مقارنة اليوم باليوم.</li>
   <li>إذا اخترت يومًا من الرسم، يُقارن باليوم اللي قبله (ولو اليوم اللي قبله ما فيه ولا عملية: «ما فيه عمليات في اليوم السابق»).</li>
+  <li><b>أكثر من يوم (1.8.3)</b>: في «أسبوعي» و«الدورة» (الأعمدة أيام) اضغط مطوّل على يوم، وبعدها أي يوم تضغطه ينضاف، ولو ضغطته مرة ثانية ينشال. واليوم اللي كنت مختاره قبل يدخل معه. الأيام ما يلزم تكون ورا بعض، بس من نفس الفترة المعروضة. يطلع: <b>المجموع</b> = مجموع أعمدة الأيام المحددة. <b>المتوسط</b> = المجموع ÷ عدد الأيام المحددة، واليوم اللي صرفه صفر ينعد (مثال: 100 و0 و50 ← 150 ÷ 3 = 50). «وين راحت الدراهم؟» = صرف هالأيام موزع على التصنيفات، ونسبة كل تصنيف من مجموعها، وضغطة على التصنيف تفتح العمليات اللي انحسبت له في هالأيام (المسترجع المربوط بشراه ينحسب في يوم الشراء، فيطلع مع شراه حتى لو تاريخه يوم ثاني). النسبة ما تطلع لو مجموع الأيام المحددة صفر أو سالب، أو فيها مسترجع غير مربوط بشراه يخلي تصنيف بالسالب (لأن النسب وقتها تتعدى 100%). وتحتها كل عمليات هالأيام (حتى اللي ما تنحسب صرف، مثل ما يطلع لليوم الواحد). ما تطلع المقارنة ولا صف الأرقام. × يلغي التحديد، وأي تغيير للفترة يلغيه كمان. في «سنوي» (الأعمدة أشهر) ما فيه.</li>
+  <li><b>السحب يمين ويسار (1.8.3)</b>: ينقلك للفترة اللي جنبها. الأعمدة بس تمشي مع إصبعك وتدخل أعمدة الفترة الثانية جنبها (الأحدث من اليسار والأقدم من اليمين، مثل ترتيب الأيام)، والصفحة ثابتة، والأرقام تتحدث أول ما ترفع إصبعك. لو مختار يوم واحد بضغطة عادية، السحب ينقل الاختيار لليوم اللي جنبه. لو التحديد بالضغط المطوّل (حتى لو باقي فيه يوم واحد)، السحب ينقل الفترة ويلغي التحديد.</li>
   <li>«وين راحت الدراهم؟»: نسبة كل تصنيف = إنفاقه ÷ الإنفاق الحقيقي للفترة. والرقم الصغير بجانبها = نسبة أكبر تصنيف فرعي فيه من نفس الإجمالي.</li>
   <li><b>حسب البطاقة</b>: نفس الإنفاق موزع على البطاقة (أو الحساب للعمليات اللي ما لها بطاقة، مثل التحويلات)، ومجموع البطاقات = الإنفاق الحقيقي. البطاقة تنفتح على تصنيفاتها، ونسبة كل تصنيف فيها = صرفه ÷ صرف البطاقة.</li></ul>
   <h3 id="m-outside">مبالغ غير محسوبة في الصرفيات (1.8.0)</h3><p>صفحة في «المزيد» تحت «تحليلك»، تختار فترتها من فوق، وفيها كل اللي طلع في الفترة وما دخل «الإنفاق الحقيقي». خمس أنواع، ولكل نوع مجموعه وعدده وسبب عدم حسابه، وينفتح على عملياته:</p><ul>
@@ -1443,6 +1457,7 @@ function vMethods() {
   <h3 id="m-search">البحث (1.6.0)</h3><p>يبحث في كل شي: اسم المحل واسم الفاتورة، المستفيد، البنك، الحساب، البطاقة، التصنيف، الملاحظة، المرجع، أسماء الأغراض وملاحظاتها وتصنيفاتها، أجزاء السحب، المدينة (المعتمدة والمقترحة)، المجموعات، والمبالغ (18 = 18.00 = ١٨: الإجمالي والأصل والرسوم وأسعار الأغراض ومجاميعها). يتجاهل الهمزات والتاء المربوطة والمسافات. تحت كل نتيجة سبب ظهورها، مثل «فيها: طماطم ×2».</p>
   <h3 id="m-undo">التراجع وسجل التعديلات</h3><p>كل حفظ خطوة وحدة (بما فيها الاستيراد وجلب الرسائل). التراجع والإعادة لآخر 30 خطوة في الجلسة. <b>(1.7.0)</b> فوق زر «تراجع» (كلمة)، وبعد ما تتراجع يطلع جنبه «إعادة»؛ وكل تراجع أو إعادة (من فوق أو من الرسالة تحت أو من «سجل التعديلات») يسألك «تتراجع عن: …؟» قبل. «إعادة» تختفي لما ما يبقى شي تعيده أو لما تسوي تعديل جديد. سجل التعديلات يبقى (آخر 2000) ويدخل النسخة الاحتياطية. المفتاح السري لصندوق الرسائل ما يدخل النسخة الاحتياطية أبدًا.</p>
   <h3 id="m-txs">صفحة العمليات (1.7.0)</h3><ul>
+  <li><b>نافذة العملية (1.8.3)</b>: الإغلاق (×) و«حفظ» في رأس النافذة، والرأس ثابت فوق وأنت نازل. تحت باقي «لا تحسبها في الصرف» و«حذف». في نافذة العمليات الجديدة من الرسائل الرأس ثابت كمان، وأزرار «تم» تحت مثل ما هي.</li>
   <li><b>صف النوع</b>: «الكل | إنفاق | دخل | تحويلات | سلف». «إنفاق» = كل اللي ينحسب صرف. «تحويلات» = التحويل بين حساباتك وسداد البطاقات والإيداع النقدي. «سلف» = السلفة اللي عطيتها وسدادها لك (ما تنحسب صرف ولا دخل).</li>
   <li><b>يحتاج منك</b>: يظهر بس إذا فيه شي، بعدد العمليات. تحته (لما تضغطه) الأنواع اللي فيها عدد بس: بدون تصنيف، بدون مدينة، تحويلات لأشخاص ما صنفتها، نوعها غير معروف، ما راجعتها، أي محل؟، مالك البطاقة غير محدد، سداد بطاقة غير مطابق، سداد بطاقة: ينحسب؟ (1.8.2: سداد ما قررت لبطاقته). الأعداد حسب الفترة والفلاتر المعروضة، والمتجاهل بفترة ما ينعد.</li>
   <li><b>الفلاتر</b> (أيقونة القمع): نوع العملية (أكثر من نوع)، التصنيف (رئيسي أو فرعي) «حسب الفواتير» = نفس رقم «صرفياتك»، أو «حسب المنتجات» = كل فاتورة فيها أغراض من التصنيف (والغير مفصّل) وجنبها مبلغ الأغراض بس، نفس رقم «المنتجات». والمدينة والمجموعة والحساب والبطاقة وطريقة الدفع والمصدر. كل فلتر شغال فقاعة عليها × تشيله لحاله.</li>
@@ -1456,6 +1471,22 @@ function vMethods() {
   <h3 id="m-privacy">الخصوصية</h3><p>قبل الحفظ تنخفي: الآيبان، أرقام الحسابات (متصلة أو مفصولة بمسافات أو شرطات، مثل 1234 567890 1234)، رقم البطاقة الكامل، رقم الجوال، أرقام عقود التمويل (يبقى آخر 4 أرقام)، ورقم الهوية (ينخفي كله). البصمة تنحسب قبل الإخفاء. التواريخ والأوقات والمبالغ ما تنخفي. المرجع اللي فيه حروف (مثل FT…) يبقى، والمرجع اللي كله أرقام وطوله 12 رقم أو أكثر ينخفي مثل أرقام الحسابات. المستفيد يُعرف ببصمة SHA-256 لآيبانه (تقليل تعرض، مو تشفير سري). المراجع البنكية اللي فيها حروف تبقى للمطابقة.</p>
   <p><b>صندوق الرسائل</b> (لو مركّب اختصار الآيفون): نص الرسالة ينحفظ فيه مؤقتًا في حساب Google حقك بعد إخفاء أرقام الحسابات، وينحذف بعد ما يأكد التطبيق استلامها (يبقى رقم الرسالة وعلامة بدون نص 60 يوم عشان ما تنعاد)، واللي ما انسحبت تنحذف بعد 30 يوم مع أول إرسال أو جلب بعدها. رسائل الرموز الواضحة ما تنحفظ فيه، وينرسل اسم المدينة بس بدون إحداثيات. <b>المفتاح السري</b> التطبيق يحفظه على جهازك وما يدخّله النسخة الاحتياطية. <b>النسخة الاحتياطية</b> ملف غير مشفّر فيه كل بياناتك (ومنها نصوص الرسائل بعد الإخفاء وسجل التعديلات ورابط الصندوق): اللي يحصل عليه يقدر يقراه. <b>(1.8.0)</b> وصف سطر الكشف لما يصير اسمًا للعملية أو للمحل (بنك علّمته بنفسك، أو سطر ما انعرف نوعه) صار ينخفي فيه الأرقام الطويلة بعد، واللي انحفظ قبل انخفى مع التحديث.</p>
   <p><b>(1.8.1) أسماء كشف الإنماء، والإخفاء بالسياق</b>: أي اسم عملية أو محل أو مستفيد مقروء من وصف (سطر كشف الإنماء، كشف البطاقة، بنك علّمته، أو رسالة) يمر على نفس الإخفاء قبل الحفظ. والإخفاء توسّع <b>بالسياق</b> (مو أي رقم طويل): الجوال 05 حتى لو مكتوب بمسافات أو شرطات، و‎+966 و00966؛ رقم 9 خانات يبدأ بـ5 ينخفي بس لو قبله كلمة «جوال» أو «هاتف» (أو mobile / phone / tel)؛ الهوية أو الإقامة المفصولة بمسافات لو قبلها «هوية / إقامة / ID / Iqama»؛ والرقم (5 خانات وطالع) اللي قبله «رقم عميل / اشتراك / عقد / تمويل / حساب» (أو «حساب رقم…»، أو «رقم حساب المستفيد») أو مقابلها بالإنجليزي (8 خانات وطالع يبقى آخر 4، والأقصر آخر خانتين). الإخفاء بالسياق يحافظ على شكل الرقم: كل خانة مخفية تصير نقطة مكانها والمسافات والشرطات تبقى (مثل ••• ••• 4567)، والإخفاء ينعاد لين يثبت النص (رقمين ورا بعض ما يغطي واحد على الثاني). والرقم المخفي في آخر اسم المحل ينتجاهل وقت التعرف على المحل، مثل رقم الفرع: «KHALID STORE 05••••5678» و«KHALID STORE» نفس المحل ونفس التصنيف. ما ينخفي: «رقم المرجع» و«رقم العملية» والمراجع اللي فيها حروف، والمبالغ والتواريخ، وآخر 4 أرقام. الصيغ المعتمدة تبقى تطابق رسائلها بعد الإخفاء (الرقم في النص الثابت يطابق الرقم المخفي، وعدد الكلمات ما يتغير)، ومواضع متغيراتها في المثال تنحسب من جديد. مع التحديث انعاد الإخفاء مرة وحدة على المحفوظ: أسماء العمليات (والمحذوفة واللي في المراجعة) ووصف سطورها، أسماء المحلات وكتاباتها، المستفيدين، نصوص الرسائل وأمثلة الصيغ، سجل التعديلات، وأسماء ملفات الكشوف؛ والنسخة الاحتياطية تطلع من هالبيانات المنظفة. الاسم اللي سميته أنت للمحل وملاحظاتك ما تنلمس. صندوق الرسائل (Code.gs) ما تغيّر: يخفي الآيبان وأرقام الحسابات مثل قبل، والإخفاء الموسّع يصير على جهازك وقت الحفظ.</p></div>`;
+}
+
+/* 1.8.3: «صرفياتك» وأنت محدد أكثر من يوم: المجموع، المتوسط (المجموع ÷ عدد الأيام المحددة)، التصنيفات، ثم العمليات */
+const pKey = (p) => p ? `${p.kind}|${p.start}|${p.end}` : '';
+const daysWord = (n) => n === 1 ? 'يوم واحد' : n === 2 ? 'يومين' : `${n} ${n <= 10 ? 'أيام' : 'يوم'}`;
+function spendDaysHtml(st, p, ser) {
+  const set = S.selMulti, D = E.computeDays(st, Array.from(set)), n = D.count;
+  const names = D.days.map(d => p.kind === 'week' ? DAYS[dparts(d).wd] : fdate(d));
+  let h = periodBox(p, D.spend, { nav: false, label: n === 1 ? fday(D.days[0]) : `${daysWord(n)} محددة`, clear: true, action: 'clearSel' });
+  h += chartSvg(ser, p, {});
+  h += `<div class="cmp"><span class="p na">المتوسط <span class="num">${fmt(D.average)}</span> لليوم<span class="muted" style="font-weight:400"> · المجموع ÷ ${daysWord(n)}</span></span></div>`;
+  h += `<div class="small muted" style="text-align:center;margin:-2px 0 10px">${n <= 7 ? esc(names.join('، ')) + ' · ' : ''}اضغط أي يوم تضيفه أو تشيله</div>`;
+  h += `<div class="card"><h2 class="soft">وين راحت الدراهم؟</h2>${whereList(D, { idsLabel: daysWord(n), empty: 'ما فيه إنفاق في الأيام المحددة.' })}</div>`;
+  const list = st.all('transactions').filter(t => set.has(t.transactionDate || t.postingDate)).sort(sortTx);
+  h += `<div class="card"><h2 class="soft">عمليات الأيام المحددة</h2>${list.length ? list.map(t => txRow(t, true)).join('') : '<div class="muted empty-day">ما فيه عمليات</div>'}</div>`;
+  return h;
 }
 
 /* ---------- النوافذ ---------- */
@@ -1496,8 +1527,8 @@ function sheetTx(id) {
   const u = txUi(t);
   const src0 = (t.sourceLinks || [])[0];
   const F = S.flow && S.flow.ids[S.flow.i] === t.id ? S.flow : null;
-  let h = F ? `<h3><button class="close" data-action="flowX" aria-label="إغلاق">×</button><span class="sp" style="text-align:center;color:var(--ink-3);font-weight:600" id="flowpg">${flowPgText()}</span><span style="width:34px"></span></h3>`
-    : `<h3><button class="close" data-action="txClose" aria-label="إغلاق">×</button><span class="sp txpos">${txNavText(t.id)}</span>${S.newList ? `<button class="btn" data-action="newBack">العمليات الجديدة ${ico('chevL')}</button>` : '<span style="width:34px"></span>'}</h3>`;
+  let h = F ? `<h3 class="txhd"><button class="close" data-action="flowX" aria-label="إغلاق">×</button><span class="sp" style="text-align:center;color:var(--ink-3);font-weight:600" id="flowpg">${flowPgText()}</span><span style="width:34px"></span></h3>`
+    : `<h3 class="txhd"><button class="close" data-action="txClose" aria-label="إغلاق">×</button><span class="sp txpos">${txNavText(t.id)}</span>${S.newList ? `<button class="btn hbk" data-action="newBack">العمليات الجديدة ${ico('chevL')}</button>` : ''}<button class="btn p hsave" data-action="saveTx" data-id="${t.id}">حفظ</button></h3>`; // 1.8.3: «حفظ» فوق جنب الإغلاق
   if (F) h += flowCardsHtml(t);
   h += `
     <div class="txh">
@@ -1540,7 +1571,7 @@ function sheetTx(id) {
     </details>
     ${F ? `<div class="btns" style="margin-top:14px">${txExcludeBtn(t)}<button class="btn r" data-action="deleteTx" data-id="${t.id}" aria-label="حذف">${ico('trash')} حذف</button></div>
       <div class="flowbtns"><button class="btn p" style="flex:1 1 100%" data-action="flowNext" data-id="${t.id}">${F.i + 1 < F.ids.length ? 'تم، التالية' : 'تم'}</button><button class="btn" style="flex:1" data-action="flowLater" data-id="${t.id}">مراجعة لاحقًا</button><button class="btn" style="flex:1" data-action="flowAllLater">مراجعة الكل لاحقًا</button></div>`
-    : `<div class="btns" style="margin-top:14px"><button class="btn p" style="flex:1" data-action="saveTx" data-id="${t.id}">حفظ</button>${txExcludeBtn(t)}<button class="btn r" data-action="deleteTx" data-id="${t.id}" aria-label="حذف">${ico('trash')} حذف</button></div>`}`;
+    : `<div class="btns" style="margin-top:14px">${txExcludeBtn(t)}<button class="btn r" data-action="deleteTx" data-id="${t.id}" aria-label="حذف">${ico('trash')} حذف</button></div>`}`;
   if (F) h = h.replace('<span class="b">ما راجعتها</span>', '');
   openSheet(h); S.sheetKind = 'tx'; S.sheetTxId = t.id; S.txDraft = null;
 }
@@ -2357,18 +2388,31 @@ const A = {
   covUpload: () => { closeSheet(null); go('add'); },
   pickRestore: () => $('restoreInput').click(),
   pickPeriod: () => sheetPeriod(),
-  setPeriod: (el) => { S.period = E.listCycles(store())[+el.dataset.i]; S.selDay = null; S.filters.allTime = false; closeSheet(); render(); },
+  setPeriod: (el) => { S.period = E.listCycles(store())[+el.dataset.i]; S.selDay = null; S.selMulti = null; S.filters.allTime = false; closeSheet(); render(); },
   setPeriodCurrent: () => { S.period = E.currentCycle(store()) || S.period; render(); },
   setPeriodPrev: () => { const c = E.currentCycle(store()); if (c) S.period = E.previousPeriod(store(), c); render(); },
   allTime: () => { S.filters.allTime = true; closeSheet(); render(); },
-  setCustomPeriod: () => { const a = $('p_from').value, b = $('p_to').value; if (!a || !b || a > b) return toast('تاريخ غير صحيح'); S.period = { start: a, end: b, kind: 'custom' }; S.selDay = null; S.filters.allTime = false; closeSheet(); render(); },
+  setCustomPeriod: () => { const a = $('p_from').value, b = $('p_to').value; if (!a || !b || a > b) return toast('تاريخ غير صحيح'); S.period = { start: a, end: b, kind: 'custom' }; S.selDay = null; S.selMulti = null; S.filters.allTime = false; closeSheet(); render(); },
   kpi: (el) => { const k = el.dataset.kind; if (el.dataset.p === 'cur') { const c = E.currentCycle(store()); if (c) S.period = c; } closeSheet(); go('txs', { filters: { kind: k } }); },
   back: () => goBack(),
-  setPKind: (el) => { S.period = E.periodOf(store(), el.dataset.v, E.todayISO()) || S.period; S.selDay = null; render(); },
-  pShift: (el) => { const np = E.shiftPeriod(store(), S.period, Number(el.dataset.dir)); if (np) { S.period = np; S.selDay = null; render(); } },
-  selDay: (el) => { S.selDay = S.selDay === el.dataset.d ? null : el.dataset.d; render(); },
-  clearSel: (el, ev) => { if (ev) ev.stopPropagation(); S.selDay = null; render(); },
-  weekToSpend: (el) => { S.period = E.weekOf(E.todayISO()); S.selDay = (el && el.dataset.d) || null; go('spend'); },
+  setPKind: (el) => { S.period = E.periodOf(store(), el.dataset.v, E.todayISO()) || S.period; S.selDay = null; S.selMulti = null; render(); },
+  pShift: (el) => { const np = E.shiftPeriod(store(), S.period, Number(el.dataset.dir)); if (np) { S.period = np; S.selDay = null; S.selMulti = null; render(); } },
+  // 1.8.3: وأنت محدد أكثر من يوم، الضغطة تضيف اليوم أو تشيله. غير كذا تختار يوم واحد مثل قبل
+  selDay: (el) => {
+    const d = el.dataset.d;
+    if (S.selMulti) { if (S.selMulti.has(d)) S.selMulti.delete(d); else S.selMulti.add(d); if (!S.selMulti.size) S.selMulti = null; }
+    else S.selDay = S.selDay === d ? null : d;
+    render();
+  },
+  // الضغط المطوّل على يوم: يبدأ تحديد أكثر من يوم (ومعه اليوم المختار قبل، لو فيه)
+  selDayHold: (el) => {
+    const d = el.dataset.d; if (!d || !S.period || S.period.kind === 'year') return;
+    const first = !S.selMulti, set = S.selMulti || new Set(S.selDay ? [S.selDay] : []);
+    set.add(d); S.selMulti = set; S.selMultiKey = pKey(S.period); S.selDay = null; render();
+    if (first) toast('اضغط أي يوم ثاني تضيفه، واضغطه مرة ثانية تشيله', 3500);
+  },
+  clearSel: (el, ev) => { if (ev) ev.stopPropagation(); S.selDay = null; S.selMulti = null; render(); },
+  weekToSpend: (el) => { S.period = E.weekOf(E.todayISO()); S.selDay = (el && el.dataset.d) || null; S.selMulti = null; go('spend'); },
   accDrill: (el) => go('txs', { filters: { kind: 'all', accountId: el.dataset.id, allTime: true } }),
   allTxs: () => go('txs', { filters: { kind: 'all', allTime: true } }),
   catDrill: (el) => go('txs', { filters: { kind: 'all', categoryId: el.dataset.cat } }),
@@ -3286,7 +3330,7 @@ function cityName(id) { if (!id || id === '__unknown') return 'غير معروف
 function txCityRow(t) {
   if (!(t.direction === 'out' || t.cityId || t.suggestedCityId)) return '';
   const sc = E.suggestCity(store(), t);
-  if (sc.source === 'user') return `<div class="drow">${ico('pin')}<div class="m">📍 <b>${esc(cityName(sc.cityId))}</b>${t.cityAuto ? ` — <span class="muted">اعتمدت تلقائيًا (موقعك وقت العملية = مدينتك الحالية)</span>` : ''}</div><a data-action="cityPick" data-id="${t.id}">تغيير</a></div>`;
+  if (sc.source === 'user') return `<div class="drow">${ico('pin')}<div class="m">📍 <b>${esc(cityName(sc.cityId))}</b>${t.cityAuto ? ` — <span class="muted">اعتمدت تلقائيًا (موقعك وقت العملية = مدينتك الحالية)</span>` : ''}</div><a data-action="cityDismiss" data-id="${t.id}" style="margin-inline-end:12px">تجاهل الموقع</a><a data-action="cityPick" data-id="${t.id}">تغيير</a></div>`; // 1.8.2: «تجاهل الموقع» للعملية اللي لها مدينة
   if (sc.cityId) return `<div class="drow" style="flex-wrap:wrap">${ico('pin')}<div class="m">📍 <b>${esc(cityName(sc.cityId))}</b> — <span class="muted">${CITY_SRC_L[sc.source] || 'مقترحة'}</span></div>
     <div class="btns" style="width:100%;margin-top:6px"><button class="btn" data-action="cityApprove" data-id="${t.id}" data-c="${esc(sc.cityId)}">اعتمدها</button><button class="btn" data-action="cityPick" data-id="${t.id}">غيّرها</button><button class="btn" data-action="cityDismiss" data-id="${t.id}">تجاهل الموقع</button></div></div>`;
   const shopIg = sc.source === 'dismissed' && E.shopCityIgnoreOf(store(), t); // 1.8.0
@@ -3944,7 +3988,7 @@ function methods150() {
   <p>سقف الأغراض = الأصل إذا الرسوم مفصولة ومعروفة، وإلا الإجمالي؛ وللسحب صافي السحب بعد المعاد، والغرض المربوط بجزء ما يتجاوز قيمة الجزء. «غير مفصّل» = السقف − مجموع الأغراض، ينحسب وقت العرض وما ينحفظ.</p>
   <p><b>أرقام الصرف ما تتغير بالأغراض</b>: تبقى على تصنيف الفاتورة. <b>تحليل المنتجات</b> لكل تصنيف = الأغراض المصنفة فيه + «غير مفصّل» من فواتير التصنيف (من كل عملية تقبل أغراض: شراء، مصروف نقدي، سحب، تحويل لشخص، خارج غير معروف). فالمجموع الكلي = صرف هذي العمليات ما عدا الرسوم المفصولة (الرسوم مو جزء من الفاتورة، وتبقى في «رسوم» في الصرف)، والتوزيع على التصنيفات <b>ممكن يختلف</b> عن «صرفياتك» لأن الغرض ينحسب على تصنيفه هو (مثلًا منظفات من فاتورة بقالة تطلع تحت «منزل» في المنتجات، وتبقى «بقالة» في الصرف). السحب المقسّم: غير مفصّل كل جزء على تصنيف الجزء. نفس القاعدة في المقارنات والسنوي والمدن (مسار المنتجات).</p>
   <p><b>الاسترداد والأغراض</b>: تحدد المبلغ لكل غرض رجعته فينقص هو بس؛ اللي ما تحدده ينوزع «توزيع تقديري» بالنسبة على الباقي من الفاتورة (الأغراض وغير المفصّل)؛ الاسترداد الكامل يلغي كل الأغراض. إذا صارت الأغراض أكبر من سقف العملية (مثل لما يفصل الكشف الرسوم بعدين) تتقلص بالنسبة في التحليل.</p>
-  <h3 id="m-city">المدينة</h3><p>المدينة تخص العملية مو التاجر. الاختصار يرسل اسم المدينة بس (بدون إحداثيات) كاقتراح، وما يصير معتمد إلا بموافقتك أو بالاعتماد التلقائي. <b>الاعتماد التلقائي (1.6.1)</b>: إذا موقع الجوال وقت العملية (من الاختصار) = مدينتك الحالية، تنعتمد تلقائيًا. <b>(1.8.1) القاعدة وحدة مهما كان توقيت وصول الموقع</b>: اقتراح الموقع = مدينتك الحالية + العملية مو أونلاين + ما لها مدينة معتمدة + موقعها مو متجاهل (لا هي ولا محلها) ← تنعتمد. تنطبق لما توصل المدينة مع الرسالة، ولما تندمج الرسالة مع عملية من كشف (قبل أو بعد)، ولما توصل المدينة متأخرة بعد ما انحفظت العملية، ولما تطلع عملية من «المراجعة» عملية مستقلة، ولما تنعاد قراءة رسالتها. المدينة المختلفة عن مدينتك الحالية تبقى اقتراح، والعملية اللي لها مدينة معتمدة ما تتغير. العمليات المحفوظة قبل التحديث باقتراح غير معتمد تبقى مثل ما هي (ما ينعاد عليها الحكم). والعملية الأونلاين تبقى اقتراح لأن موقعك مو مكان المتجر: وسيلة الدفع أونلاين، أو في الرسالة كلمة من «وسيلة الدفع: أونلاين» حتى لو الدفع Apple Pay (مثل اشتراكات Apple)، أو اسم المحل على شكل موقع (مثل APPLE.COM/BILL)، لأي نوع عملية (شراء أو سداد فاتورة…). بعد الاعتماد ما تتغير إلا بيدك، حتى لو غيّرت مدينتك الحالية بعدين. «تجاهل الموقع»: الموقع مو مهم للعملية، فتشيل علامة «بدون مدينة» وتنحسب «غير محددة» في تحليل المدن. <b>(1.8.0) للمحل كله</b>: لو العملية لها محل يسألك: «هذه العملية فقط»، «عمليات هذا المحل القادمة» (هذي وكل عملية جاية منه)، أو «السابقة والقادمة» (كل عملياته، حتى اللي لها مدينة معتمدة تنشال مدينتها، بعد تأكيد بعددها). بعدها أي عملية جديدة من المحل تجي متجاهلة حتى لو الجوال سجّل لها موقع، وتجاهل المحل يغلب مدينة أي فترة. تحديد مدينة بيدك لعملية وحدة منه يمشي ويبقى. صفحة المحل فيها «الموقع متجاهل لهذا المحل» و«رجّعه»: «وقّف التجاهل للعمليات الجديدة بس» (القديمة تبقى متجاهلة)، أو «رجّع كل شي مثل ما كان» (المدن اللي انشالت ترجع). السحب النقدي والمصروف النقدي بدون محل: للعملية نفسها بس. دمج محلين: إعداد المحل الباقي يمشي على الجاي، ومدن عمليات المحل المدموج ما تنشال إلا بموافقتك بعد ما يوريك عددها ومدنها (1.8.1، التفصيل في «أسماء المحلات»). و«تجاهل الموقع» في «تحديد» يتجاهل المحدد كله مرة وحدة. ترتيب الثقة: المعتمدة ← اقتراح الموقع ← مدينتك الحالية (اقتراح احتياطي فقط) ← غير معروفة. اقتراح جديد ما يغيّر مدينة معتمدة. لما تعتمد مدينة غير مدينتك الحالية يسألك: تجعلها الحالية؟ («لا تسألني الآن» = ما يسألك لمدة يوم). الأسماء تتوحد بالرقم الثابت والأسماء البديلة، والمدينة الجديدة من الموقع تنضاف بدل ما تنتجاهل. «استخدام موقعي الحالي» في الإدخال اليدوي يلقى أقرب مدينة من جدول مدن على جهازك (مركز كل مدينة ونصف قطر تقريبي)، بدون أي خدمة خارجية، وما تنحفظ الإحداثيات. إذا اندمجت رسالة وكشف، مدينة الرسالة تبقى. <b>مدينة متأخرة</b>: الاختصار يرسل الرسالة أول ثم المدينة. إذا التطبيق سحب الرسالة قبل ما توصل مدينتها (مثلًا كان مفتوح وقتها)، الصندوق يحفظ المدينة مستقلة برقم الرسالة نفسه، والتطبيق يسحبها في الجلب الجاي ويربطها بنفس الرسالة وعمليتها (أو المعلّقة في المراجعة) كاقتراح موقع: ما تغيّر مدينة معتمدة ولا اقتراح موجود، ولو انطبقت عليها قاعدة الاعتماد التلقائي فوق تنعتمد (1.8.1). وبعد ما تنحفظ على جهازك يؤكد استلامها فتنحذف من الصندوق. تحديث مدينة ما انسحب ينحذف من الصندوق بعد 7 أيام.</p>
+  <h3 id="m-city">المدينة</h3><p>المدينة تخص العملية مو التاجر. الاختصار يرسل اسم المدينة بس (بدون إحداثيات) كاقتراح، وما يصير معتمد إلا بموافقتك أو بالاعتماد التلقائي. <b>الاعتماد التلقائي (1.6.1)</b>: إذا موقع الجوال وقت العملية (من الاختصار) = مدينتك الحالية، تنعتمد تلقائيًا. <b>(1.8.1) القاعدة وحدة مهما كان توقيت وصول الموقع</b>: اقتراح الموقع = مدينتك الحالية + العملية مو أونلاين + ما لها مدينة معتمدة + موقعها مو متجاهل (لا هي ولا محلها) ← تنعتمد. تنطبق لما توصل المدينة مع الرسالة، ولما تندمج الرسالة مع عملية من كشف (قبل أو بعد)، ولما توصل المدينة متأخرة بعد ما انحفظت العملية، ولما تطلع عملية من «المراجعة» عملية مستقلة، ولما تنعاد قراءة رسالتها. المدينة المختلفة عن مدينتك الحالية تبقى اقتراح، والعملية اللي لها مدينة معتمدة ما تتغير. العمليات المحفوظة قبل التحديث باقتراح غير معتمد تبقى مثل ما هي (ما ينعاد عليها الحكم). والعملية الأونلاين تبقى اقتراح لأن موقعك مو مكان المتجر: وسيلة الدفع أونلاين، أو في الرسالة كلمة من «وسيلة الدفع: أونلاين» حتى لو الدفع Apple Pay (مثل اشتراكات Apple)، أو اسم المحل على شكل موقع (مثل APPLE.COM/BILL)، لأي نوع عملية (شراء أو سداد فاتورة…). بعد الاعتماد ما تتغير إلا بيدك، حتى لو غيّرت مدينتك الحالية بعدين. «تجاهل الموقع»: الموقع مو مهم للعملية، فتشيل علامة «بدون مدينة» وتنحسب «غير محددة» في تحليل المدن. <b>(1.8.3)</b> الزر يطلع كمان للعملية اللي لها مدينة معتمدة (جنب «تغيير»): مدينتها تنشال وتصير متجاهلة، وترجّع لها مدينة متى ما بغيت من «حدد». <b>(1.8.0) للمحل كله</b>: لو العملية لها محل يسألك: «هذه العملية فقط»، «عمليات هذا المحل القادمة» (هذي وكل عملية جاية منه)، أو «السابقة والقادمة» (كل عملياته، حتى اللي لها مدينة معتمدة تنشال مدينتها، بعد تأكيد بعددها). بعدها أي عملية جديدة من المحل تجي متجاهلة حتى لو الجوال سجّل لها موقع، وتجاهل المحل يغلب مدينة أي فترة. تحديد مدينة بيدك لعملية وحدة منه يمشي ويبقى. صفحة المحل فيها «الموقع متجاهل لهذا المحل» و«رجّعه»: «وقّف التجاهل للعمليات الجديدة بس» (القديمة تبقى متجاهلة)، أو «رجّع كل شي مثل ما كان» (المدن اللي انشالت ترجع). السحب النقدي والمصروف النقدي بدون محل: للعملية نفسها بس. دمج محلين: إعداد المحل الباقي يمشي على الجاي، ومدن عمليات المحل المدموج ما تنشال إلا بموافقتك بعد ما يوريك عددها ومدنها (1.8.1، التفصيل في «أسماء المحلات»). و«تجاهل الموقع» في «تحديد» يتجاهل المحدد كله مرة وحدة. ترتيب الثقة: المعتمدة ← اقتراح الموقع ← مدينتك الحالية (اقتراح احتياطي فقط) ← غير معروفة. اقتراح جديد ما يغيّر مدينة معتمدة. لما تعتمد مدينة غير مدينتك الحالية يسألك: تجعلها الحالية؟ («لا تسألني الآن» = ما يسألك لمدة يوم). الأسماء تتوحد بالرقم الثابت والأسماء البديلة، والمدينة الجديدة من الموقع تنضاف بدل ما تنتجاهل. «استخدام موقعي الحالي» في الإدخال اليدوي يلقى أقرب مدينة من جدول مدن على جهازك (مركز كل مدينة ونصف قطر تقريبي)، بدون أي خدمة خارجية، وما تنحفظ الإحداثيات. إذا اندمجت رسالة وكشف، مدينة الرسالة تبقى. <b>مدينة متأخرة</b>: الاختصار يرسل الرسالة أول ثم المدينة. إذا التطبيق سحب الرسالة قبل ما توصل مدينتها (مثلًا كان مفتوح وقتها)، الصندوق يحفظ المدينة مستقلة برقم الرسالة نفسه، والتطبيق يسحبها في الجلب الجاي ويربطها بنفس الرسالة وعمليتها (أو المعلّقة في المراجعة) كاقتراح موقع: ما تغيّر مدينة معتمدة ولا اقتراح موجود، ولو انطبقت عليها قاعدة الاعتماد التلقائي فوق تنعتمد (1.8.1). وبعد ما تنحفظ على جهازك يؤكد استلامها فتنحذف من الصندوق. تحديث مدينة ما انسحب ينحذف من الصندوق بعد 7 أيام.</p>
   <h3 id="m-cities">تحليل المدن</h3><p>الافتراضي في شاشة المدن ومقارنة مدينتين والتنقل للعمليات: <b>المدن المعتمدة فقط</b>، وهو الرقم الرسمي. عملية لها اقتراح موقع ما اعتمدته تنحسب «غير محددة»، وما تدخل مدينتها إلا إذا اخترت «تضمين اقتراحات الموقع» (رقم تقديري). مدينتك الحالية ما تدخل التحليل أبدًا.</p>
   <h3 id="m-groups">المجموعات: المخفية والمنتهية والفرعية (1.8.0)</h3><p><b>حالة المجموعة</b>: نشطة، أو <b>مخفية</b> (ما تطلع في اختيار المجموعات وترجع بضغطة «إظهار»، وتنبيه ميزانيتها مستمر)، أو <b>منتهية</b> (تنبيه ميزانيتها يوقف، وترجع بعد تأكيد «متأكد من إعادة تفعيلها؟»، وإعادة التفعيل تمسح تاريخ نهايتها). الإخفاء: ضغط مطوّل على المجموعة في نافذة الاختيار، أو «إخفاء» في صفحة «المجموعات». الإنهاء: «إنهاء المجموعة» في تعديلها، أو تلقائيًا بعد ما يعدي تاريخ «إلى». الحالة ما تغيّر أي رقم: عمليات المجموعة ومجموعها باقية. مع التحديث: المجموعة اللي عدّى تاريخ «إلى» حقها (أو كنت شايل عنها «مفعّلة») صارت «منتهية» مباشرة.</p>
   <p>«عرض المجموعات المخفية (N)» يطلع في كل مكان تختار فيه مجموعة (العملية، الغرض، الفترات، الفلاتر) لو عندك مخفية أو منتهية، ويعرضها بعلامتها. اختيار مخفية لعملية: تنضاف وتبقى المجموعة مخفية. اختيار منتهية: «أضف العملية وخلّها منتهية»، «أضف وأعد تفعيلها»، أو «إلغاء». صفحة «المجموعات» قسمين: «النشطة» فوق و«غير النشطة» تحت.</p>
@@ -5324,6 +5368,19 @@ const CSS170 = `
 body.lock170{position:fixed;left:0;right:0;overflow:hidden}
 #main.sw170{transition:none}
 #main.sw170b{transition:transform .22s ease-out}
+.chart .cview{overflow:hidden;position:relative;margin:-4px -8px;padding:4px 8px;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+.chart .ctrack{position:relative}
+.chart .ctrack.anim{transition:transform .24s cubic-bezier(.2,.7,.2,1)}
+.chart .cpage.nx,.chart .cpage.pv{position:absolute;top:0;left:0;width:100%}
+.chart .cpage.nx{transform:translateX(calc(-100% - 16px))}
+.chart .cpage.pv{transform:translateX(calc(100% + 16px))}
+.chart svg{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+@media (prefers-reduced-motion:reduce){.chart .ctrack.anim{transition:none}}
+.sheet h3.txhd{position:sticky;top:-18px;z-index:5;background:#fff;margin:-18px 0 10px;padding:22px 0 10px;box-shadow:0 8px 10px -10px rgba(20,22,31,.22)}
+.sheet h3.txhd .txpos{white-space:nowrap}
+.sheet h3.txhd .hsave{flex:none;min-height:36px;padding:6px 18px;font-size:14.5px;border-radius:18px}
+.sheet h3.txhd .hbk{flex:none;min-height:36px;padding:6px 10px;font-size:13px}
+@media (max-width:360px){.sheet h3.txhd{gap:5px}.sheet h3.txhd .hsave{padding:6px 12px;font-size:14px}.sheet h3.txhd .hbk{padding:6px 5px;font-size:11.5px;gap:2px}.sheet h3.txhd .hbk .i{width:14px;height:14px}}
 .txpos{text-align:center;color:var(--ink-3);font-weight:600;font-size:13.5px}
 .hero .tools button.txtb{width:auto;border-radius:999px;padding:0 12px;font-size:13px;font-weight:600}
 .empty-day{padding:10px 0;text-align:center}
@@ -5373,10 +5430,10 @@ async function txNavGo(dir) {
 // صرفياتك: السحب يمين/يسار يتنقل بين الأيام (وبين الأشهر في «سنوي»)، ويعبر للأسبوع أو الدورة أو السنة المجاورة. بدون يوم مختار: الفترة كلها
 function spendStep(dir) {
   const st = store(), today = E.todayISO(), p = S.period; if (!p) return false;
-  const sel = S.selDay;
+  const sel = S.selMulti ? null : S.selDay; // 1.8.3: وأنت محدد أكثر من يوم، السحب ينقل الفترة (والتحديد ينشال)
   if (!sel) {
     const np = E.shiftPeriod(st, p, dir); if (!np || np.start > today) return false;
-    S.period = np; return true;
+    S.period = np; S.selMulti = null; return true;
   }
   if (p.kind === 'year') { // الأشهر
     let [y, m] = sel.split('-').map(Number); m += dir; if (m > 12) { m = 1; y++; } if (m < 1) { m = 12; y--; }
@@ -5415,7 +5472,7 @@ function closeTopSheet() {
   if (x) x.click(); else if (sh.closest('#sheet2')) { if (S.ask2Resolve) finishAsk2(null); else if (S.pickResolve) finishPick(null); else if (S.cityResolve) finishCity(null); else if (S.groupResolve) finishGroups(null); else if (S.rateResolve) finishRate(null); } else closeSheet(null);
 }
 document.addEventListener('touchstart', (ev) => {
-  if (!S.store || ev.touches.length !== 1) { G.t = null; return; }
+  if (!S.store || ev.touches.length !== 1) { if (G.t && G.t.ctr) chartReset(G.t.ctr); G.t = null; return; }
   const tp = ev.touches[0], target = ev.target, sh = topSheetEl();
   const g = G.t = { x0: tp.clientX, y0: tp.clientY, t0: Date.now(), axis: null, dx: 0, dy: 0, target };
   if (sh) {
@@ -5442,8 +5499,54 @@ document.addEventListener('touchmove', (ev) => {
   if (g.kind === 'bg') { ev.preventDefault(); return; } // الخلفية ما تتحرك
   if (g.pull) { ev.preventDefault(); const d = Math.max(0, g.dy); g.sheet.classList.add('drag'); g.sheet.style.transform = `translateY(${d}px)`; return; }
   if (g.swipe) { ev.preventDefault(); g.sheet.classList.add('drag'); g.sheet.style.transform = `translateX(${g.dx * 0.35}px)`; g.sheet.style.opacity = String(1 - Math.min(0.35, Math.abs(g.dx) / 900)); return; }
-  if (g.spend) { ev.preventDefault(); const m = $('main'); m.classList.add('sw170'); m.classList.remove('sw170b'); m.style.transform = `translateX(${g.dx}px)`; }
+  if (g.spend) { ev.preventDefault(); chartDrag(g); } // 1.8.3: الأعمدة تتحرك لحالها، والصفحة ثابتة
 }, { passive: false });
+/* 1.8.3: السحب في «صرفياتك». الأعمدة بس تمشي مع الإصبع، وأعمدة الفترة اللي جنبها تدخل من الجهة الثانية (الأحدث من اليسار، والأقدم من اليمين،
+   مثل ترتيب الأيام في الرسم). لو ما فيه فترة جنبها، أو يوم واحد محدد (السحب ينقل التحديد لليوم اللي جنبه)، الأعمدة تتحرك شوي وترجع. */
+function chartPages() {
+  const tr = document.querySelector('#main .ctrack'); if (!tr) return null;
+  if (!tr.dataset.ready) {
+    tr.dataset.ready = '1';
+    const st = store(), p = S.period, today = E.todayISO(), single = !!S.selDay && !S.selMulti;
+    if (p && !single) [-1, 1].forEach(dir => {
+      const np = E.shiftPeriod(st, p, dir); if (!np || np.start > today) return;
+      const el = document.createElement('div'); el.className = 'cpage ' + (dir > 0 ? 'nx' : 'pv'); el.setAttribute('aria-hidden', 'true');
+      el.innerHTML = chartSvg(E.spendSeries(st, np, np.kind === 'year' ? 'month' : 'day'), np, { bare: true, noSel: true });
+      tr.appendChild(el);
+    });
+  }
+  return tr;
+}
+const CHART_GAP = 16; // فراغ بين صفحة الفترة والصفحة اللي جنبها (نفس الرقم في الـCSS)
+function chartDrag(g) {
+  const tr = chartPages(); if (!tr) return;
+  const has = !!tr.querySelector(g.dx > 0 ? '.cpage.nx' : '.cpage.pv');
+  g.ctr = tr; tr.classList.remove('anim'); tr.style.transform = `translateX(${has ? g.dx : g.dx * 0.22}px)`;
+}
+// الأعمدة ترجع مكانها. صفحات الجنب تبقى (صحيحة لين تنرسم الصفحة من جديد)
+function chartReset(tr) {
+  if (!tr || !document.body.contains(tr)) return;
+  tr.classList.add('anim'); tr.style.transform = '';
+}
+function chartRelease(g, fast) {
+  const tr = g.ctr || document.querySelector('#main .ctrack'), dir = g.dx > 0 ? 1 : -1;
+  const w = tr ? (tr.getBoundingClientRect().width || 320) : (window.innerWidth || 360);
+  const want = Math.abs(g.dx) > w * 0.3 || (fast && Math.abs(g.dx) > 40);
+  const single = !!S.selDay && !S.selMulti, none = dir > 0 ? 'ما فيه أيام جاية' : 'ما فيه قبلها';
+  if (!want) return chartReset(tr);
+  const paged = !single && !!tr && !!tr.querySelector(dir > 0 ? '.cpage.nx' : '.cpage.pv');
+  if (!spendStep(dir)) { chartReset(tr); return toast(none, 1400); }
+  render(); // الفترة والأرقام تتغير الحين، فأي ضغطة بعدها تكون على الفترة الجديدة
+  if (!paged) return;
+  // الحركة تكمل على الرسم الجديد: يبدأ من مكان الإصبع (والفترة اللي كنت عليها جنبه) وينزلق لمكانه
+  const nt = document.querySelector('#main .ctrack');
+  if (!nt || (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches)) return;
+  chartPages();
+  const step = (nt.getBoundingClientRect().width || w) + CHART_GAP;
+  nt.classList.remove('anim'); nt.style.transform = `translateX(${g.dx - dir * step}px)`;
+  void nt.offsetWidth; // يثبّت نقطة البداية قبل الحركة
+  nt.classList.add('anim'); nt.style.transform = '';
+}
 function endGesture() {
   const g = G.t; G.t = null; if (!g) return;
   if (g.lp) { clearTimeout(g.lp); g.lp = null; }
@@ -5461,15 +5564,10 @@ function endGesture() {
     if (Math.abs(g.dx) > 70 || (fast && Math.abs(g.dx) > 40)) txNavGo(g.dx > 0 ? 1 : -1).then(ok => { if (ok === false) toast(g.dx > 0 ? 'هذي آخر وحدة' : 'هذي أول وحدة', 1400); });
     return;
   }
-  if (g.spend) {
-    const m = $('main'), w = window.innerWidth || 360, go1 = Math.abs(g.dx) > w / 2 || (fast && Math.abs(g.dx) > 50);
-    m.classList.remove('sw170'); m.classList.add('sw170b'); m.style.transform = '';
-    setTimeout(() => m.classList.remove('sw170b'), 260);
-    if (go1) { if (spendStep(g.dx > 0 ? 1 : -1)) render(); else toast(g.dx > 0 ? 'ما فيه أيام جاية' : 'ما فيه قبلها', 1400); }
-  }
+  if (g.spend) chartRelease(g, fast);
 }
 document.addEventListener('touchend', endGesture, { passive: true });
-document.addEventListener('touchcancel', () => { const g = G.t; if (g && g.sheet) { g.sheet.classList.remove('drag'); g.sheet.style.transform = ''; g.sheet.style.opacity = ''; } const m = $('main'); if (m) m.style.transform = ''; if (g && g.lp) clearTimeout(g.lp); G.t = null; }, { passive: true });
+document.addEventListener('touchcancel', () => { const g = G.t; if (g && g.sheet) { g.sheet.classList.remove('drag'); g.sheet.style.transform = ''; g.sheet.style.opacity = ''; } const m = $('main'); if (m) m.style.transform = ''; if (g && g.ctr) chartReset(g.ctr); if (g && g.lp) clearTimeout(g.lp); G.t = null; }, { passive: true });
 // الكمبيوتر: زر الفأرة اليمين على عملية = تحديد
 document.addEventListener('contextmenu', (ev) => {
   if (!S.store || S.view !== 'txs' || S.sel) return;
@@ -5955,6 +6053,8 @@ Object.assign(A, {
   cityDismiss: async (el) => {
     const st = store(), id = el.dataset.id, t = st.get('transactions', id); if (!t) return;
     const m = t.merchantId && ['Payment', 'CashExpense', 'CashWithdrawal'].includes(t.transactionType) && t.direction === 'out' ? st.get('merchants', t.merchantId) : null;
+    const typed = S.sheetKind === 'tx' && S.sheetTxId === id && $('s_note') ? $('s_note').value : null; // 1.8.3: ملاحظة كتبتها وما حفظتها تبقى في الخانة
+    const reopen = () => { if (typed !== null && store().get('transactions', id)) S.txDraft = { id, note: typed }; afterTx(id); };
     let scope = 'this';
     if (m && !m.cityIgnore) {
       scope = await ask2(`${ask2Head('تجاهل الموقع')}<p class="small">المحل: <b>${esc(E.merchantName(m))}</b></p><div class="list">
@@ -5963,13 +6063,13 @@ Object.assign(A, {
         <div class="it" data-action="answer2" data-val="all"><div class="m"><div class="t">عمليات هذا المحل السابقة والقادمة</div><div class="s">كل عملياته، حتى اللي لها مدينة (تنشال مدينتها).</div></div></div></div>`);
       if (!scope) return;
     }
-    if (scope === 'this') { E.dismissTxCity(st, id); await persist('تجاهل الموقع'); render(); afterTx(id); return toast('تمام، الموقع مو مهم لهذي العملية'); }
+    if (scope === 'this') { E.dismissTxCity(st, id); await persist('تجاهل الموقع'); render(); reopen(); return toast('تمام، الموقع مو مهم لهذي العملية'); }
     if (scope === 'all') {
       const c = E.shopCityCounts(st, m.id);
       if (!await confirm2('تجاهل الموقع للمحل', `<b>${cnt(c.total, 'op')}</b> من «${esc(E.merchantName(m))}» بتصير متجاهلة الموقع${c.withCity ? `، منها <b>${cnt(c.withCity, 'op')} لها مدينة بتنشال</b>` : ''}. وكل عملية جاية منه تجي متجاهلة. متأكد؟`, 'تجاهل')) return;
     }
     const r = E.setShopCityIgnore(st, m.id, scope, id);
-    await persist('تجاهل الموقع للمحل'); render(); afterTx(id);
+    await persist('تجاهل الموقع للمحل'); render(); reopen();
     toast(scope === 'all' ? `تمام: ${cnt(r.applied, 'op')} صارت متجاهلة، والجاية تجي متجاهلة. ترجّعه من صفحة المحل` : 'تمام: هذي العملية والجاية من المحل متجاهلة. ترجّعه من صفحة المحل', 6000);
   },
   shopCityOn: async (el) => {
@@ -6320,6 +6420,9 @@ const FAQ = [
   { id: 'num-compare', t: 'nums', q: 'المقارنة في «صرفياتك» مع وش تقارن؟ ووش يعني «ما فيه عمليات في الفترة السابقة»؟', k: 'مقارنة اكثر اقل الفترة السابقة نسبة سهم ما فيه عمليات بيانات ناقصة',
     p: 'الفترة اللي ما انتهت تنقارن أيامها اللي مضت بنفس عدد الأيام من الفترة اللي قبلها. والفترة المنتهية تنقارن باللي قبلها كاملة.',
     n: 'المقارنة تطلع دايمًا. إلا لو الفترة السابقة ما فيها ولا عملية، فيطلع «ما فيه عمليات في الفترة السابقة». ولو فيه حساب كشوفه ما تغطي الفترتين كاملة يطلع تحتها «قد تكون بيانات هذه الفترة غير مكتملة.»: ما تمنع المقارنة، واضغطها تشوف الحساب والأيام الناقصة.', go: 'spend', m: 'm-spend' },
+  { id: 'num-days', t: 'nums', q: 'كيف أشوف مجموع ومتوسط صرفي في أيام معينة؟', k: 'متوسط ايام معينة تحديد اكثر من يوم ضغط مطول مجموع ايام نهاية الاسبوع',
+    s: ['افتح «صرفياتك» واختر «أسبوعي» أو «الدورة».', 'اضغط مطوّل على يوم في الرسم.', 'اضغط أي يوم ثاني تضيفه، واضغطه مرة ثانية تشيله.', 'يطلع مجموعها ومتوسطها وتصنيفاتها وعملياتها. × يلغي التحديد.'],
+    n: 'المتوسط = المجموع ÷ عدد الأيام المحددة، واليوم اللي صرفه صفر ينعد.', go: 'spend', m: 'm-spend' },
   { id: 'num-cmp2', t: 'nums', q: 'كيف أقارن فترتين أو مدينتين؟', k: 'مقارنات فترتين مدينتين شهر بشهر عبر الفترات',
     s: ['افتح «المزيد» ← «التحليل والتخطيط» ← «المقارنات».', 'اختر: «فترتين»، «مدينتين»، أو «عبر الفترات».', 'واختر المسار: «العمليات المالية» أو «المنتجات».'], go: 'compare', m: 'm-nec' },
   { id: 'num-income', t: 'nums', q: 'وين أشوف دخلي والفائض وأرصدة حساباتي؟', k: 'دخل راتب فائض رصيد ارصدة باقي كم بقى',
@@ -6350,6 +6453,9 @@ const FAQ = [
     n: 'بعدها كل عملية جاية من المحل تجي متجاهلة حتى لو الجوال سجّل موقع. وتقدر تحدد مدينة بيدك لعملية وحدة منه.', go: 'merchants', m: 'm-city' },
   { id: 'city-shopback', t: 'city', q: 'كيف أرجّع الموقع لمحل تجاهلته؟', k: 'رجع الموقع الغاء تجاهل المحل رجعه',
     s: ['افتح «المزيد» ← «المحلات» واضغط المحل.', 'يطلع «الموقع متجاهل لهذا المحل»: اضغط «رجّعه».', 'اختر: «وقّف التجاهل للعمليات الجديدة بس»، أو «رجّع كل شي مثل ما كان».'], go: 'merchants', m: 'm-city' },
+  { id: 'city-undo', t: 'city', q: 'حددت مدينة لعملية وأبي أتجاهل موقعها، كيف؟', k: 'تجاهل الموقع عملية لها مدينة معتمدة شيل المدينة الغاء المدينة',
+    s: ['افتح العملية.', 'في سطر المدينة اضغط «تجاهل الموقع» (جنب «تغيير»).', 'لو لها محل، اختر «هذه العملية فقط».'],
+    n: 'المدينة تنشال والعملية تصير متجاهلة الموقع. ترجّع لها مدينة متى ما بغيت من «حدد».', m: 'm-city' },
   { id: 'city-bulk', t: 'city', q: 'كيف أتجاهل الموقع لمجموعة عمليات مرة وحدة؟', k: 'تجاهل الموقع تحديد جماعي كثير عمليات مرة وحدة',
     s: ['افتح «العمليات».', 'اضغط «تحديد» وحدد العمليات.', 'اضغط «تجاهل الموقع» تحت ووافق.'],
     n: 'اللي لها مدينة تنشال مدينتها وتصير متجاهلة.', go: 'txs', m: 'm-city' },

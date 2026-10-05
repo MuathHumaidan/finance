@@ -3649,6 +3649,27 @@ function spendSeries(store, period, bucket) {
   buckets.forEach(b => { b.total = round2(b.total); Object.keys(b.cats).forEach(k => { b.cats[k] = round2(b.cats[k]); }); });
   return { buckets, total: round2(buckets.reduce((s, b) => s + b.total, 0)) };
 }
+/* 1.8.3: أيام محددة من الرسم في «صرفياتك» (ما يلزم تكون ورا بعض).
+   المجموع = مجموع صرف كل يوم (نفس رقم عموده في الرسم). المتوسط = المجموع ÷ عدد الأيام المحددة (اليوم اللي صرفه صفر ينعد).
+   التصنيفات = نفس توزيع «وين راحت الدراهم؟» لكل يوم، مجموعة. */
+function computeDays(store, dates) {
+  const days = Array.from(new Set((dates || []).filter(d => /^\d{4}-\d{2}-\d{2}$/.test(String(d))))).sort();
+  const cats = new Map(), perDay = []; let spend = 0;
+  days.forEach(d => {
+    const r = computePeriod(store, { start: d, end: d, kind: 'custom' });
+    perDay.push({ date: d, spend: r.spend }); spend = round2(spend + r.spend);
+    r.categories.forEach(c => {
+      const k = c.categoryId || '__none';
+      if (!cats.has(k)) cats.set(k, { categoryId: c.categoryId, amount: 0, count: 0, subs: new Map(), txIds: [] });
+      const m = cats.get(k); m.amount = round2(m.amount + c.amount);
+      c.txIds.forEach(id => { if (!m.txIds.includes(id)) { m.txIds.push(id); m.count++; } });
+      c.subs.forEach(s => { const sk = s.subcategoryId || '__none'; m.subs.set(sk, round2((m.subs.get(sk) || 0) + s.amount)); });
+    });
+  });
+  const categories = Array.from(cats.values()).sort((a, b) => b.amount - a.amount)
+    .map(c => Object.assign(c, { subs: Array.from(c.subs.entries()).map(([k, v]) => ({ subcategoryId: k === '__none' ? null : k, amount: v })).sort((a, b) => b.amount - a.amount) }));
+  return { days, count: days.length, spend, average: days.length ? round2(spend / days.length) : 0, perDay, categories };
+}
 // المقارنة بنفس عدد الأيام: الفترة المفتوحة تُقارن أيامها اللي مضت (حتى اليوم) بنفس العدد من بداية الفترة السابقة؛ المكتملة تُقارن كاملة
 function comparePeriods(store, period, today) {
   today = today || todayISO();
@@ -6585,12 +6606,12 @@ function faqSearch(list, query, limit) {
 }
 
 const Engine = {
-  version: '1.8.2', round2, parseNum, cellToISO, cleanText, sha256Hex, uid, todayISO, addDays, daysBetween, isoDate,
+  version: '1.8.3', round2, parseNum, cellToISO, cleanText, sha256Hex, uid, todayISO, addDays, daysBetween, isoDate,
   CATEGORY_SEED, buildCategoryRecords, Store, STORE_NAMES, DEFAULT_SETTINGS,
   sanitizeText, sanitizeFilename, fingerprintIban, fingerprintAccountNo, fingerprintNum, matchesOwner, normMerchant,
   detectTemplate, signatureOf, parseAlinmaAccount, interpretAlinmaLine, parseAlinmaCard, cardBalanceCheck,
   prepareImport, commitImport, deleteImport, findDuplicates, scorePair, pairTransfers,
-  listCycles, currentCycle, previousPeriod, weekOf, yearOf, cycleOf, periodOf, shiftPeriod, spendParts, spendIn, spendSeries, comparePeriods, compareDay, coverageFor,
+  listCycles, currentCycle, previousPeriod, weekOf, yearOf, cycleOf, periodOf, shiftPeriod, spendParts, spendIn, spendSeries, computeDays, comparePeriods, compareDay, coverageFor,
   computePeriod, accountBalances, catName, effective, isCommitmentCat, spendEffect, feeOf,
   saveCategory, deleteCategory, categoryUsage, liveCat, PROTECTED_CATS,
   parseQuickEntry, addManual, ensureCashAccount, cashBalance, reconcileCash, mergeInto,
