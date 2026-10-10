@@ -4704,7 +4704,8 @@ function findProduct(store, name) {
 // اقتراح المنتجات: الاسم والتصنيف وآخر سعر وحدة وآخر كمية. الاقتراح ما يغيّر أي قيمة إلا إذا اخترته
 function productSuggest(store, text, limit) {
   const k = normProduct(text); if (!k) return [];
-  return store.all('products').filter(p => (p.useCount || 0) > 0 && (p.normName.includes(k) || (p.aliases || []).some(a => normProduct(a).includes(k))))
+  // 1.8.7: المنتج اللي جاك من ملف مختار يطلع في الاقتراحات حتى لو ما اشتريته للحين
+  return store.all('products').filter(p => ((p.useCount || 0) > 0 || p.fromFile) && (p.normName.includes(k) || (p.aliases || []).some(a => normProduct(a).includes(k))))
     .sort((a, b) => (Number(b.normName.startsWith(k)) - Number(a.normName.startsWith(k))) || ((b.useCount || 0) - (a.useCount || 0)))
     .slice(0, limit || 6).map(p => ({ id: p.id, name: p.name, productCategoryId: (p.lastCategoryId && store.get('categories', p.lastCategoryId) ? p.lastCategoryId : p.productCategoryId) || null, lastUnitPrice: p.lastUnitPrice, lastQty: p.lastQty, lastRating: p.lastRating || null, avgRating: p.avgRating || null, lastSeenAt: p.lastSeenAt, useCount: p.useCount }));
 }
@@ -4718,7 +4719,16 @@ function refreshProduct(store, productId) {
     if (!last || k >= last.k) last = { k, date: txDate(t), i, t };
   }));
   p.useCount = n;
-  if (last) Object.assign(p, { lastUnitPrice: last.i.unitPrice, lastQty: last.i.qty, lastSeenAt: last.date, lastMerchantId: last.t.merchantId || null, lastRating: last.i.rating || null, lastCategoryId: last.i.catFollow ? null : (last.i.productCategoryId || null) });
+  // 1.8.7: تصنيف اخترته «من الملف» (catSetAt) ما يرجع عنه بأغراض سجلتها قبل الاستيراد: التصنيف ياخذ من آخر غرض سجلته أو غيّرت تصنيفه بعده (حتى لو تاريخ عمليته أقدم)، ولو ما فيه يبقى
+  const catOf = (x) => (x.i.catFollow ? null : (x.i.productCategoryId || null));
+  let lastCat = last ? catOf(last) : null;
+  if (last && p.catSetAt) {
+    let nw = null, ex = null; // ex: آخر غرض (من الجديدة) له تصنيف محدد. حفظ غرض قديم يكتب تصنيفه في المنتج، فيرجع هنا لتصنيف الملف لو ما فيه
+    store.all('transactions').forEach(t => itemsOf(t).forEach(i => { if (i.productId !== p.id || (String(i.createdAt || '') < p.catSetAt && String(i.catAt || '') < p.catSetAt)) return; const k = (txDate(t) || '') + (t.time || '') + (i.createdAt || ''); if (!nw || k >= nw.k) nw = { k, i }; if (!i.catFollow && i.productCategoryId && (!ex || k >= ex.k)) ex = { k, i }; }));
+    lastCat = nw ? catOf(nw) : (p.lastCategoryId || null);
+    if (ex) p.productCategoryId = ex.i.productCategoryId; else if (p.catSetTo !== undefined) p.productCategoryId = p.catSetTo;
+  }
+  if (last) Object.assign(p, { lastUnitPrice: last.i.unitPrice, lastQty: last.i.qty, lastSeenAt: last.date, lastMerchantId: last.t.merchantId || null, lastRating: last.i.rating || null, lastCategoryId: lastCat });
   // 1.6.0: متوسط التقييم (المقيّمة بس) وعددها
   const rs = []; store.all('transactions').forEach(t => itemsOf(t).forEach(i => { if (i.productId === p.id && i.rating) rs.push(i.rating); }));
   p.ratingCount = rs.length; p.avgRating = rs.length ? Math.round(rs.reduce((a, b) => a + b, 0) / rs.length * 10) / 10 : null;
@@ -5046,6 +5056,7 @@ function saveItem(store, txId, d, itemId) {
   const v = readItemInput(d); if (v.error) return v;
   const cur = (t.items || []).map(i => Object.assign({}, i));
   const old = itemId ? cur.find(i => i.id === itemId) : null; if (itemId && !old) return { error: 'missing' };
+  const oldCat = old ? { pc: old.productCategoryId || null, follow: !!old.catFollow } : null;
   // 1.6.0: التصنيف من القائمة الموحدة. الحقول اللي ما انرسلت (مثل الصف السريع) تبقى على قيمتها
   const { pc, follow } = itemCatInput(store, d, old);
   const partId = t.transactionType === 'CashWithdrawal' ? (d.partId === undefined ? (old ? old.partId || null : null) : (d.partId || null)) : null;
@@ -5059,6 +5070,7 @@ function saveItem(store, txId, d, itemId) {
     const al = round2(linkedRefunds(store, t.id).reduce((s, r) => s + (r.refundItemAllocations || []).filter(a => a.itemId === it.id).reduce((q, a) => q + Number(a.amount), 0), 0));
     if (it.total < al - 0.004) return { error: 'refund_alloc', allocated: al };
   }
+  if (oldCat && (oldCat.pc !== (it.productCategoryId || null) || oldCat.follow !== !!it.catFollow)) it.catAt = new Date().toISOString();
   const prevProduct = old ? old.productId : null;
   it.productId = productFor(store, v.name, it.catFollow ? null : pc).id;
   t.items = next; t.updatedAt = new Date().toISOString(); store.put('transactions', t);
@@ -5084,6 +5096,7 @@ function saveItems(store, txId, rows) {
     const rating = d.rating === undefined ? (old ? old.rating || null : null) : readRating(d.rating);
     const it = Object.assign(old ? Object.assign({}, old) : { id: 'it-' + uid().replace(/[^a-z0-9]/gi, '').slice(0, 12), createdAt: new Date().toISOString() },
       v, { productCategoryId: pc, catFollow: follow, rating, discount: d.discount === undefined ? !!(old && old.discount) : !!d.discount, note: d.note === undefined ? (old ? old.note || '' : '') : String(d.note || '').slice(0, 120), groupIds, partId });
+    if (old && ((old.productCategoryId || null) !== (it.productCategoryId || null) || !!old.catFollow !== !!it.catFollow)) it.catAt = new Date().toISOString();
     if (old) upd.set(old.id, it); else adds.push(it);
   }
   const next = cur.filter(i => !dels.has(i.id)).map(i => upd.get(i.id) || i).concat(adds);
@@ -6819,6 +6832,437 @@ async function migrate181(store) {
   return out;
 }
 
+/* ---------- 1.8.7: التصدير والاستيراد المختار ----------
+   ملف واحد فيه اللي تختاره من إعداداتك (مو عملياتك): المحلات، التصنيفات اللي أضفتها، صيغ رسائل البنك (المعتمدة)، البنوك وأشكال التاريخ،
+   كلمات قراءة الرسائل، المدن اللي أضفتها (أو أسماءها الثانية)، والمنتجات بدون أسعار. القواعد والمستفيدون ما ينصدّرون أبدًا.
+   «لي أنا» (forOther = false): كل شي كما هو. «لشخص ثاني»: المحل = اسمه وأسماء فواتيره وتصنيفه بس، التصنيف = اسمه وشكله بس،
+   والرسالة المثال في الصيغة وفي شكل التاريخ تنبني من جديد بقيم وهمية، والصيغة اللي في نصها الثابت رقم ما تنصدّر.
+   الاستيراد: يوريك قبل (نفس الاستيراد على نسخة)، والمحل أو المنتج الموجود عندك ويختلف يسألك عن كل فرق (حقي / من الملف). */
+const SETUP_KINDS = ['merchants', 'categories', 'formats', 'banks', 'words', 'cities', 'products'];
+const SETUP_LIMIT = { merchants: 5000, categories: 500, formats: 500, senders: 300, shapes: 1000, cities: 500, products: 20000 };
+const REC_V = new Set(['recurring', 'variable']), NEC_V = new Set(['essential', 'discretionary']);
+const CAT_COLOR_V = new Set(['blue', 'green', 'orange', 'red', 'violet', 'magenta', 'aqua', 'yellow', 'gray']);
+const triOf = (v) => (v === true || v === false ? v : null);
+const cityNameOf = (store, id) => { const c = id ? store.get('cities', id) : null; return c && c.active !== false ? c.name : null; };
+// اللي ينفع ينصدّر من كل نوع (للاختيار)
+function setupCatalog(store) {
+  const withTx = new Set(store.all('transactions').map(t => t.merchantId).filter(Boolean)), withPrice = new Set();
+  store.all('products').forEach(p => (p.prices || []).forEach(x => withPrice.add(x.merchantId)));
+  const merchants = store.all('merchants').filter(m => !m.importedFrom && (withTx.has(m.id) || withPrice.has(m.id) || m.manual || m.fromFile))
+    .map(m => ({ id: m.id, name: merchantName(m), aliases: (m.aliases || []).length })).sort((a, b) => a.name.localeCompare(b.name, 'ar'));
+  const categories = store.all('categories').filter(c => c.custom && c.active !== false && (!c.parentId || (store.get('categories', c.parentId) || {}).active !== false))
+    .map(c => ({ id: c.id, name: c.name, parent: c.parentId ? catName(store, c.parentId) : null })).sort((a, b) => (a.parent || a.name).localeCompare(b.parent || b.name, 'ar') || (a.parent ? 1 : 0) - (b.parent ? 1 : 0) || a.name.localeCompare(b.name, 'ar'));
+  const formats = smsFormats(store, 'approved').map(t => ({ id: t.id, name: t.name || formatName(store, t), bank: t.sender ? (bankLabel(store, t.sender) || t.sender) : null, role: t.role, fixed: fmtFixedText(t), digits: fmtHasDigits(t), bad: fmtBadWhy(t) })) // bad: ما تنقرأ من ملف (شكلها معقد أو سبب ثاني)، فما تطلع
+    .sort((a, b) => String(a.bank || '').localeCompare(String(b.bank || ''), 'ar') || a.name.localeCompare(b.name, 'ar'));
+  const S = sendersOf(store), banks = new Map();
+  Object.keys(S).forEach(k => { const r = S[k]; if (!r || r.ignored) return; const b = bankOf(store, k); if (!b) return; let x = banks.get(b); if (!x) banks.set(b, x = { id: b, name: bankLabel(store, b) || b, senders: [], shapes: 0 }); x.senders.push(r.raw || k); });
+  Object.keys(store.settings.smsDateShapes || {}).forEach(k => { const i = k.indexOf('§'); if (i < 0) return; const x = banks.get(bankOf(store, k.slice(0, i)) || k.slice(0, i)); if (x) x.shapes++; });
+  const cur = currentSmsWords(store), D = SR().defaultWords(); let added = 0;
+  Object.keys(cur).forEach(g => { const d = new Set(((D[g] || {}).words || []).map(w => SR().wordKey(w))); (cur[g].words || []).forEach(w => { if (!d.has(SR().wordKey(w))) added++; }); });
+  const cities = store.all('cities').filter(c => c.active !== false && (c.custom || cityExtraAliases(c).length)).map(c => ({ id: c.id, name: c.name, custom: !!c.custom, extra: cityExtraAliases(c).length })).sort((a, b) => a.name.localeCompare(b.name, 'ar'));
+  const products = store.all('products').filter(p => (p.useCount || 0) > 0 || (p.prices || []).length || p.fromFile).map(p => ({ id: p.id, name: p.name })).sort((a, b) => a.name.localeCompare(b.name, 'ar'));
+  return { merchants, categories, formats, banks: Array.from(banks.values()).sort((a, b) => a.name.localeCompare(b.name, 'ar')), words: { added }, cities, products };
+}
+// النص الثابت في الصيغة (للعرض قبل ما ترسلها): الأرقام «№» والخانات بين قوسين
+function fmtFixedText(t) {
+  const L = { amount: 'المبلغ', balance: 'الرصيد', fee: 'الرسوم', cardLast4: 'آخر 4', accountLast4: 'آخر 4', merchant: 'المحل', beneficiary: 'المستفيد', counterparty: 'الجهة', date: 'التاريخ', time: 'الوقت', method: 'وسيلة الدفع', skip: '…' };
+  return (t.parts || []).map(ps => ps.map(p => (p.l != null ? p.l : '[' + (L[p.f] || L[p.t] || '…') + ']')).join('')).join('\n');
+}
+const fmtHasDigits = (t) => (t.parts || []).some(ps => ps.some(p => p.l != null && /[0-9٠-٩۰-۹]/.test(p.l)));
+function cityExtraAliases(c) {
+  const seed = CITY_SEED.find(x => x[0] === c.id), base = new Set((seed ? [seed[1]].concat(seed[2] || []) : [c.name]).map(cityKey));
+  return (c.aliases || []).filter(a => a && !base.has(cityKey(a)) && cityKey(a) !== cityKey(c.name));
+}
+function currentSmsWords(store) { const v = wordVersionAt(smsWordVersions(store), todayISO()); return cleanSmsWords(v ? v.words : SR().defaultWords()); }
+// رسالة مثال وهمية تنبني من شكل الصيغة نفسه (ما فيها شي من رسالتك): لازم تطابق الصيغة، وإلا ما ينرسل مثال
+function fakeFormatSample(tpl) {
+  const R = SR(), dt = tpl.datePat && tpl.datePat !== 'TXT' ? tpl.datePat.replace(/Y/g, '2025').replace(/n/g, '01') : '01/01/2025';
+  const FAKE = { amount: '100.00', balance: '2500.00', fee: '1.15', cardLast4: '1234', accountLast4: '5678', merchant: 'محل تجريبي', beneficiary: 'شخص تجريبي', counterparty: 'جهة تجريبية', method: 'مدى', date: dt, time: '10:30' };
+  let text;
+  try { text = (tpl.parts || []).map(ps => ps.map(p => (p.l != null ? String(p.l).replace(/№/g, '10').replace(/•/g, '*') : p.t === 'skip' ? Array(Math.max(1, Math.min(150, p.n || 1))).fill('x').join(' ') : (FAKE[p.f] || 'نص'))).join('').trim()).join('\n'); }
+  catch (e) { return null; }
+  return text && R.matchFormat(tpl, text) ? text : null;
+}
+// شكل التاريخ بمثال وهمي بنفس الشكل (الكلمة اللي قبله، ومكان الوقت، وترتيب الخانات)
+function fakeShapeSample(sig) {
+  const [prefix, timePos, pat] = String(sig || '').split('|'); if (!pat) return '';
+  const tok = pat.replace(/Y/g, '2025').replace(/n/g, '01');
+  return (prefix && prefix !== '^' && prefix !== '?' ? prefix + ' ' : prefix === '?' ? '- ' : '') + (timePos === 'T>' ? '10:30 ' : '') + tok + (timePos === '>T' ? ' 10:30' : '');
+}
+const FMT_KEYS = ['kind', 'v', 'version', 'role', 'family', 'direction', 'bank', 'sender', 'feeMode', 'dateOrder', 'datePat', 'declined', 'parts', 'lineCount', 'hasAmount'], FMT_READ_MS = 3000;
+const FMT_IN_C = new WeakMap(), FMT_BAD_C = new Map();
+// صيغة عندك ما تنقرأ من ملف (تنحفظ النتيجة لين تتغير الصيغة): complex = شكلها معقد، other = سبب ثاني
+function fmtBadWhy(t) {
+  const k = [t.id, t.updatedAt, t.sig, t.role, t.family, t.direction, t.feeMode, t.dateOrder, t.datePat].join('|');
+  if (!FMT_BAD_C.has(k)) { if (FMT_BAD_C.size > 2000) FMT_BAD_C.clear(); FMT_BAD_C.set(k, readFormatIn(fmtCopy(t)) ? null : fmtTooComplex(t.parts) ? 'complex' : 'other'); }
+  return FMT_BAD_C.get(k);
+}
+const fmtCopy = (t) => { const o = {}; FMT_KEYS.forEach(k => { if (t[k] !== undefined) o[k] = JSON.parse(JSON.stringify(t[k])); }); return o; };
+// sel: لكل نوع true (الكل) أو قائمة أرقام، وwords: true. forOther: الملف لشخص ثاني
+function exportSetup(store, sel, forOther) {
+  sel = sel || {}; const R = SR(), out = { app: 'finance-manager', kind: 'setup', v: 1, for: forOther ? 'other' : 'self', exportedAt: new Date().toISOString() };
+  const pick = (k, list) => { const s = sel[k]; if (s === true) return list; if (!Array.isArray(s)) return []; const w = new Set(s); return list.filter(x => w.has(x.id)); };
+  const cat = setupCatalog(store), cats = [], catIdx = new Map(); let autoMode = false; // auto = انضاف لأن محل أو منتج يحتاجه (ينضاف عند المستلم بس لو احتاجه)
+  const catRec = (c) => {
+    if (catIdx.has(c.id)) return catIdx.get(c.id);
+    let parent = null;
+    if (c.parentId) { const p = store.get('categories', c.parentId); if (!p || p.active === false) return null; parent = p.custom ? (catRec(p) == null ? null : { c: catRec(p) }) : { b: p.id }; if (!parent) return null; }
+    const o = { name: c.name, parent, emoji: c.emoji || null, color: c.color || null }; if (autoMode) o.auto = true;
+    if (!forOther) Object.assign(o, { rec: c.defaultRecurrenceType || null, nec: c.defaultNecessityType || null, com: triOf(c.isCommitment), sav: triOf(c.savingsEligible) });
+    cats.push(o); catIdx.set(c.id, cats.length - 1); return cats.length - 1;
+  };
+  const catRef = (id) => { const c = id ? store.get('categories', id) : null; if (!c || c.active === false) return null; if (!c.custom) return { b: c.id }; const i = catRec(c); return i == null ? null : { c: i }; };
+  pick('categories', cat.categories).forEach(x => { const c = store.get('categories', x.id); if (c) catRec(c); });
+  const nCats = cats.length; autoMode = true;
+  out.merchants = pick('merchants', cat.merchants).map(x => {
+    const m = store.get('merchants', x.id), auto = !m.categoryId, [c0, s0] = auto ? liveCat(store, m.suggestedCategoryId, m.suggestedSubcategoryId) : liveCat(store, m.categoryId, m.subcategoryId);
+    const o = { name: merchantName(m), aliases: (m.aliases || []).slice(0, 40), cat: catRef(c0), sub: s0 ? catRef(s0) : null, catAuto: auto };
+    if (!forOther) Object.assign(o, { inv: m.name || null, rec: m.defaultRecurrenceType || null, nec: m.defaultNecessityType || null, com: triOf(m.isCommitment), sav: triOf(m.savingsEligible),
+      desc: m.description || null, city: cityNameOf(store, m.cityId), cityIgnore: !!m.cityIgnore, seedKeys: [m.seedKey].concat(m.seedKeys || []).filter(Boolean), defaultFor: (m.defaultFor || []).slice() });
+    return o;
+  });
+  out.products = pick('products', cat.products).map(x => { const p = store.get('products', x.id), c = p.lastCategoryId && store.get('categories', p.lastCategoryId) ? p.lastCategoryId : p.productCategoryId; return { name: p.name, aliases: (p.aliases || []).slice(0, 40), cat: catRef(c) }; });
+  out.categories = cats; out.autoCategories = cats.length - nCats; // تصنيفات انضافت لأن محل أو منتج يحتاجها
+  const fsel = pick('formats', cat.formats);
+  const fOut = (x) => x.bad || (forOther && x.digits); // اللي ما تنقرأ من ملف ما تطلع أبد، واللي في نصها الثابت رقم ما تطلع لشخص ثاني
+  out.excludedFormats = fsel.filter(fOut).length;
+  out.formats = fsel.filter(x => !fOut(x)).map(x => {
+    const t = store.get('templates', x.id), o = fmtCopy(t);
+    if (forOther) { o.sample = fakeFormatSample(t); }
+    else { o.sample = t.sample || null; if (t.name) o.name = t.name; }
+    return o;
+  });
+  const bsel = pick('banks', cat.banks), bset = new Set(bsel.map(b => b.id)), S = sendersOf(store), rawOf = (k) => (S[k] && S[k].raw) || k;
+  out.banks = { senders: [], shapes: [] };
+  Object.keys(S).forEach(k => { const r = S[k]; if (!r || r.ignored || !bset.has(bankOf(store, k))) return; out.banks.senders.push({ raw: r.raw || k, name: r.name || null, merged: r.mergedInto ? rawOf(r.mergedInto) : null }); });
+  Object.entries(store.settings.smsDateShapes || {}).forEach(([k, v]) => {
+    const i = k.indexOf('§'), b = i < 0 ? null : k.slice(0, i), sig = i < 0 ? k : k.slice(i + 1);
+    if (b ? !bset.has(bankOf(store, b) || b) : sel.banks !== true) return;
+    out.banks.shapes.push({ bank: b ? rawOf(b) : null, sig, order: v.order, pat: v.pat || sig.split('|')[2] || null, sample: forOther ? fakeShapeSample(sig) : (v.sample || null) });
+  });
+  if (sel.words) out.words = { groups: currentSmsWords(store) };
+  out.cities = pick('cities', cat.cities).map(x => { const c = store.get('cities', x.id); return { name: c.name, aliases: c.custom ? (c.aliases || []).filter(a => cityKey(a) !== cityKey(c.name)) : cityExtraAliases(c), seed: c.custom ? null : c.id }; });
+  if (forOther) out.merchants.forEach(m => { delete m.city; });
+  void R;
+  return out;
+}
+/* قراءة ملف مختار: بيانات بس، كل خانة تنفحص وتنقص للطول المسموح، واللي ما تنقرأ تنشال */
+function readSetupFile(obj) {
+  if (!obj || typeof obj !== 'object' || obj.app !== 'finance-manager' || obj.kind !== 'setup' || obj.v !== 1) return { error: 'format' };
+  const R = SR(), arr = (x, max) => (Array.isArray(x) ? x.slice(0, max) : []), str = (s, n) => pclip(s, n) || null;
+  for (const k of ['merchants', 'categories', 'formats', 'cities', 'products']) if (Array.isArray(obj[k]) && obj[k].length > SETUP_LIMIT[k]) return { error: 'big' };
+  const ex = typeof obj.exportedAt === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(obj.exportedAt) && !isNaN(Date.parse(obj.exportedAt)) ? obj.exportedAt.slice(0, 30) : null;
+  const out = { for: obj.for === 'other' ? 'other' : 'self', exportedAt: ex, skipped: 0 };
+  // التصنيفات: الرئيسي قبل فرعياته، والفرعي أبوه رئيسي
+  const cats = [];
+  arr(obj.categories, SETUP_LIMIT.categories).forEach((c, i) => {
+    const name = c && str(c.name, 40); let parent = null, ok = !!name;
+    if (ok && c.parent) {
+      if (typeof c.parent.b === 'string' && /^[\w.-]{1,40}$/.test(c.parent.b)) parent = { b: c.parent.b };
+      else if (Number.isInteger(c.parent.c) && c.parent.c >= 0 && c.parent.c < i && cats[c.parent.c] && !cats[c.parent.c].parent) parent = { c: c.parent.c };
+      else ok = false;
+    }
+    cats.push(ok ? { name, parent, auto: c.auto === true, emoji: str(c.emoji, 8), color: CAT_COLOR_V.has(c.color) ? c.color : null, rec: REC_V.has(c.rec) ? c.rec : null, nec: NEC_V.has(c.nec) ? c.nec : null, com: triOf(c.com), sav: triOf(c.sav) } : null);
+    if (!ok) out.skipped++;
+  });
+  out.categories = cats;
+  const ref = (r) => { if (!r || typeof r !== 'object') return null; if (typeof r.b === 'string' && /^[\w.-]{1,40}$/.test(r.b)) return { b: r.b }; if (Number.isInteger(r.c) && cats[r.c]) return { c: r.c }; return null; };
+  const seedNames = new Set(MERCHANT_SEED.map(x => x.name));
+  out.merchants = arr(obj.merchants, SETUP_LIMIT.merchants).map(m => {
+    if (!m || typeof m !== 'object') { out.skipped++; return null; }
+    const name = str(m.name, 60), aliases = Array.from(new Set(arr(m.aliases, 40).map(a => normMerchant(pclip(a, 80))).filter(Boolean)));
+    if (!name) { out.skipped++; return null; }
+    return { name, inv: str(m.inv, 60), aliases, cat: ref(m.cat), sub: m.cat ? ref(m.sub) : null, catAuto: m.catAuto === true, rec: REC_V.has(m.rec) ? m.rec : null, nec: NEC_V.has(m.nec) ? m.nec : null,
+      com: triOf(m.com), sav: triOf(m.sav), desc: m.desc ? pclipLong(m.desc, 1000) : null, city: validCityRaw(m.city) || null, cityIgnore: m.cityIgnore === true,
+      seedKeys: arr(m.seedKeys, 10).filter(k => seedNames.has(k)), defaultFor: arr(m.defaultFor, 40).map(a => normMerchant(pclip(a, 80))).filter(a => a && aliases.includes(a)) };
+  }).filter(Boolean);
+  out.products = arr(obj.products, SETUP_LIMIT.products).map(p => {
+    const name = p && str(p.name, 80); if (!name) { out.skipped++; return null; }
+    return { name, aliases: Array.from(new Set(arr(p.aliases, 40).map(a => pclip(a, 80)).filter(a => a && normProduct(a) && normProduct(a) !== normProduct(name)))), cat: ref(p.cat) };
+  }).filter(Boolean);
+  // الصيغ: لو قراءتها طوّلت مرة (ملف مخرّب)، الباقي منها ينشال
+  const t0 = Date.now();
+  out.formats = arr(obj.formats, SETUP_LIMIT.formats).map(f => {
+    let t = f && typeof f === 'object' && FMT_IN_C.has(f) ? FMT_IN_C.get(f) : undefined;
+    if (t === undefined) { if (Date.now() - t0 >= FMT_READ_MS) t = null; else { t = readFormatIn(f); if (f && typeof f === 'object') FMT_IN_C.set(f, t); } }
+    if (!t) out.skipped++; return t ? JSON.parse(JSON.stringify(t)) : null;
+  }).filter(Boolean);
+  if (out.for === 'other') { // ملف لشخص ثاني: بس اللي ينرسل لشخص ثاني
+    out.merchants.forEach(m => Object.assign(m, { inv: null, rec: null, nec: null, com: null, sav: null, desc: null, city: null, cityIgnore: false, seedKeys: [], defaultFor: [] }));
+    out.categories.forEach(c => { if (c) Object.assign(c, { rec: null, nec: null, com: null, sav: null }); });
+    out.formats.forEach(t => { delete t.name; });
+  }
+  const b = obj.banks && typeof obj.banks === 'object' ? obj.banks : {};
+  out.senders = arr(b.senders, SETUP_LIMIT.senders).map(s => { const raw = s && str(s.raw, 60); if (!raw || !senderKey(raw)) { out.skipped++; return null; } return { raw, name: str(s.name, 60), merged: str(s.merged, 60) }; }).filter(Boolean);
+  out.shapes = arr(b.shapes, SETUP_LIMIT.shapes).map(s => {
+    const sig = s && typeof s.sig === 'string' ? s.sig.slice(0, 80) : '', p = sig.split('|');
+    if (p.length !== 3 || !/^(?:Y|n)[-/.]n[-/.](?:Y|n)$/.test(p[2]) || !['', 'T>', '>T'].includes(p[1]) || /[§]/.test(sig) || !R.ORDER_L[s.order]) { out.skipped++; return null; }
+    return { bank: str(s.bank, 60), sig, order: s.order, pat: p[2], sample: str(s.sample, 200) };
+  }).filter(Boolean);
+  if (obj.words && obj.words.groups && typeof obj.words.groups === 'object') {
+    const g = {}; R.WORD_GROUPS.forEach(x => { const v = obj.words.groups[x.key]; if (v && typeof v === 'object') g[x.key] = { words: arr(v.words, 80).map(w => pclip(w, 60)).filter(Boolean), not: arr(v.not, 80).map(w => pclip(w, 60)).filter(Boolean) }; });
+    out.words = Object.keys(g).length ? g : null;
+  } else out.words = null;
+  out.cities = arr(obj.cities, SETUP_LIMIT.cities).map(c => {
+    const name = c && validCityRaw(c.name); if (!name) { out.skipped++; return null; }
+    return { name, aliases: Array.from(new Set(arr(c.aliases, 30).map(validCityRaw).filter(Boolean))), seed: typeof c.seed === 'string' && CITY_SEED.some(x => x[0] === c.seed) ? c.seed : null };
+  }).filter(Boolean);
+  out.counts = { merchants: out.merchants.length, categories: cats.filter(c => c && !c.auto).length, formats: out.formats.length, banks: out.senders.length + out.shapes.length, words: out.words ? 1 : 0, cities: out.cities.length, products: out.products.length };
+  return out;
+}
+const pclipLong = (s, n) => sanitizeText(String(s == null ? '' : s).replace(/\r/g, '').replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim()).slice(0, n) || null;
+/* حماية التطبيق من صيغة ملف مخرّب. النص الثابت يتوحّد مثل ما يسويه البرنامج لما يتعلّم صيغة (نجوم الإخفاء المتتالية «•» وحدة، والمسافات المتتالية وحدة، والنص الثابت المتجاور يندمج).
+   بعدين تنعدّ «المواضع المرنة» في كل سطر (المكان اللي ممكن ينتهي فيه الجزء بأكثر من طريقة): خانة النص (المحل، المستفيد، الجهة، وسيلة الدفع) دايم،
+   والتخطي اللي ما بعده مسافة ولا هو آخر السطر، و«•» أو «№» في النص الثابت لو بعدها «•» أو «№» أو خانة نص أو تخطي (و«№» لو بعدها فاصلة أو نقطة).
+   أكثر من 4 في سطر = الصيغة ما تنقرأ. ولو أكثر من 3، المثال اللي في الملف ما يُستخدم (ينبني مثال وهمي) لأن مطابقته ممكن تطوّل */
+function fmtLineNorm(line) {
+  const out = [];
+  line.forEach(p => {
+    if (p.l == null) { out.push(p); return; }
+    const prev = out[out.length - 1], l = String(p.l).replace(/[•*]+/g, '•').replace(/\s+/g, ' ');
+    if (prev && prev.l != null) prev.l = (prev.l + l).replace(/•+/g, '•').replace(/ +/g, ' ');
+    else if (l) out.push({ l });
+  });
+  return out;
+}
+function fmtFlex(line) {
+  const a = []; line.forEach(p => { if (p.l != null) for (const ch of p.l) a.push(ch); else a.push(p.t === 'text' ? '\u0001' : p.t === 'skip' ? '\u0002' : '\u0003'); });
+  let n = 0;
+  a.forEach((x, i) => {
+    const b = a[i + 1], slot = b === '\u0001' || b === '\u0002';
+    if (x === '\u0001') n++;
+    else if (x === '\u0002') { if (b != null && b !== ' ') n++; }
+    else if (x === '•') { if (b === '•' || b === '№' || slot) n++; }
+    else if (x === '№') { if (b === '•' || b === '№' || b === ',' || b === '.' || slot) n++; }
+  });
+  return n;
+}
+const fmtMaxFlex = (parts) => (parts || []).reduce((m, ps) => Math.max(m, fmtFlex(fmtLineNorm(ps))), 0);
+const fmtTooComplex = (parts) => fmtMaxFlex(parts) > 4;
+// صيغة من ملف: تنبني من جديد من خانات معروفة بس، وتنفحص (لازم تنترجم لنمط سليم، والمثال لو موجود لازم يطابقها)
+function readFormatIn(f) {
+  const R = SR(); if (!f || typeof f !== 'object' || !Array.isArray(f.parts) || !f.parts.length || f.parts.length > 30) return null;
+  const role = f.role === 'info' ? 'info' : f.role === 'tx' || f.role == null ? 'tx' : null; if (!role) return null; // الصيغة القديمة بدون نوع = عملية
+  const parts = [];
+  for (const ps of f.parts) {
+    if (!Array.isArray(ps) || !ps.length || ps.length > 40) return null;
+    const line = [];
+    for (const p of ps) {
+      if (!p || typeof p !== 'object') return null;
+      if (typeof p.l === 'string') { if (!p.l || p.l.length > 300) return null; line.push({ l: p.l }); continue; }
+      if (p.t === 'skip' && p.f === 'skip') { const n = Number(p.n); if (!Number.isInteger(n) || n < 1 || n > 150) return null; line.push({ f: 'skip', t: 'skip', n }); continue; }
+      if (!R.FIELD_TYPE[p.f] || R.FIELD_TYPE[p.f] !== p.t) return null;
+      line.push({ f: p.f, t: p.t });
+    }
+    const ln = fmtLineNorm(line); if (!ln.length) return null;
+    parts.push(ln);
+  }
+  const flex = fmtMaxFlex(parts); if (flex > 4) return null;
+  const keys = []; parts.forEach(ps => ps.forEach(p => { if (p.f && p.f !== 'skip') keys.push(p.f); }));
+  if (new Set(keys).size !== keys.length) return null; // نفس الخانة مرتين
+  const fam = role === 'tx' ? (SMS_FAMILY_L[f.family] ? f.family : null) : null, dir = role === 'tx' ? (f.direction === 'in' || f.direction === 'out' ? f.direction : null) : null;
+  if (role === 'tx' && (!fam || !dir || !parts.some(ps => ps.some(p => p.f === 'amount')))) return null;
+  const fields = {}; parts.forEach(ps => ps.forEach(p => { if (p.f && p.f !== 'skip') fields[p.f] = { type: p.t }; }));
+  const tpl = { kind: 'sms', v: 3, version: 3, role, family: fam, direction: dir, bank: typeof f.bank === 'string' ? f.bank.slice(0, 60) : null, sender: typeof f.sender === 'string' && f.sender.trim() ? pclip(f.sender, 60) : null,
+    feeMode: fields.fee ? (f.feeMode === 'top' ? 'top' : f.feeMode === 'in' ? 'in' : null) : null, dateOrder: R.ORDER_L[f.dateOrder] ? f.dateOrder : null, datePat: typeof f.datePat === 'string' && /^(?:TXT|(?:Y|n)[-/.]n[-/.](?:Y|n))$/.test(f.datePat) ? f.datePat : null,
+    declined: f.declined === true, parts, fields, sig: R.shapeSigOf(parts), lineCount: parts.length };
+  if (role === 'tx' && fields.fee && !tpl.feeMode) return null;
+  if (fields.date && !tpl.dateOrder) return null;
+  try { R.matchFormat(tpl, 'x'); } catch (e) { return null; }
+  const sample = flex <= 3 && typeof f.sample === 'string' && f.sample.length <= 2400 ? sanitizeText(R.norm(f.sample)) : null;
+  let smp = null, sp = sample ? R.formatSpansIn(tpl, sample) : null;
+  if (sp) smp = sample; else { smp = fakeFormatSample(tpl); sp = smp ? R.formatSpansIn(tpl, smp) : null; }
+  tpl.sample = smp || ''; tpl.spans = sp ? sp.spans : {}; tpl.skips = sp ? sp.skips : [];
+  if (role === 'info') tpl.hasAmount = !!(tpl.sample && R.hasMoney(tpl.sample));
+  if (typeof f.name === 'string' && f.name.trim()) tpl.name = pclip(f.name, 60);
+  return tpl;
+}
+const REC_L = { recurring: 'متكرر', variable: 'متغير' }, NEC_L = { essential: 'ضروري', discretionary: 'كمالي' };
+const catPathOf = (store, c, s) => (c ? catName(store, c) + (s ? ' ← ' + catName(store, s) : '') : null);
+/* الاستيراد. opts: { kinds: [الأنواع اللي تستوردها] (الافتراضي كل اللي في الملف), decisions: { 'm:رقم' | 'p:رقم': { خانة: 'mine' | 'file' } } }
+   الفرق اللي ما اخترت له: لو ما عندك قيمة ← من الملف، لو عندك ← حقك */
+async function importSetup(store, obj, opts) {
+  opts = opts || {};
+  const F = readSetupFile(obj); if (F.error) return F;
+  const want = new Set(opts.kinds || SETUP_KINDS), dec = opts.decisions || {}, now = new Date().toISOString(), R = SR();
+  const res = { for: F.for, kinds: {}, conflicts: [], recategorized: 0, autoCategories: 0, skipped: F.skipped };
+  SETUP_KINDS.forEach(k => { res.kinds[k] = { added: 0, same: 0, changed: 0 }; });
+  // المدن
+  res.autoCities = 0;
+  const cityFor = (name) => { if (!name) return null; let c = findCity(store, name); if (!c) { c = ensureCity(store, name); if (c) res.autoCities++; } return c ? c.id : null; };
+  if (want.has('cities')) F.cities.forEach(fc => {
+    let c = (fc.seed && store.get('cities', fc.seed)) || findCity(store, fc.name);
+    if (!c) { c = { id: 'c-' + uid().replace(/[^a-z0-9]/gi, '').slice(0, 10), name: fc.name.slice(0, 40), aliases: [fc.name], custom: true, active: true, createdAt: now }; res.kinds.cities.added++; }
+    else res.kinds.cities.same++;
+    const have = new Set((c.aliases || []).map(cityKey)); let ch = !store.get('cities', c.id);
+    fc.aliases.forEach(a => { const k = cityKey(a); if (!k || have.has(k) || (c.aliases || []).length >= 30) return; const o = findCity(store, a); if (o && o.id !== c.id) return; c.aliases = (c.aliases || []).concat(a); have.add(k); ch = true; });
+    if (ch) { if (store.get('cities', c.id)) res.kinds.cities.changed++; store.put('cities', c); }
+  });
+  // التصنيفات: نفس الاسم تحت نفس الرئيسي = نفس التصنيف (ما يتغير شي فيه)، وإلا ينضاف
+  const catMap = new Map();
+  const catGet = (i, counted) => {
+    if (catMap.has(i)) return catMap.get(i);
+    const fc = F.categories[i]; if (!fc) { catMap.set(i, null); return null; }
+    let parentId = null;
+    if (fc.parent) { parentId = fc.parent.b ? (store.get('categories', fc.parent.b) && store.get('categories', fc.parent.b).active !== false && !store.get('categories', fc.parent.b).parentId ? fc.parent.b : null) : catGet(fc.parent.c, counted); if (!parentId) { catMap.set(i, null); return null; } }
+    let c = store.all('categories').find(x => (x.parentId || null) === parentId && x.active !== false && normAr(x.name) === normAr(fc.name));
+    if (c) res.kinds.categories.same++;
+    else {
+      const sib = store.all('categories').filter(x => (x.parentId || null) === parentId);
+      c = { id: uid(), name: fc.name, parentId, emoji: fc.emoji, color: fc.color, order: sib.reduce((m, x) => Math.max(m, x.order || 0), -1) + 1, active: true, custom: true, createdAt: now,
+        defaultRecurrenceType: fc.rec, defaultNecessityType: fc.nec, isCommitment: fc.com, savingsEligible: fc.sav };
+      store.put('categories', c);
+      if (counted) res.kinds.categories.added++; else res.autoCategories++;
+    }
+    catMap.set(i, c.id); return c.id;
+  };
+  if (want.has('categories')) F.categories.forEach((x, i) => { if (x && !x.auto) catGet(i, true); });
+  const refId = (r) => { if (!r) return null; if (r.b) { const c = store.get('categories', r.b); return c && c.active !== false ? r.b : null; } return catGet(r.c, false); };
+  const refPair = (cr, sr) => { const c = refId(cr); if (!c) return [null, null]; const s = sr ? refId(sr) : null; const sc = s ? store.get('categories', s) : null; return [c, sc && sc.parentId === c ? s : null]; };
+  // نفس التصنيف عندك بدون ما ينضاف شي (للمقارنة): رقمه لو موجود، وإلا null (يعني بينضاف لو اخترت «من الملف»)
+  const catPeek = (i) => {
+    if (catMap.has(i)) return catMap.get(i);
+    const fc = F.categories[i]; if (!fc) return null; let parentId = null;
+    if (fc.parent) { if (fc.parent.b) { const p = store.get('categories', fc.parent.b); parentId = p && p.active !== false && !p.parentId ? p.id : null; } else parentId = catPeek(fc.parent.c); if (!parentId) return null; }
+    const c = store.all('categories').find(x => (x.parentId || null) === parentId && x.active !== false && normAr(x.name) === normAr(fc.name)); return c ? c.id : null;
+  };
+  const refPeek = (r) => { if (!r) return null; if (r.b) { const c = store.get('categories', r.b); return c && c.active !== false ? r.b : null; } return catPeek(r.c); };
+  const refLabel = (r) => { if (!r) return null; if (r.b) { const c = store.get('categories', r.b); return c && c.parentId ? catPathOf(store, c.parentId, c.id) : catName(store, r.b); } const fc = F.categories[r.c]; if (!fc) return null; const pl = fc.parent ? refLabel(fc.parent) : null; return pl ? pl + ' ← ' + fc.name : fc.name; };
+  const refOk = (r) => !!r && (r.b ? !!refPeek(r) : !!F.categories[r.c]); // التصنيف في الملف ينفع (موجود عندك أو بينضاف)
+  // البنوك: الاسم والمرسلين وأشكال التاريخ. موافقتك على قراءة رسائل البنك (والمرسل المتجاهل) ما تنتقل: كل واحد يقررها بنفسه
+  if (want.has('banks')) {
+    const s = store.settings, map = {}; Object.entries(s.smsSenders || {}).forEach(([k, v]) => { map[k] = Object.assign({}, v, { trusted: Object.assign({}, v.trusted || {}) }); });
+    const made = [];
+    F.senders.forEach(fs => { const k = senderKey(fs.raw); if (!k) return; if (own(map, k)) { if (!map[k].name && fs.name) { map[k].name = fs.name; res.kinds.banks.changed++; } else res.kinds.banks.same++; return; } map[k] = { key: k, raw: fs.raw, name: fs.name, ignored: false, trusted: {}, mergedInto: null, createdAt: now }; made.push([k, fs]); res.kinds.banks.added++; });
+    const madeK = new Set(made.map(([k]) => k)); // الدمج بس مع مرسل جديد من نفس الملف: لو يندمج في بنك عندك ياخذ موافقتك على قراءة رسائله
+    made.forEach(([k, fs]) => { const t = senderKey(fs.merged); if (!t || t === k || !madeK.has(t)) return; let r = t, n = 0; while (map[r] && map[r].mergedInto && madeK.has(map[r].mergedInto) && n++ < 8) r = map[r].mergedInto; if (r !== k) map[k].mergedInto = r; });
+    s.smsSenders = map; store.put('settings', s);
+    const shapes = Object.assign({}, s.smsDateShapes || {});
+    F.shapes.forEach(fs => { const b = fs.bank ? bankOf(store, fs.bank) : null, key = shapeKey(b, fs.sig); if (own(shapes, key)) { res.kinds.banks.shapesSame = (res.kinds.banks.shapesSame || 0) + 1; return; } shapes[key] = { order: fs.order, sample: fs.sample || fakeShapeSample(fs.sig), pat: fs.pat, createdAt: now, updatedAt: now }; res.kinds.banks.shapes = (res.kinds.banks.shapes || 0) + 1; });
+    s.smsDateShapes = shapes; store.put('settings', s);
+  }
+  // كلمات قراءة الرسائل: كلماته تنضاف على كلماتك (الكلمة اللي عندك في مجموعة ثانية تبقى مكانها)، نسخة جديدة من اليوم
+  if (want.has('words') && F.words) {
+    const cur = currentSmsWords(store), merged = JSON.parse(JSON.stringify(cur)), known = new Set();
+    Object.keys(merged).forEach(g => (merged[g].words || []).concat(merged[g].not || []).forEach(w => known.add(R.wordKey(w))));
+    Object.keys(F.words).forEach(g => {
+      if (!merged[g]) return;
+      (F.words[g].words || []).forEach(w => { const k = R.wordKey(w); if (!k || known.has(k)) return; merged[g].words.push(w); known.add(k); });
+      (F.words[g].not || []).forEach(w => { const k = R.wordKey(w); if (!k || known.has(k)) return; merged[g].not = (merged[g].not || []).concat(w); known.add(k); });
+    });
+    const total = (W) => Object.keys(W).reduce((a, g) => a + (W[g].words || []).length + (W[g].not || []).length, 0), n = total(cleanSmsWords(merged)) - total(cur);
+    if (n > 0) { await applySmsWords(store, merged, todayISO(), {}); res.kinds.words.added = n; }
+  }
+  // الصيغ: توصل «تنتظر اعتمادك». نفس الشكل لنفس البنك (معتمد أو ينتظر) ما يتكرر
+  if (want.has('formats')) F.formats.forEach(ft => {
+    const b = ft.sender ? bankOf(store, ft.sender) : null;
+    if (smsFormats(store).some(x => x.sig === ft.sig && (x.role || 'tx') === ft.role && !!x.sender === !!ft.sender && (!x.sender || bankOf(store, x.sender) === b))) { res.kinds.formats.same++; return; }
+    store.put('templates', Object.assign({}, ft, { id: uid(), status: 'pending', active: false, fromFile: true, count: 0, createdAt: now, updatedAt: now })); res.kinds.formats.added++;
+  });
+  // المحلات: نفس اسم الفاتورة = نفس المحل
+  const decide = (key, f, dflt) => { const d = dec[key] && dec[key][f]; return d === 'mine' || d === 'file' ? d : dflt; };
+  if (want.has('merchants')) {
+    // المطابقة مع محلاتك اللي قبل الاستيراد بس: محلين في الملف لهم نفس اسم الفاتورة يبقون محلين
+    const pre = store.all('merchants'), owner = new Map(), taken = new Set();
+    pre.forEach(m => (m.aliases || []).forEach(a => { if (!owner.has(a)) owner.set(a, []); owner.get(a).push(m.id); taken.add(a); }));
+    const tgt = F.merchants.map(fm => {
+      const score = new Map(); fm.aliases.forEach(a => (owner.get(a) || []).forEach(id => score.set(id, (score.get(id) || 0) + 1)));
+      if (score.size) { const [id, n] = Array.from(score.entries()).sort((a, b) => b[1] - a[1])[0]; return { id, n }; }
+      if (fm.aliases.length) return null;
+      const k = normAr(fm.name), m = pre.find(x => !x.importedFrom && [merchantName(x), x.name].some(y => y && normAr(y) === k)); return m ? { id: m.id, n: 0 } : null;
+    });
+    // أكثر من محل في الملف يطابق نفس محلك: اللي أسماء فواتيره تطابقه أكثر (ولو تساووا الأول) هو اللي ينقارن معه، والباقي تنضاف أسماء فواتيره بس
+    const lead = new Map(); tgt.forEach((t, i) => { if (t && (!lead.has(t.id) || t.n > tgt[lead.get(t.id)].n)) lead.set(t.id, i); });
+    F.merchants.forEach((fm, i) => {
+      const key = 'm:' + i, target = tgt[i] ? store.get('merchants', tgt[i].id) : null;
+      const cityHit = fm.city ? findCity(store, fm.city) : null; // المدينة والتصنيف ما ينضافون إلا لو احتجناهم فعلًا
+      if (!target) {
+        const [cat, sub] = refPair(fm.cat, fm.sub);
+        const nm = fm.inv || fm.name;
+        const m = { id: uid(), name: nm, userName: fm.inv && normAr(fm.inv) !== normAr(fm.name) ? fm.name : null, seedKey: fm.seedKeys[0] || null, aliases: fm.aliases.slice(), keywords: [],
+          categoryId: fm.catAuto ? null : cat, subcategoryId: fm.catAuto ? null : sub, categorySource: !fm.catAuto && cat ? 'user' : null, suggestedCategoryId: fm.catAuto ? cat : null, suggestedSubcategoryId: fm.catAuto ? sub : null,
+          defaultRecurrenceType: fm.rec, defaultNecessityType: fm.nec, isCommitment: fm.com, savingsEligible: fm.sav, fromFile: true, cityId: fm.city ? cityFor(fm.city) : null, createdAt: now };
+        if (fm.seedKeys.length > 1) m.seedKeys = fm.seedKeys.slice(1);
+        if (fm.defaultFor.length) m.defaultFor = fm.defaultFor.slice();
+        if (fm.desc) m.description = fm.desc.slice(0, DESC_MAX);
+        if (fm.cityIgnore) m.cityIgnore = { at: now, scope: 'future' };
+        store.put('merchants', m); fm.aliases.forEach(a => taken.add(a));
+        res.kinds.merchants.added++; return;
+      }
+      const m = target; let ch = false;
+      fm.aliases.forEach(a => { if (taken.has(a)) return; m.aliases = (m.aliases || []).concat(a); taken.add(a); ch = true; }); // اسم فاتورة لمحل ثاني عندك: يبقى له
+      fm.seedKeys.forEach(k => { if (m.seedKey === k || (m.seedKeys || []).includes(k)) return; if (!m.seedKey) m.seedKey = k; else m.seedKeys = (m.seedKeys || []).concat(k); ch = true; });
+      if (lead.get(m.id) !== i) { if (ch) { m.updatedAt = now; store.put('merchants', m); res.kinds.merchants.changed++; } else res.kinds.merchants.same++; return; }
+      const diffs = [], add = (f, mine, theirs, mineL, theirsL) => { if (theirs == null || theirs === '' || JSON.stringify(mine) === JSON.stringify(theirs)) return; const dflt = mine == null || mine === '' ? 'file' : 'mine'; diffs.push({ f, mine: mineL, theirs: theirsL, dflt, pick: decide(key, f, dflt) }); };
+      if (normAr(fm.name) !== normAr(merchantName(m))) add('name', merchantName(m), fm.name, merchantName(m), fm.name);
+      // التصنيف التلقائي في الملف (مو اختيار صاحبه): يعبّي اقتراح المحل لو ما له تصنيف أبد، وما يسألك عنه
+      if (refOk(fm.cat) && fm.catAuto) { if (!m.categoryId && !m.suggestedCategoryId) { const [c2, s2] = refPair(fm.cat, fm.sub); m.suggestedCategoryId = c2; m.suggestedSubcategoryId = s2; ch = true; } }
+      else if (refOk(fm.cat)) {
+        const mine = m.categoryId ? [m.categoryId, m.subcategoryId || null] : null, pc = refPeek(fm.cat), ps = fm.sub ? refPeek(fm.sub) : null;
+        const theirs = pc && (!fm.sub || ps) ? [pc, ps && (store.get('categories', ps) || {}).parentId === pc ? ps : null] : ['new', refLabel(fm.sub || fm.cat)];
+        add('cat', mine, theirs, mine ? catPathOf(store, mine[0], mine[1]) : null, refLabel(fm.sub && refOk(fm.sub) ? fm.sub : fm.cat));
+      }
+      add('rec', m.defaultRecurrenceType || null, fm.rec, REC_L[m.defaultRecurrenceType] || null, REC_L[fm.rec] || null);
+      add('nec', m.defaultNecessityType || null, fm.nec, NEC_L[m.defaultNecessityType] || null, NEC_L[fm.nec] || null);
+      add('com', triOf(m.isCommitment), fm.com, m.isCommitment == null ? null : m.isCommitment ? 'نعم' : 'لا', fm.com == null ? null : fm.com ? 'نعم' : 'لا');
+      add('sav', triOf(m.savingsEligible), fm.sav, m.savingsEligible == null ? null : m.savingsEligible ? 'نعم' : 'لا', fm.sav == null ? null : fm.sav ? 'نعم' : 'لا');
+      add('desc', m.description || null, fm.desc, m.description || null, fm.desc);
+      add('city', m.cityId || null, fm.city ? (cityHit ? cityHit.id : 'new:' + fm.city) : null, cityNameOf(store, m.cityId), cityHit ? cityHit.name : fm.city);
+      if (fm.cityIgnore && !m.cityIgnore) add('cityIgnore', null, true, null, 'متجاهل (للعمليات الجاية)');
+      diffs.forEach(d => {
+        if (d.pick !== 'file') return;
+        if (d.f === 'name') m.userName = normAr(fm.name) === normAr(m.name || '') ? null : fm.name;
+        else if (d.f === 'rec') m.defaultRecurrenceType = fm.rec; else if (d.f === 'nec') m.defaultNecessityType = fm.nec;
+        else if (d.f === 'com') m.isCommitment = fm.com; else if (d.f === 'sav') m.savingsEligible = fm.sav;
+        else if (d.f === 'city') m.cityId = cityFor(fm.city);
+        ch = true;
+      });
+      if (ch) { m.updatedAt = now; store.put('merchants', m); }
+      diffs.forEach(d => {
+        if (d.pick !== 'file') return;
+        if (d.f === 'cat') { const [cat, sub] = refPair(fm.cat, fm.sub); if (cat) res.recategorized += setMerchantCategory(store, m.id, cat, sub); }
+        else if (d.f === 'desc') setMerchantDescription(store, m.id, fm.desc);
+        else if (d.f === 'cityIgnore') setShopCityIgnore(store, m.id, 'future');
+      });
+      if (diffs.length) res.conflicts.push({ key, kind: 'merchant', id: m.id, name: merchantName(store.get('merchants', m.id)), fields: diffs });
+      if (ch || diffs.some(d => d.pick === 'file')) res.kinds.merchants.changed++; else res.kinds.merchants.same++;
+    });
+  }
+  // المنتجات: نفس الاسم (أو اسمه الثاني) = نفس المنتج. الجديد يطلع في اقتراحات الأغراض
+  if (want.has('products')) {
+    const pIdx = new Map(); store.all('products').forEach(p => [p.normName].concat((p.aliases || []).map(normProduct)).forEach(k => { if (k && !pIdx.has(k)) pIdx.set(k, p.id); }));
+    F.products.forEach((fp, i) => {
+      const key = 'p:' + i, k = normProduct(fp.name);
+      let p = pIdx.has(k) ? store.get('products', pIdx.get(k)) : null;
+      if (!p) { const hit = fp.aliases.map(normProduct).find(a => pIdx.has(a)); if (hit) p = store.get('products', pIdx.get(hit)); }
+      if (!p) {
+        p = { id: 'pr-' + uid().replace(/[^a-z0-9]/gi, '').slice(0, 12), name: fp.name, normName: k, aliases: [], productCategoryId: refPair(fp.cat, null)[0], lastUnitPrice: null, lastQty: null, lastSeenAt: null, lastMerchantId: null, useCount: 0, fromFile: true, createdAt: now };
+        fp.aliases.forEach(a => { const ak = normProduct(a); if (ak && !pIdx.has(ak)) { p.aliases.push(a); pIdx.set(ak, p.id); } });
+        pIdx.set(k, p.id); store.put('products', p); res.kinds.products.added++; return;
+      }
+      let ch = false;
+      fp.aliases.concat(normProduct(fp.name) !== p.normName ? [fp.name] : []).forEach(a => { const ak = normProduct(a); if (!ak || pIdx.has(ak)) return; p.aliases = (p.aliases || []).concat(a); pIdx.set(ak, p.id); ch = true; });
+      const mine = p.lastCategoryId && store.get('categories', p.lastCategoryId) ? p.lastCategoryId : (p.productCategoryId || null);
+      const peek = refOk(fp.cat) ? refPeek(fp.cat) : null; // null = تصنيف بينضاف عندك (يعني يختلف حتى لو المنتج ما له تصنيف)
+      if (refOk(fp.cat) && (!peek || peek !== mine)) {
+        const dflt = mine ? 'mine' : 'file', pick = decide(key, 'cat', dflt), lbl = (id) => { const c = store.get('categories', id); return c ? catPathOf(store, c.parentId || c.id, c.parentId ? c.id : null) : null; };
+        res.conflicts.push({ key, kind: 'product', id: p.id, name: p.name, fields: [{ f: 'cat', mine: mine ? lbl(mine) : null, theirs: refLabel(fp.cat), dflt, pick }] });
+        // اختيار «من الملف» يثبت: الغرض اللي سجلته قبل الاستيراد ما يرجّع التصنيف القديم، والغرض الجديد بتصنيف ثاني يغيّره عادي
+        if (pick === 'file') { const fc = refPair(fp.cat, null)[0]; p.productCategoryId = fc; p.lastCategoryId = fc; p.catSetTo = fc; p.catSetAt = now; ch = true; }
+      }
+      if (ch) { p.updatedAt = now; store.put('products', p); res.kinds.products.changed++; } else res.kinds.products.same++;
+    });
+  }
+  store.touch();
+  return res;
+}
+// العرض قبل = نفس الاستيراد بالضبط على نسخة (ما يتغير شي عندك)
+async function previewSetup(store, obj, opts) {
+  const F = readSetupFile(obj); if (F.error) return F;
+  const r = await importSetup(new Store(JSON.parse(JSON.stringify(store.exportAll()))), obj, opts);
+  r.counts = F.counts; return r;
+}
+
 function makeBackup(store) {
   const data = JSON.parse(JSON.stringify(store.exportAll()));
   // مفتاح صندوق الرسائل ما يطلع في النسخة الاحتياطية
@@ -6933,7 +7377,7 @@ function faqSearch(list, query, limit) {
 }
 
 const Engine = {
-  version: '1.8.6', round2, parseNum, cellToISO, cleanText, sha256Hex, uid, todayISO, addDays, daysBetween, isoDate,
+  version: '1.8.7', round2, parseNum, cellToISO, cleanText, sha256Hex, uid, todayISO, addDays, daysBetween, isoDate,
   CATEGORY_SEED, buildCategoryRecords, Store, STORE_NAMES, DEFAULT_SETTINGS,
   sanitizeText, sanitizeFilename, fingerprintIban, fingerprintAccountNo, fingerprintNum, matchesOwner, normMerchant,
   detectTemplate, signatureOf, parseAlinmaAccount, interpretAlinmaLine, parseAlinmaCard, cardBalanceCheck,
@@ -6956,7 +7400,7 @@ const Engine = {
   PRODUCT_CATEGORY_SEED, CITY_SEED, TX150, normTx150, migrate150, carry150, migrate152, splitSmsMerges, sameSmsMessage, maskStored181, smsRelation, linkedStmtRow, refTrusted, timeTrusted, resolveTwin, twinValid, twinParts, migrate160, ensureSeedSubs, PC_MAP, itemCatPair, itemNetInfo, unitemizedParts,
   smsWordVersions, wordVersionAt, smsWordsFor, wordsDate, msgWordsDate, cleanSmsWords, previewSmsWords, applySmsWords, correctTxFromMessage, deleteSmsWordsVersion,
   saveItems, merchantName, invoiceAliasOf, shopsForAlias, defaultShopFor, shopChoices, checkShopName, shopNameIdeas, prettyInvoiceName, setShopName, txShopOnce, addShopForInvoice, setShopDefault, chooseShop, shopChoiceTxs, mergeCatConflict, mergeMerchants, refreshShopChoices,
-  priceBook, priceCities, shopCityOf, addManualPrice, updateManualPrice, deleteManualPrice, exportPrices, readPricesFile, importPrices, previewImportPrices, mergeProducts, splitProductAlias, setMerchantDescription, descLimit, markReviewed, unreviewedTxs, autoReviewOk, autoReview, migrate184, needsCity, isIgnored, saveIgnorePeriod, deleteIgnorePeriod, searchTx, searchQuery, undoAutoDuplicate, hideAutoDuplicate, hasSmsSource,
+  setupCatalog, exportSetup, readSetupFile, importSetup, previewSetup, normProduct, productFor, resolveMerchant, fakeFormatSample, fakeShapeSample, SETUP_KINDS, priceBook, priceCities, shopCityOf, addManualPrice, updateManualPrice, deleteManualPrice, exportPrices, readPricesFile, importPrices, previewImportPrices, mergeProducts, splitProductAlias, setMerchantDescription, descLimit, markReviewed, unreviewedTxs, autoReviewOk, autoReview, migrate184, needsCity, isIgnored, saveIgnorePeriod, deleteIgnorePeriod, searchTx, searchQuery, undoAutoDuplicate, hideAutoDuplicate, hasSmsSource,
   txDate, inPeriod, inSpendPeriod, cashPartsOf, withdrawalReturns, netWithdrawal, cents, eq2, pad2, daysInMonth, dataRange, normAr,
   isKnownCommitment, isCommitFlagged, catChain, confirmedRecurringFor, CHAIN,
   // 1.7.0
