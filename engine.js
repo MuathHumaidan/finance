@@ -25,6 +25,7 @@
 
 /* ---------- 1. أدوات عامة ---------- */
 const round2 = (x) => Math.round((x + Number.EPSILON) * 100) / 100;
+const round3 = (x) => Math.round((x + Number.EPSILON) * 1000) / 1000; // 1.8.8: الكمية والوزن لين 3 خانات (125 غرام = 0.125 كيلو)
 const cents = (x) => Math.round(x * 100);
 const eq2 = (a, b) => Math.abs(a - b) < 0.005;
 
@@ -364,6 +365,15 @@ class Store {
       if (cur) this.base.set(k, JSON.stringify(cur)); else this.base.delete(k);
     });
     this.touched = new Set();
+  }
+  // 1.8.8: تغييرات ما انحفظت (عملية فشلت في نصها): ترجع مثل آخر حفظ
+  discard(keep) {
+    if (!this.base) return false;
+    Array.from(this.touched).filter(k => !(keep && keep.has(k))).forEach(k => {
+      const i = k.indexOf('\u0001'), n = k.slice(0, i), id = k.slice(i + 1), b = this.base.get(k);
+      if (b === undefined) { if (this.t[n].has(id)) this.remove(n, id); } else this.put(n, JSON.parse(b));
+    });
+    this.touched = new Set(keep || []); return true;
   }
   // 1.5.1: بيانات مصدر وصلت متأخر (مثل مدينة الموقع) وانحفظت بدون خطوة تراجع: تنطبق كمان على نسخ نفس السجل
   // المحفوظة في التراجع والإعادة، عشان التراجع عن خطوة قديمة ما يمسحها. id = null: كل نسخ الجدول (fn تختار).
@@ -4683,7 +4693,11 @@ function partCap(store, t, partId) {
   const p = cashPartsOf(t).find(x => x.id === partId); if (!p) return null;
   return round2(Math.max(0, Number(p.amount) - (withdrawalReturns(store, t).byPart.get(partId) || 0)));
 }
-const normProduct = (s) => normAr(String(s || '').toLowerCase());
+// 1.8.8: النقطة (أو الفاصلة العربية) بين رقمين تبقى: «1.5 لتر» غير «15 لتر». باقي التوحيد مثل قبل
+const latinDigits = (s) => String(s || '').replace(/[٠-٩]/g, d => '٠١٢٣٤٥٦٧٨٩'.indexOf(d)).replace(/[۰-۹]/g, d => '۰۱۲۳۴۵۶۷۸۹'.indexOf(d));
+// 1.8.8: النقطة بين رقمين تفرق («1.5» غير «15»)، والأرقام العربية مثل الإنجليزية («٢ لتر» = «2 لتر»)
+const normProduct = (s) => normAr(latinDigits(String(s || '').toLowerCase()).replace(/([0-9])[.٫](?=[0-9])/g, '$1٫'));
+const normProductOld = (s) => normAr(String(s || '').toLowerCase()); // قبل 1.8.8: لمفاتيح الأسعار المستوردة القديمة
 // 1.6.0: تصنيف الغرض من قائمة التصنيفات الموحدة (رئيسي أو فرعي). الحقل اسمه productCategoryId من 1.5.0، وقيمته الحين معرف تصنيف
 // 1.7.0: الغرض اللي ما اخترت له تصنيف بنفسك «يتبع الفاتورة» (catFollow): تصنيفه = تصنيف الفاتورة وقت العرض، ويتغير معها.
 // غرض السحب النقدي: تصنيف جزئه، وإذا ما له جزء تصنيف السحب («سحب نقدي» افتراضيًا). اللي اخترت له تصنيف بيدك ثابت
@@ -4705,9 +4719,9 @@ function findProduct(store, name) {
 function productSuggest(store, text, limit) {
   const k = normProduct(text); if (!k) return [];
   // 1.8.7: المنتج اللي جاك من ملف مختار يطلع في الاقتراحات حتى لو ما اشتريته للحين
-  return store.all('products').filter(p => ((p.useCount || 0) > 0 || p.fromFile) && (p.normName.includes(k) || (p.aliases || []).some(a => normProduct(a).includes(k))))
+  return store.all('products').filter(p => ((p.useCount || 0) > 0 || p.fromFile || p.fromInvoice) && (p.normName.includes(k) || (p.aliases || []).some(a => normProduct(a).includes(k))))
     .sort((a, b) => (Number(b.normName.startsWith(k)) - Number(a.normName.startsWith(k))) || ((b.useCount || 0) - (a.useCount || 0)))
-    .slice(0, limit || 6).map(p => ({ id: p.id, name: p.name, productCategoryId: (p.lastCategoryId && store.get('categories', p.lastCategoryId) ? p.lastCategoryId : p.productCategoryId) || null, lastUnitPrice: p.lastUnitPrice, lastQty: p.lastQty, lastRating: p.lastRating || null, avgRating: p.avgRating || null, lastSeenAt: p.lastSeenAt, useCount: p.useCount }));
+    .slice(0, limit || 6).map(p => ({ id: p.id, name: p.name, productCategoryId: (p.lastCategoryId && store.get('categories', p.lastCategoryId) ? p.lastCategoryId : p.productCategoryId) || null, lastUnitPrice: p.lastUnitPrice, lastQty: p.lastQty, lastRating: p.lastRating || null, avgRating: p.avgRating || null, lastSeenAt: p.lastSeenAt, useCount: p.useCount, size: p.size ? sizeOf(p.size) : null, base: productBase(p), perKg: !!p.perKg }));
 }
 // فهرس المنتجات يتحدث من الأغراض الموجودة داخل العمليات (مو سجل مالي مستقل)
 function refreshProduct(store, productId) {
@@ -4744,7 +4758,7 @@ const PRICE_SAME = 0.005;
 // 1.8.6: مصدر كل سعر: purchase = اشتريته (من أغراض فواتيرك) · seen = مو شراء: شفته في المحل · heard = مو شراء: من شخص ·
 // import = مو شراء: شاركه معك شخص ثاني (origSrc = وش كان عنده: اشتراه، شافه، سمعه). الأسعار اللي مو شراء محفوظة داخل المنتج (product.prices)
 const PRICE_SRC = new Set(['seen', 'heard']);
-const SHARE_SRC = new Set(['purchase', 'seen', 'heard']);
+const SHARE_SRC = new Set(['purchase', 'seen', 'heard', 'invoice']); // 1.8.8: «من فاتورة»
 const pclip = (s, n) => sanitizeText(String(s == null ? '' : s).replace(/\s+/g, ' ').trim()).slice(0, n);
 // مدينة المحل الافتراضية: اللي حددتها له، وإلا مدينة آخر عملية منه لها مدينة معتمدة
 function shopCityOf(store, mid) {
@@ -4769,14 +4783,14 @@ function priceRecords(store, opts) {
       // سعر الحبة = اللي دفعته فعلًا ÷ الكمية (حبتين بـ 50 = 25)، ولو ما فيه مجموع: سعر الحبة المكتوب
       const qty = Number(i.qty) > 0 ? Number(i.qty) : 1, unit = Number(i.total) > 0 ? round2(Number(i.total) / qty) : round2(Number(i.unitPrice));
       if (!(unit > 0)) return;
-      add(i.productId, { kind: 'purchase', txId: t.id, itemId: i.id || null, name: i.name, merchantId: m.id, cityId: cityOk(t.cityId), date: d, time: t.time || null, unit, qty: round2(qty), total: round2(Number(i.total)), discount: !!i.discount, rating: i.rating || null, k: d + ' ' + (t.time || '') + ' ' + (i.createdAt || '') + ' ' + t.id }); // بدون وقت = أول اليوم
+      add(i.productId, { kind: 'purchase', txId: t.id, itemId: i.id || null, name: i.name, merchantId: m.id, cityId: cityOk(t.cityId), date: d, time: t.time || null, unit, qty: round3(qty), total: round2(Number(i.total)), discount: !!i.discount, rating: i.rating || null, k: d + ' ' + (t.time || '') + ' ' + (i.createdAt || '') + ' ' + t.id }); // بدون وقت = أول اليوم
     });
   });
   store.all('products').forEach(p => (p.prices || []).forEach(x => {
     if (!x || !x.merchantId || !store.get('merchants', x.merchantId) || !(Number(x.unit) > 0) || !x.date) return;
-    const kind = x.src === 'import' ? 'import' : PRICE_SRC.has(x.src) ? x.src : null; if (!kind) return;
+    const kind = x.src === 'import' ? 'import' : x.src === 'invoice' ? 'invoice' : PRICE_SRC.has(x.src) ? x.src : null; if (!kind) return;
     const unit = round2(Number(x.unit));
-    add(p.id, { kind, priceId: x.id, origSrc: x.origSrc || null, from: x.from || null, via: x.via || null, fromId: x.fromId || null, viaId: x.viaId || null, who: x.who || null, note: x.note || null, name: x.name || p.name, merchantId: x.merchantId, cityId: cityOk(x.cityId), date: x.date, time: null, unit, qty: 1, total: unit, discount: !!x.discount, rating: null, k: x.date + '  ' + (x.createdAt || '') + ' ' + x.id });
+    add(p.id, { kind, priceId: x.id, invQty: kind === 'invoice' && Number(x.qty) > 0 ? Number(x.qty) : null, invTotal: kind === 'invoice' && Number(x.total) > 0 ? Number(x.total) : null, origSrc: x.origSrc || null, from: x.from || null, via: x.via || null, fromId: x.fromId || null, viaId: x.viaId || null, who: x.who || null, note: x.note || null, name: x.name || p.name, merchantId: x.merchantId, cityId: cityOk(x.cityId), date: x.date, time: null, unit, qty: 1, total: unit, discount: !!x.discount, rating: null, k: x.date + '  ' + (x.createdAt || '') + ' ' + x.id });
   }));
   return byP;
 }
@@ -4803,6 +4817,15 @@ function priceBook(store, mode, opts) {
     });
   });
   products.sort((a, b) => a.name.localeCompare(b.name, 'ar'));
+  // 1.8.8: سعر الوحدة الكاملة (الكيلو، اللتر، الحبة)، و«حجم ثاني أوفر»: نفس المنتج بحجم ثاني سعر وحدته أرخص (بنفس الاختيار: آخر سعر أو أرخص سعر صار)
+  const fam = new Map();
+  products.forEach(row => {
+    const p = store.get('products', row.productId), sz = p.size ? sizeOf(p.size) : null, b = sz ? sizeBase(sz) : p.perKg ? { amt: 1, per: 'kg' } : null;
+    row.size = sz; row.perKg = !!p.perKg; if (!b) return;
+    row.per = b.per; row.perRaw = row.price / b.amt; row.perUnit = round2(row.perRaw);
+    const k = normProduct(productBase(p)) + '|' + b.per; if (!fam.has(k)) fam.set(k, []); fam.get(k).push(row);
+  });
+  fam.forEach(rows => { if (rows.length < 2) return; rows.forEach(r => { const best = rows.filter(x => x !== r && x.perRaw < r.perRaw - PRICE_SAME).sort((a, b) => a.perRaw - b.perRaw)[0]; if (best) r.cheaperSize = { productId: best.productId, name: best.name, size: best.size, perKg: best.perKg, per: best.per, perUnit: best.perUnit, mine: r.perUnit }; }); });
   const stores = Array.from(agg.values());
   stores.forEach(s => s.products.sort((a, b) => (Number(b.cheapest) - Number(a.cheapest)) || a.name.localeCompare(b.name, 'ar')));
   stores.sort((a, b) => (b.cheapestCount - a.cheapestCount) || (b.multiCount - a.multiCount) || (b.productCount - a.productCount) || a.name.localeCompare(b.name, 'ar'));
@@ -4853,9 +4876,10 @@ function priceShop(store, d, cityId) {
 const priceId = () => 'pp-' + uid().replace(/[^a-z0-9]/gi, '').slice(0, 12);
 function addManualPrice(store, d) {
   const v = readPriceInput(store, d); if (v.error) return v;
-  const name = pclip(d.product, 80); if (!name) return { error: 'product' };
+  const sz = d.size && typeof d.size === 'object' ? sizeOf(d.size) : normSize(d.size, d.sizeUnit); // 1.8.8: الحجم (اختياري) ينكتب آخر اسم المنتج
+  const name = withSize(sz ? baseOfName(pclip(d.product, 80), sz) : pclip(d.product, 80), sz); if (!name) return { error: 'product' };
   const m = priceShop(store, d, v.cityId); if (!m) return { error: 'shop' };
-  const p = productFor(store, name, null), now = new Date().toISOString();
+  const p = productFor(store, name, null, sz), now = new Date().toISOString();
   const rec = Object.assign({ id: priceId(), name, merchantId: m.id, createdAt: now }, v);
   p.prices = (p.prices || []).concat(rec); p.updatedAt = now; store.put('products', p); store.touch();
   return { product: p, record: rec, merchant: m };
@@ -4890,7 +4914,7 @@ function exportPrices(store, productIds, opts, from) {
   priceRecords(store).forEach((P, pid) => {
     if (!want.has(pid)) return; const p = store.get('products', pid);
     P.forEach((recs, mid) => { const m = store.get('merchants', mid); recs.forEach(r => {
-      if (r.kind === 'purchase' ? !o.purchase : r.kind === 'seen' ? !o.seen : r.kind === 'heard' ? !o.heard : !o.imported) return;
+      if (r.kind === 'purchase' ? !o.purchase : r.kind === 'seen' ? !o.seen : r.kind === 'heard' ? !o.heard : r.kind === 'invoice' ? !o.invoice : !o.imported) return;
       const own = (m && (m.importedFrom && m.importName ? m.importName : merchantName(m))) || '';
       const it = { product: pclip(p.name, 80), store: pclip(own, 60), city: cityN(r.cityId), unit: r.unit, date: r.date, discount: !!r.discount,
         src: r.kind === 'import' ? (SHARE_SRC.has(r.origSrc) ? r.origSrc : 'seen') : r.kind };
@@ -4946,7 +4970,8 @@ function importPrices(store, obj) {
     const sk = normAr(x.store), pk = normProduct(x.product);
     const key = priceKey(pk, x.byId || R.fromId || 'n:' + normAr(x.by || R.from), sk, x);
     const hadId = pIdx.get(pk), had = hadId ? store.get('products', hadId) : null;
-    if (had) { const ks = keySet(had); if (ks.has(key)) { dup++; return; } if (ks.has('gone:' + key)) { gone++; return; } } // موجود قبل، أو حذفته: ما ينضاف ولا ينشأ له محل
+    const pk0 = normProductOld(x.product), key0 = pk0 !== pk ? priceKey(pk0, x.byId || R.fromId || 'n:' + normAr(x.by || R.from), sk, x) : null; // المفتاح قبل 1.8.8 (الاسم اللي فيه رقم بنقطة)
+    if (had) { const ks = keySet(had); if (ks.has(key) || (key0 && ks.has(key0))) { dup++; return; } if (ks.has('gone:' + key) || (key0 && ks.has('gone:' + key0))) { gone++; return; } } // موجود قبل، أو حذفته: ما ينضاف ولا ينشأ له محل
     const cityId = x.city ? cityOf(x.city) : null; if (x.city && !cityId) noCity++;
     const ik = R.from + '|' + sk;
     let m = shops.get(sk) || store.all('merchants').find(y => (y.importKeys || (y.importedFrom ? [y.importedFrom + '|' + normAr(y.importName || '')] : [])).includes(ik));
@@ -5015,11 +5040,21 @@ function setMerchantDescription(store, merchantId, text) {
   m.updatedAt = new Date().toISOString(); store.put('merchants', m); store.touch(); return m;
 }
 function refreshProductsOf(store, t) { new Set((t && t.items || []).map(i => i.productId).filter(Boolean)).forEach(id => refreshProduct(store, id)); }
-function productFor(store, name, catId) {
-  let p = findProduct(store, name);
-  if (!p) p = { id: 'pr-' + uid().replace(/[^a-z0-9]/gi, '').slice(0, 12), name, normName: normProduct(name), aliases: [], productCategoryId: catId || null, lastUnitPrice: null, lastQty: null, lastSeenAt: null, lastMerchantId: null, useCount: 0, createdAt: new Date().toISOString() };
+// 1.8.8: size (اختياري) = حجم المنتج، وopt.perKg = موزون (سعره للكيلو). المنتج اللي ما له حجم ياخذه أول مرة ينعرف
+const newProductRec = (name, catId) => ({ id: 'pr-' + uid().replace(/[^a-z0-9]/gi, '').slice(0, 12), name, normName: normProduct(name), aliases: [], productCategoryId: catId || null, lastUnitPrice: null, lastQty: null, lastSeenAt: null, lastMerchantId: null, useCount: 0, createdAt: new Date().toISOString() });
+function productFor(store, name, catId, size, opt) {
+  let p = opt && opt.isNew ? null : findProduct(store, name); // isNew: المتصل متأكد إن الاسم مو مسجل
+  if (!p) p = newProductRec(name, catId);
   else if (catId && p.productCategoryId !== catId) p.productCategoryId = catId; // آخر تصنيف اخترته للمنتج يصير اقتراحه
+  const sz = size ? sizeOf(size) : null;
+  if (sz && !p.size && !p.perKg && endsWithWords(p.name, sizeText(sz))) { p.size = sz; p.base = baseOfName(p.name, sz); }
+  if (opt && opt.perKg && !p.perKg && !p.size) p.perKg = true;
   store.put('products', p); return p;
+}
+// 1.8.8: حجم الغرض: لو انرسل (رقم ووحدة) الاسم ينكتب معه، ولو ما انرسل يبقى حجمه القديم ما دام اسمه ينتهي فيه
+function itemSizeIn(d, old, v) {
+  if (d.size !== undefined) { const sz = d.size && typeof d.size === 'object' ? sizeOf(d.size) : normSize(d.size, d.sizeUnit); v.name = withSize(sz ? baseOfName(v.name, sz) : v.name, sz); return sz; }
+  const o = old && old.size ? sizeOf(old.size) : null; return o && endsWithWords(v.name, sizeText(o)) ? o : null;
 }
 function readItemInput(d) {
   const name = String(d.name || '').replace(/\s+/g, ' ').trim().slice(0, 80); if (!name) return { error: 'name' };
@@ -5029,7 +5064,7 @@ function readItemInput(d) {
   if (total == null && unit != null) total = round2(unit * qty);
   if (unit == null && total != null) unit = round2(total / qty);
   if (!(total > 0) || !(unit > 0)) return { error: 'amount' };
-  return { name, qty: round2(qty), unitPrice: round2(unit), total: round2(total) };
+  return { name, qty: round3(qty), unitPrice: round2(unit), total: round2(total) };
 }
 function validateItems(store, t, items) {
   const cap = itemCap(store, t), sum = round2(items.reduce((s, i) => s + Number(i.total), 0));
@@ -5056,6 +5091,7 @@ function saveItem(store, txId, d, itemId) {
   const v = readItemInput(d); if (v.error) return v;
   const cur = (t.items || []).map(i => Object.assign({}, i));
   const old = itemId ? cur.find(i => i.id === itemId) : null; if (itemId && !old) return { error: 'missing' };
+  const sz = itemSizeIn(d, old, v);
   const oldCat = old ? { pc: old.productCategoryId || null, follow: !!old.catFollow } : null;
   // 1.6.0: التصنيف من القائمة الموحدة. الحقول اللي ما انرسلت (مثل الصف السريع) تبقى على قيمتها
   const { pc, follow } = itemCatInput(store, d, old);
@@ -5071,8 +5107,10 @@ function saveItem(store, txId, d, itemId) {
     if (it.total < al - 0.004) return { error: 'refund_alloc', allocated: al };
   }
   if (oldCat && (oldCat.pc !== (it.productCategoryId || null) || oldCat.follow !== !!it.catFollow)) it.catAt = new Date().toISOString();
+  if (sz) it.size = sz; else delete it.size;
+  if (d.inv) it.inv = String(d.inv).slice(0, 200);
   const prevProduct = old ? old.productId : null;
-  it.productId = productFor(store, v.name, it.catFollow ? null : pc).id;
+  it.productId = productFor(store, v.name, it.catFollow ? null : pc, sz).id;
   t.items = next; t.updatedAt = new Date().toISOString(); store.put('transactions', t);
   refreshProduct(store, it.productId); if (prevProduct && prevProduct !== it.productId) refreshProduct(store, prevProduct);
   store.touch();
@@ -5090,6 +5128,7 @@ function saveItems(store, txId, rows) {
     if (d.del) { if (old) dels.add(old.id); continue; }
     if (!canHaveItems(t)) return { error: 'not_allowed' };
     const v = readItemInput(d); if (v.error) return Object.assign({ row: n }, v);
+    const sz = itemSizeIn(d, old, v);
     const { pc, follow } = itemCatInput(store, d, old);
     const partId = t.transactionType === 'CashWithdrawal' ? (d.partId === undefined ? (old ? old.partId || null : null) : (d.partId || null)) : null;
     const groupIds = (d.groupIds || (old && old.groupIds) || []).filter(g => store.get('groups', g));
@@ -5097,6 +5136,8 @@ function saveItems(store, txId, rows) {
     const it = Object.assign(old ? Object.assign({}, old) : { id: 'it-' + uid().replace(/[^a-z0-9]/gi, '').slice(0, 12), createdAt: new Date().toISOString() },
       v, { productCategoryId: pc, catFollow: follow, rating, discount: d.discount === undefined ? !!(old && old.discount) : !!d.discount, note: d.note === undefined ? (old ? old.note || '' : '') : String(d.note || '').slice(0, 120), groupIds, partId });
     if (old && ((old.productCategoryId || null) !== (it.productCategoryId || null) || !!old.catFollow !== !!it.catFollow)) it.catAt = new Date().toISOString();
+    if (sz) it.size = sz; else delete it.size;
+    if (d.inv) it.inv = String(d.inv).slice(0, 200);
     if (old) upd.set(old.id, it); else adds.push(it);
   }
   const next = cur.filter(i => !dels.has(i.id)).map(i => upd.get(i.id) || i).concat(adds);
@@ -5108,8 +5149,8 @@ function saveItems(store, txId, rows) {
   }
   const touched = new Set();
   cur.forEach(i => { if (dels.has(i.id) && i.productId) touched.add(i.productId); });
-  upd.forEach(it => { const was = byId.get(it.id).productId; if (was) touched.add(was); it.productId = productFor(store, it.name, it.catFollow ? null : it.productCategoryId).id; touched.add(it.productId); });
-  adds.forEach(it => { it.productId = productFor(store, it.name, it.catFollow ? null : it.productCategoryId).id; touched.add(it.productId); });
+  upd.forEach(it => { const was = byId.get(it.id).productId; if (was) touched.add(was); it.productId = productFor(store, it.name, it.catFollow ? null : it.productCategoryId, it.size).id; touched.add(it.productId); });
+  adds.forEach(it => { it.productId = productFor(store, it.name, it.catFollow ? null : it.productCategoryId, it.size).id; touched.add(it.productId); });
   if (!dels.size && !upd.size && !adds.length) return { unitemized: unitemized(store, t), changed: 0 };
   t.items = next; t.updatedAt = new Date().toISOString(); store.put('transactions', t);
   if (dels.size) store.all('transactions').forEach(r => { if (r.transactionType === 'Refund' && r.refundOfId === t.id && (r.refundItemAllocations || []).some(a => dels.has(a.itemId))) { r.refundItemAllocations = r.refundItemAllocations.filter(a => !dels.has(a.itemId)); store.put('transactions', r); } });
@@ -7263,6 +7304,413 @@ async function previewSetup(store, obj, opts) {
   r.counts = F.counts; return r;
 }
 
+/* ================= 1.8.8: الحجم، وفاتورة الشراء =================
+   الحجم: رقم ووحدة (غرام، كيلو، مل، لتر، حبة) ينكتب آخر اسم المنتج («حليب المراعي 2 لتر»)، وكل حجم منتج لحاله.
+   سعر الوحدة الكاملة (الكيلو، اللتر، الحبة) = سعر العبوة ÷ حجمها. والموزون («طماطم (بالكيلو)») سعره للكيلو.
+   الفاتورة: برومبت تنسخه لأي ذكاء اصطناعي مع صورة الفاتورة أو PDF، وتلصق رده هنا. التطبيق يقرأ الرد ويفحصه ويوريك قبل الحفظ. */
+const SIZE_U = { g: 'غرام', kg: 'كيلو', ml: 'مل', l: 'لتر', pc: 'حبة' };
+const SIZE_PER = { kg: 'الكيلو', l: 'اللتر', pc: 'الحبة' };
+const KG_TAG = '(بالكيلو)';
+const num3 = (n) => String(Math.round(Number(n) * 1000) / 1000);
+// الغرام من 1000 وفوق يصير كيلو، والكيلو تحت 1 يصير غرام (ونفسها المل واللتر): نفس الحجم ينكتب بطريقة وحدة
+function normSize(n, u) {
+  let v = typeof n === 'number' ? n : parseNum(n); u = String(u || '').toLowerCase().trim();
+  if (!(v > 0) || v > 1e6 || !SIZE_U[u]) return null;
+  v = Math.round(v * 1000) / 1000; // نقرّب أول (999.9999 غرام = 1 كيلو)
+  if (u === 'g' && v >= 1000) { v /= 1000; u = 'kg'; } else if (u === 'kg' && v < 1) { v *= 1000; u = 'g'; }
+  else if (u === 'ml' && v >= 1000) { v /= 1000; u = 'l'; } else if (u === 'l' && v < 1) { v *= 1000; u = 'ml'; }
+  v = Math.round(v * 1000) / 1000; return v > 0 ? { n: v, u } : null;
+}
+const sizeOf = (x) => (x && typeof x === 'object' ? normSize(x.n, x.u) : null);
+const sizeText = (sz) => (sz ? num3(sz.n) + ' ' + SIZE_U[sz.u] : '');
+function sizeBase(sz) { if (!sz) return null; return sz.u === 'g' ? { amt: sz.n / 1000, per: 'kg' } : sz.u === 'ml' ? { amt: sz.n / 1000, per: 'l' } : { amt: sz.n, per: sz.u }; }
+const sameSize = (a, b) => (!a && !b) || (!!a && !!b && a.u === b.u && Math.abs(a.n - b.n) < 1e-9);
+const endsWithWords = (name, tail) => { const a = String(name || '').trim().split(/\s+/), b = String(tail || '').trim().split(/\s+/); return a.length > b.length && b.every((w, i) => normProduct(a[a.length - b.length + i]) === normProduct(w)); };
+// اسم المنتج لين 80 حرف: لو الاسم مع الحجم أطول، ينقص الاسم مو الحجم
+const NAME_MAX = 80;
+const fitBase = (b, tail) => { const room = NAME_MAX - (tail ? tail.length + 1 : 0); return b.length > room ? b.slice(0, Math.max(1, room)).trim() : b; };
+// الاسم مع الحجم: «حليب المراعي» + 2 لتر = «حليب المراعي 2 لتر» (ولو الحجم مكتوب آخر الاسم ما يتكرر)
+function withSize(name, sz) { const nm = String(name || '').replace(/\s+/g, ' ').trim(); if (!sz || !nm) return nm; const t = sizeText(sz), b = baseOfName(nm, sz); return b ? fitBase(b, t) + ' ' + t : nm; }
+// كلمات الوحدة اللي ممكن تجي آخر الاسم (عشان «حليب 1000 مل» مع حجم 1 لتر يصير «حليب 1 لتر» مو «حليب 1000 مل 1 لتر»)
+const UNIT_WORDS = { 'غرام': 'g', 'جرام': 'g', 'جم': 'g', 'غ': 'g', 'g': 'g', 'gm': 'g', 'كيلو': 'kg', 'كغ': 'kg', 'كجم': 'kg', 'kg': 'kg', 'مل': 'ml', 'ملي': 'ml', 'ml': 'ml', 'لتر': 'l', 'ل': 'l', 'l': 'l', 'ltr': 'l', 'حبة': 'pc', 'حبه': 'pc', 'pc': 'pc', 'pcs': 'pc' };
+function baseOfName(name, sz) {
+  const nm = String(name || '').replace(/\s+/g, ' ').trim(); if (!sz) return nm; const t = sizeText(sz), w = nm.split(' ');
+  if (endsWithWords(nm, t)) return w.slice(0, -t.split(' ').length).join(' ');
+  const at = (num, unit, k) => { const u = UNIT_WORDS[String(unit || '').toLowerCase()]; return u && w.length > k && sameSize(normSize(latinDigits(num).replace(/٫/g, '.'), u), sz) ? w.slice(0, -k).join(' ') : null; };
+  const one = /^([0-9٠-٩۰-۹]+(?:[.٫][0-9٠-٩۰-۹]+)?)([a-zA-Z\u0621-\u064A]+)$/.exec(w[w.length - 1] || '');
+  return (w.length > 2 && at(w[w.length - 2], w[w.length - 1], 2)) || (one && at(one[1], one[2], 1)) || nm;
+}
+const kgName = (base) => { const b = String(base || '').replace(/\s+/g, ' ').trim(); return b && !b.endsWith(KG_TAG) ? fitBase(b, KG_TAG) + ' ' + KG_TAG : b; };
+const kgBase = (name) => String(name || '').replace(/\s*\(بالكيلو\)\s*$/, '').trim();
+// اسم المنتج من غير حجمه (للأحجام الثانية من نفس المنتج)
+const productBase = (p) => (p.size ? (p.base || baseOfName(p.name, p.size)) : p.perKg ? kgBase(p.name) : p.name);
+
+/* ---------- القريب بالاسم: نص كلمات الاسم أو أكثر مشتركة (الأطول من الاسمين)، والكلمة تتحمل غلطة حرف (وحرفين لو طويلة) ---------- */
+function nameWords(s) { return String(s || '').toLowerCase().replace(/[()]/g, ' ').split(/\s+/).map(w => normProduct(w).replace(/^(?:وال|بال|فال|كال|لل|ال)(?=..)/, '')).filter(Boolean); }
+function editWithin(a, b, max) {
+  if (Math.abs(a.length - b.length) > max) return false;
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) { const cur = [i]; let low = i; for (let j = 1; j <= b.length; j++) { cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)); low = Math.min(low, cur[j]); } if (low > max) return false; prev = cur; }
+  return prev[b.length] <= max;
+}
+function wordsScore(a, b) { return wordsScoreW(nameWords(a), nameWords(b)); }
+function wordsScoreW(A, B) {
+  if (!A.length || !B.length) return 0;
+  if (Math.min(A.length, B.length) / Math.max(A.length, B.length) < NEAR_MIN) return 0; // ما يوصل للنص حتى لو كل الكلمات مشتركة
+  const used = new Set(); let shared = 0;
+  A.forEach(w => { const tol = w.length >= 6 ? 2 : w.length >= 4 ? 1 : 0; const j = B.findIndex((x, k) => !used.has(k) && (x === w || (tol > 0 && editWithin(w, x, tol)))); if (j >= 0) { used.add(j); shared++; } });
+  return shared / Math.max(A.length, B.length);
+}
+const NEAR_MIN = 0.5, NEAR_MAX = 5;
+// منتجات قريبة من سطر: نفس الحجم (أو الاثنين بدون حجم)، والموزون يقترح نفس المنتج بدون وزن والعكس
+// كلمات أسماء كل منتج (تنحسب مرة وحدة لين تتغير البيانات)
+// وفهرس الكلمة ← المنتجات اللي فيها، عشان نقارن بس المنتجات اللي تشارك السطر كلمة (القائمة الكبيرة كانت بطيئة)
+function productWordsIndex(store) {
+  return store.cached('invWords', () => {
+    const list = store.all('products').map(p => { const psz = p.size ? sizeOf(p.size) : null; return { p, psz, W: [productBase(p)].concat((p.aliases || []).map(a => (psz ? baseOfName(a, psz) : kgBase(a)))).map(nameWords) }; });
+    const byWord = new Map(), byLen = new Map();
+    list.forEach((x, j) => x.W.forEach(ws => ws.forEach(w => { if (!byWord.has(w)) { byWord.set(w, new Set()); if (!byLen.has(w.length)) byLen.set(w.length, []); byLen.get(w.length).push(w); } byWord.get(w).add(j); })));
+    return { list, byWord, byLen };
+  });
+}
+// فهرس الأسماء: نفس نتيجة findProduct (أول منتج اسمه أو اسمه الثاني نفسه) بس أسرع
+function productNameIndex(store) {
+  return store.cached('invNames', () => { const m = new Map(); store.all('products').forEach(p => [p.normName].concat((p.aliases || []).map(normProduct)).forEach(k => { if (k && !m.has(k)) m.set(k, p.id); })); return m; });
+}
+function nearProducts(store, base, sz, weighed, exceptId) {
+  const out = [], A = nameWords(base); if (!A.length) return out;
+  const IX = productWordsIndex(store), cand = new Set();
+  // نفس قاعدة wordsScoreW: الكلمة تتحمل غلطة حرف (وحرفين لو طويلة)
+  A.forEach(w => { const tol = w.length >= 6 ? 2 : w.length >= 4 ? 1 : 0; for (let n = w.length - tol; n <= w.length + tol; n++) (IX.byLen.get(n) || []).forEach(x => { if (x === w || (tol > 0 && editWithin(w, x, tol))) IX.byWord.get(x).forEach(j => cand.add(j)); }); });
+  Array.from(cand).sort((a, b) => a - b).map(j => IX.list[j]).forEach(({ p, psz, W }) => {
+    if (p.id === exceptId) return;
+    if (weighed ? !!psz : !sameSize(psz, sz)) return;
+    if (!weighed && p.perKg && sz) return;
+    const score = W.reduce((m, B) => Math.max(m, wordsScoreW(A, B)), 0);
+    if (score >= NEAR_MIN) out.push({ id: p.id, name: p.name, score: Math.round(score * 100) / 100, uses: (p.useCount || 0) + (p.prices || []).length });
+  });
+  return out.sort((a, b) => b.score - a.score || b.uses - a.uses || a.name.localeCompare(b.name, 'ar')).slice(0, NEAR_MAX);
+}
+function nearMerchants(store, name) {
+  const out = [];
+  store.all('merchants').forEach(m => { if (m.importedFrom) return; const score = [merchantName(m), m.name].filter(Boolean).reduce((x, n) => Math.max(x, wordsScore(name, n)), 0); if (score >= NEAR_MIN) out.push({ id: m.id, name: merchantName(m), score: Math.round(score * 100) / 100 }); });
+  return out.sort((a, b) => b.score - a.score || a.name.localeCompare(b.name, 'ar')).slice(0, NEAR_MAX);
+}
+// المحل بالضبط: اسم البنك المحفوظ له (أسماء الفواتير)، أو اسمه عندك
+function exactMerchant(store, name) {
+  if (!name) return null;
+  const al = normMerchant(name), k = normAr(name), own = store.all('merchants').filter(m => !m.importedFrom);
+  return own.find(m => al && (m.aliases || []).includes(al)) || own.find(m => normAr(merchantName(m)) === k) || own.find(m => m.name && normAr(m.name) === k) || null;
+}
+
+/* ---------- البرومبت ---------- */
+const INV_LANG = { ar: 'بالعربي', en: 'بالإنجليزي', same: 'بنفس لغة الفاتورة' };
+const INV_NAMES_MAX = 500;
+function invoicePromptNames(store) {
+  const seen = new Set(), out = [];
+  store.all('products').filter(p => (p.useCount || 0) > 0 || (p.prices || []).length || p.fromFile || p.fromInvoice)
+    .sort((a, b) => ((b.useCount || 0) + (b.prices || []).length) - ((a.useCount || 0) + (a.prices || []).length) || a.name.localeCompare(b.name, 'ar'))
+    .forEach(p => { const b = productBase(p), k = normProduct(b); if (!b || seen.has(k) || out.length >= INV_NAMES_MAX) return; seen.add(k); out.push(b); });
+  return out;
+}
+function invoicePrompt(store, lang) {
+  const L = INV_LANG[lang] || INV_LANG.ar, names = invoicePromptNames(store);
+  return [
+    'أبيك تقرأ فاتورة شراء مرفقة (صورة أو PDF) وتطلّع منها المنتجات وأسعارها لتطبيق «المدير المالي».',
+    '',
+    'المطلوب:',
+    '1. اقرأ الفاتورة كاملة سطر سطر، ولا تترك أي منتج.',
+    '2. لو فيه معلومة ما قدرت تقرأها أو مو واضحة (التاريخ، الإجمالي، اسم المحل، سعر منتج، كمية)، اسألني عنها قبل ما تكتب الرد النهائي. ولو ما عرفتها، اكتبها null واذكرها في "missing".',
+    '3. لا تكتب أبدًا: رقم البطاقة، اسم العميل، جواله، عنوانه، رقم العضوية أو الولاء، أو أي رمز أو كود.',
+    '4. انقل الأرقام مثل ما هي في الفاتورة، بأرقام إنجليزية (0-9) ونقطة عشرية. لا تقرّب ولا تحسب شي إلا اللي مطلوب تحت.',
+    '5. اكتب الرد النهائي كتلة JSON وحدة بهذا الشكل بالضبط، بدون أي حقول ثانية:',
+    '',
+    '```json',
+    '{"app":"finance-manager","kind":"invoice","v":1,',
+    ' "store":"اسم المحل كما في الفاتورة","branch":null,"city":null,',
+    ' "date":"YYYY-MM-DD","invoiceNo":null,',
+    ' "total":0.00,"vat":null,"pricesIncludeVat":true,"discount":null,',
+    ' "items":[',
+    '  {"raw":"اسم المنتج كما في الفاتورة","name":"الاسم الواضح","size":null,"unit":null,"qty":1,"weighed":false,"total":0.00,"discount":null}',
+    ' ],',
+    ' "missing":[]}',
+    '```',
+    '',
+    'معنى الحقول:',
+    '- store: اسم المحل كما هو مكتوب. branch: الفرع لو مكتوب. city: المدينة لو مكتوبة.',
+    '- date: تاريخ الفاتورة بالميلادي YYYY-MM-DD (لو مكتوب هجري حوّله).',
+    '- invoiceNo: رقم الفاتورة لو مكتوب.',
+    '- total: المبلغ النهائي المدفوع.',
+    '- vat: مبلغ ضريبة القيمة المضافة لو مكتوب، وإلا null.',
+    '- pricesIncludeVat: true لو أسعار المنتجات شاملة الضريبة، و false لو الضريبة تنضاف تحت على المجموع.',
+    '- discount: خصم على الفاتورة كلها (مو خصم منتج واحد)، وإلا null.',
+    '- لكل منتج:',
+    '  - raw: الاسم بالضبط كما في الفاتورة.',
+    `  - name: اسم واضح ${L}: نوع المنتج ثم الماركة ثم النوع أو النكهة (مثل: حليب المراعي كامل الدسم)، بدون الحجم، وبدون أكواد أو باركود أو اختصارات.`,
+    '  - size و unit: حجم العبوة لو مكتوب (unit وحدة من: g, kg, ml, l, pc)، وإلا null. مثل 2 لتر = size 2 و unit "l"، و 30 حبة بيض = size 30 و unit "pc".',
+    '  - qty: العدد.',
+    '  - weighed: true لو المنتج ينباع بالوزن (خضار، فواكه، لحم بالكيلو). وقتها qty = الوزن بالكيلو، و size و unit = null.',
+    '  - total: مبلغ السطر بعد خصمه كما في الفاتورة (لو مو مكتوب: العدد × سعر الحبة − الخصم).',
+    '  - discount: خصم هالسطر لو فيه، وإلا null.',
+    '- missing: قائمة باللي ما قدرت تقرأه أو تتأكد منه (جمل قصيرة).',
+    names.length ? '' : null,
+    names.length ? 'منتجاتي المسجلة عندي: لو المنتج واحد منها، اكتب في name نفس الاسم بالضبط (بدون الحجم):' : null,
+    names.length ? names.map(n => '- ' + n).join('\n') : null,
+  ].filter(x => x !== null).join('\n');
+}
+
+/* ---------- قراءة الرد ---------- */
+const INV_MAX_ITEMS = 300, money2 = (v) => (v == null || !Number.isFinite(v) ? null : round2(v));
+const INV_TPL_STORE = 'اسم المحل كما في الفاتورة', INV_TPL_RAW = 'اسم المنتج كما في الفاتورة';
+// رد الذكاء الاصطناعي: نبدأ من آخر كتلة (رده الأخير هو المعتمد، والنموذج اللي في البرومبت لو انلصق معه يتخطاه)
+function extractInvoiceJson(text) {
+  const s = String(text || ''); if (!s.trim() || s.length > 500000) return null;
+  const parse = (x) => { try { const o = JSON.parse(x); return o && typeof o === 'object' && !Array.isArray(o) ? o : null; } catch (e) { return null; } };
+  const fix = (x) => { let y = x.replace(/[“”„‟″]/g, '"').replace(/[‘’]/g, "'").replace(/,\s*([}\]])/g, '$1'); if (!y.includes('"')) y = y.replace(/'/g, '"'); return y; };
+  const good = (o) => !!o && Array.isArray(o.items) && o.store !== INV_TPL_STORE && !(o.items.length && o.items.every(it => it && it.raw === INV_TPL_RAW));
+  const tryOne = (x) => { const t = String(x || '').trim(); if (!t) return null; const o = parse(t) || parse(fix(t)); return good(o) ? o : null; };
+  // 1) الكتل بين ``` (بدون regex: النص الطويل ما يعلّق)
+  const parts = s.split('```');
+  for (let k = parts.length - (parts.length % 2 ? 2 : 1); k >= 1; k -= 2) { const o = tryOne(parts[k].replace(/^[a-zA-Z]{0,20}(?=[\s{]|$)/, '')); if (o) return o; }
+  // 2) كائن JSON داخل النص: من آخر «{"» لأوله، ونلقى قفلته (مع تجاهل الأقواس داخل النصوص)
+  const starts = []; for (let i = s.indexOf('{'); i >= 0; i = s.indexOf('{', i + 1)) { if (/^\{\s*["“]/.test(s.slice(i, i + 12))) starts.push(i); }
+  const top = (i) => /^\{\s*["“](?:app|kind|store|items|date|total)["”]/.test(s.slice(i, i + 24));
+  const order = starts.filter(top).reverse().concat(starts.filter(i => !top(i)).reverse()).slice(0, 3000);
+  let budget = 4e6;
+  const endOf = (i) => { let depth = 0, inS = false; for (let j = i; j < s.length; j++) { if (--budget < 0) return -1; const c = s[j]; if (inS) { if (c === '\\') j++; else if (c === '"') inS = false; continue; } if (c === '"') inS = true; else if (c === '{') depth++; else if (c === '}' && !--depth) return j; } return -1; };
+  for (const i of order) { if (budget < 0) break; const j = endOf(i); if (j > i) { const o = tryOne(s.slice(i, j + 1)); if (o) return o; } }
+  // 3) من أول { لآخر }
+  const i = s.indexOf('{'), j = s.lastIndexOf('}');
+  if (i >= 0 && j > i) { const o = tryOne(s.slice(i, j + 1)); if (o) return o; }
+  return null;
+}
+// 7 أرقام أو أكثر ورا بعض (رقم عضوية أو ولاء أو باركود) ما تنحفظ حتى لو الذكاء الاصطناعي كتبها. رقم الفاتورة يبقى
+const invMask = (t) => (t ? String(t).replace(/[0-9٠-٩۰-۹](?:[\s-]?[0-9٠-٩۰-۹]){6,}/g, m => (/^\d{4}-\d{1,2}-\d{1,2}$|^\d{1,2}-\d{1,2}-\d{4}$/.test(latinDigits(m)) ? m : '•••')) : t);
+const invNum = (v) => { const n = typeof v === 'number' ? v : typeof v === 'string' ? parseNum(v) : null; return n != null && Number.isFinite(n) ? n : null; };
+function readInvoice(obj) {
+  if (!obj || typeof obj !== 'object') return { error: 'format' };
+  if (obj.kind != null && obj.kind !== 'invoice') return { error: 'format' };
+  if (!Array.isArray(obj.items) || !obj.items.length) return { error: 'items' };
+  if (obj.items.length > INV_MAX_ITEMS) return { error: 'big' };
+  const pos = (v, max, r3) => { const n = invNum(v); return n != null && n > 0 && n <= max ? (r3 ? round3(n) : round2(n)) : null; };
+  const txt = (v, n) => invMask(pnote(v, n)) || null;
+  const out = { store: txt(obj.store, 80), branch: txt(obj.branch, 60), city: validCityRaw(obj.city) || null, date: validPriceDate(obj.date), dateRaw: pclip(obj.date, 30) || null, invoiceNo: pnote(obj.invoiceNo, 40) || null,
+    total: pos(obj.total, 1e6), vat: pos(obj.vat, 1e6), inclVat: obj.pricesIncludeVat === false ? false : obj.pricesIncludeVat === true ? true : null, discount: pos(obj.discount, 1e6),
+    missing: (Array.isArray(obj.missing) ? obj.missing : []).slice(0, 8).map(x => txt(x, 160)).filter(Boolean), items: [], skipped: [] };
+  obj.items.forEach((x, i) => {
+    if (!x || typeof x !== 'object') { out.skipped.push(i + 1); return; }
+    const raw = txt(x.raw, 100), name0 = txt(x.name, 80) || (raw ? raw.slice(0, 80).trim() : null);
+    const weighed = x.weighed === true;
+    let qty = pos(x.qty, 1e4, true); const unitP = pos(x.unitPrice != null ? x.unitPrice : x.price, 1e6);
+    let total = pos(x.total, 1e6);
+    if (!qty) qty = 1;
+    if (!total && unitP) total = round2(qty * unitP);
+    const sz = weighed ? null : normSize(x.size, x.unit);
+    const name = name0 ? (weighed ? kgBase(name0) : baseOfName(name0, sz)) : null;
+    if (!name || !total) { out.skipped.push(i + 1); return; }
+    out.items.push({ raw, name, size: sz, weighed, qty, total, discount: pos(x.discount, 1e6) });
+  });
+  if (!out.items.length) return { error: 'items' };
+  return out;
+}
+// مفتاح الفاتورة (عشان ينبهك لو استوردتها قبل): المحل كما في الفاتورة | التاريخ | الإجمالي | رقمها
+const invoiceKey = (inv) => ['inv', normAr(inv.store || ''), inv.date || inv.dateRaw || '', inv.total != null ? inv.total.toFixed(2) : '', normAr(inv.invoiceNo || '')].join('|');
+function invoiceSeen(store, key) {
+  let at = null;
+  store.all('products').forEach(p => (p.prices || []).forEach(r => { if (r.inv === key && (!at || r.createdAt > at)) at = r.createdAt; }));
+  store.all('transactions').forEach(t => (t.items || []).forEach(i => { if (i && i.inv === key && (!at || String(i.createdAt || '') > at)) at = String(i.createdAt || ''); }));
+  return at;
+}
+// العمليات اللي ممكن تكون هالفاتورة: نفس المبلغ، ونفس اليوم أو اللي بعده، ومن محل، وأغراضها ما غطّت كامل مبلغها
+function invoiceTxCands(store, total, date) {
+  if (!(total > 0) || !date) return [];
+  const days = [date, addDays(date, 1)];
+  return store.all('transactions').filter(t => t.direction === 'out' && canHaveItems(t) && t.transactionType !== 'CashWithdrawal' && t.merchantId && store.get('merchants', t.merchantId)
+    && days.includes(txDate(t)) && (Math.abs(Number(t.grossAmount) - total) < 0.005 || Math.abs(itemCap(store, t) - total) < 0.005) && unitemized(store, t) > 0.004)
+    .sort((a, b) => (txDate(a) + (a.time || '')).localeCompare(txDate(b) + (b.time || '')))
+    .map(t => ({ id: t.id, merchantId: t.merchantId, merchant: merchantName(store.get('merchants', t.merchantId)), date: txDate(t), time: t.time || null, amount: round2(Number(t.grossAmount)), items: itemsOf(t).length, left: unitemized(store, t) }));
+}
+// اسم السطر الكامل: الاسم مع الحجم، والموزون «(بالكيلو)»
+const lineFull = (ln) => (ln.weighed ? kgName(ln.name) : withSize(ln.name, ln.size));
+// المنتج يناسب السطر: نفس الحجم، والموزون موزون (أو نفس الاسم بالضبط)
+function lineOk(p, ln, full) {
+  if (!p) return false;
+  if (ln.weighed) return !!p.perKg || (!p.size && normProduct(p.name) === normProduct(full));
+  return p.size ? sameSize(sizeOf(p.size), ln.size) : (!ln.size || normProduct(p.name) === normProduct(full)) && !p.perKg;
+}
+// السطر: اسمه الكامل لو مسجل (اسم منتج أو اسم ثاني له) = نفس المنتج. وإلا اسمه في الفاتورة لو مسجل لمنتج يناسبه. وإلا القريبين
+// by: name | alias | raw (الاسم الكامل محجوز لمنتج = ما يصير منتج جديد بنفس الاسم)
+function lineMatch(store, ln) {
+  const full = lineFull(ln), idx = productNameIndex(store), k = normProduct(full);
+  let exact = k && idx.has(k) ? store.get('products', idx.get(k)) : null, by = exact ? (exact.normName === k ? 'name' : 'alias') : null;
+  if (!exact && ln.raw && !ln.raw.includes('•')) { const kr = normProduct(ln.raw), r = kr && idx.has(kr) ? store.get('products', idx.get(kr)) : null; if (lineOk(r, ln, full)) { exact = r; by = 'raw'; } }
+  return { full, exact: exact ? exact.id : null, by, near: nearProducts(store, ln.name, ln.size, ln.weighed, exact ? exact.id : null) };
+}
+// وش بيصير لكل سطر محدد عند الحفظ (بدون ما يتغير شي): منتج موجود، أو منتج جديد بالاسم الكامل. نفس النتيجة اللي تشوفها في الشاشة
+function invoiceResolve(store, d) {
+  const idx = productNameIndex(store);
+  return d.lines.map(ln => {
+    if (!ln.on) return null;
+    const full = lineFull(ln), k = normProduct(full);
+    if (ln.pick && ln.pick !== 'new' && store.get('products', ln.pick)) return { id: ln.pick, full, k };
+    if (k && idx.has(k)) return { id: idx.get(k), full, k }; // الاسم مسجل: نفس المنتج (ما ينعمل منتجين بنفس الاسم)
+    return { id: null, full, k };
+  });
+}
+// مسودة الاستيراد (تتعدل في الشاشة قبل الحفظ)
+function invoiceDraft(store, inv) {
+  const key = invoiceKey(inv), em = exactMerchant(store, inv.store);
+  const cityHit = inv.city ? findCity(store, inv.city) : null;
+  const d = { inv, key, seenAt: invoiceSeen(store, key), date: inv.date, cityId: cityHit ? cityHit.id : (em ? shopCityOf(store, em.id) : null), newCity: !cityHit && inv.city ? inv.city : null,
+    shop: em ? { pick: em.id } : { pick: 'new', name: inv.store || '' }, shopNear: em ? [] : (inv.store ? nearMerchants(store, inv.store) : []),
+    disc: { amount: inv.discount || 0, mode: inv.discount ? null : 'none', sel: [] }, tx: undefined, cands: invoiceTxCands(store, inv.total, inv.date),
+    lines: inv.items.map(x => { const m = lineMatch(store, x); return Object.assign({ on: true }, x, { pick: m.exact || 'new', exact: m.exact, exactBy: m.by, near: m.near }); }) };
+  if (!d.cands.length) d.tx = null;
+  return d;
+}
+// تعديل سطر في الشاشة (الاسم أو الحجم أو الموزون): المطابقة تنعاد
+function invoiceRematch(store, d, i) {
+  const ln = d.lines[i]; if (!ln) return;
+  const m = lineMatch(store, ln); ln.exact = m.exact; ln.exactBy = m.by; ln.near = m.near;
+  const taken = m.by === 'name' || m.by === 'alias'; // الاسم مسجل لمنتج: «منتج جديد» بنفس الاسم ما يصير
+  if (!ln.picked || (ln.pick !== 'new' && !store.get('products', ln.pick)) || (ln.pick === 'new' && taken)) { ln.pick = m.exact || 'new'; ln.picked = false; }
+}
+// توزيع مبلغ بالنسبة على أسطر (الخصم أو الضريبة)، بالهللة: الهللات الباقية من التقريب تروح للأسطر اللي كسرها أكبر
+function spread(amount, bases) {
+  const sum = bases.reduce((a, b) => a + b, 0); if (!(amount > 0) || !(sum > 0)) return bases.map(() => 0);
+  const cents = Math.round(amount * 100), raw = bases.map(b => (cents * b) / sum), out = raw.map(Math.floor);
+  let rest = cents - out.reduce((a, b) => a + b, 0);
+  raw.map((r, i) => [r - Math.floor(r), i]).sort((a, b) => b[0] - a[0] || bases[b[1]] - bases[a[1]]).forEach(([, i]) => { if (rest > 0) { out[i]++; rest--; } });
+  return out.map(c => c / 100);
+}
+// الحساب على كل أسطر الفاتورة (حتى اللي شلت علامتها): خصم الفاتورة (على الكل أو على المحددة، بالنسبة)، ثم الضريبة لو الأسعار بدونها.
+// كل سطر ياخذ نصيبه بس، فشيل علامة سطر ما يحمّل الباقين خصمه أو ضريبته. والمطابقة مع الإجمالي على كل الأسطر
+function invoiceCompute(store, d) {
+  const inv = d.inv, all = d.lines, onIdx = all.map((l, i) => (l.on ? i : -1)).filter(i => i >= 0);
+  const bases = all.map(l => (l.total > 0 ? l.total : 0));
+  const sumLines = round2(bases.reduce((a, b) => a + b, 0));
+  const discAmt = d.disc.mode === 'all' || d.disc.mode === 'some' ? round2(d.disc.amount || 0) : 0;
+  const tgt = all.map((l, i) => d.disc.mode === 'all' || (d.disc.mode === 'some' && d.disc.sel.includes(i)));
+  const dParts = spread(discAmt, bases.map((b, i) => (tgt[i] ? b : 0)));
+  const afterDisc = bases.map((b, i) => round2(b - dParts[i]));
+  const sumAfter = round2(afterDisc.reduce((a, b) => a + b, 0));
+  const vat = inv.vat || 0, total = inv.total;
+  let exclVat = inv.inclVat === false && vat > 0, vatGuess = false;
+  // ما هو مكتوب: نضيف الضريبة بس لو المجموع ما يطابق الإجمالي إلا معها
+  if (inv.inclVat == null && vat > 0 && total != null && Math.abs(sumAfter - total) >= 0.005 && Math.abs(sumAfter + vat - total) < 0.011) { exclVat = true; vatGuess = true; }
+  const vParts = exclVat ? spread(vat, afterDisc) : afterDisc.map(() => 0);
+  const lines = all.map(() => null);
+  onIdx.forEach(i => { const l = all[i], t = round2(afterDisc[i] + vParts[i]), unit = round2(t / (l.qty > 0 ? l.qty : 1)), b = l.weighed ? { amt: 1, per: 'kg' } : sizeBase(l.size); lines[i] = { total: t, unit, disc: dParts[i], vat: vParts[i], per: b ? b.per : null, perUnit: b ? round2(unit / b.amt) : null }; });
+  const final = round2(sumAfter + (exclVat ? vat : 0));
+  const diff = total != null ? round2(total - final) : null;
+  const tgtSum = round2(bases.reduce((a, b, i) => a + (tgt[i] ? b : 0), 0));
+  const saveSum = round2(onIdx.reduce((a, i) => a + lines[i].total, 0));
+  const bad = onIdx.filter(i => !(lines[i].total > 0 && lines[i].unit > 0) || !(all[i].qty > 0)); // سطر صار صفر (الخصم أكل مبلغه) أو كميته غلط
+  const out = { lines, sumLines, discAmt, exclVat, vatGuess, vat: exclVat ? vat : 0, final, total, diff, discTooBig: discAmt > tgtSum + 0.004, count: onIdx.length, countAll: all.length, saveSum, bad };
+  // الربط بعملية: السطر اللي منتجه (بعد الحفظ) موجود في العملية من قبل ينترك، والباقي لازم ما يتجاوز مبلغها
+  if (d.tx) {
+    const t = store.get('transactions', d.tx);
+    if (t) {
+      const R = invoiceResolve(store, d), have = new Set(itemsOf(t).map(x => x.productId).filter(Boolean));
+      const skip = [], add = [];
+      onIdx.forEach(i => { const id = R[i] && R[i].id; if (id && have.has(id)) skip.push(i); else add.push(i); });
+      const addSum = round2(add.reduce((a, i) => a + lines[i].total, 0)), cap = itemCap(store, t), cur = itemsTotal(t);
+      Object.assign(out, { txSkip: skip, txAdd: add, txAddSum: addSum, txCap: cap, txCur: cur, txOver: round2(cur + addSum - cap) > 0.004 ? round2(cur + addSum - cap) : 0 });
+    }
+  }
+  return out;
+}
+// الحفظ: أغراض في العملية (لو ربطتها)، وإلا أسعار «من فاتورة» داخل المنتجات. والمحل ياخذ اسمه اللي في الفاتورة (لو مو لمحل ثاني).
+// كل الفحص قبل أي تغيير: لو فيه غلط ما يتغير شي
+function applyInvoice(store, d) {
+  const C = invoiceCompute(store, d), inv = d.inv, now = new Date().toISOString();
+  if (!C.count) return { error: 'empty' };
+  if (C.discTooBig) return { error: 'disc' };
+  const date = validPriceDate(d.date); if (!date) return { error: 'date' };
+  const on = d.lines.map((l, i) => i).filter(i => d.lines[i].on);
+  for (const i of on) if (!String(d.lines[i].name || '').trim()) return { error: 'name', row: i };
+  if (C.bad.length) return { error: 'amount', row: C.bad[0] };
+  let m = null, t = null;
+  if (d.tx) { t = store.get('transactions', d.tx); if (!t) return { error: 'tx' }; if (C.txOver) return { error: 'cap', over: C.txOver }; m = store.get('merchants', t.merchantId); if (!m) return { error: 'tx' }; }
+  else if (d.shop && d.shop.pick && d.shop.pick !== 'new') m = store.get('merchants', d.shop.pick) || null;
+  const shopName = m ? null : (pclip(d.shop && d.shop.name, 60) || pclip(inv.store, 60));
+  if (!m && !shopName) return { error: 'shop' };
+  const R = invoiceResolve(store, d);
+  for (const i of on) if (!R[i].k) return { error: 'name', row: i };
+  // الأغراض (لو مربوطة بعملية): نتأكد إنها تنقرأ قبل ما نغيّر شي
+  const addIdx = t ? C.txAdd : on;
+  if (t) for (const i of addIdx) { const v = readItemInput({ name: R[i].id ? store.get('products', R[i].id).name : R[i].full, qty: d.lines[i].qty, total: C.lines[i].total, unitPrice: C.lines[i].unit }); if (v.error) return { error: 'amount', row: i }; }
+  // ---- من هنا يبدأ التغيير ----
+  let newShop = false, cityId = null;
+  if (!t) {
+    cityId = d.cityId && store.get('cities', d.cityId) ? d.cityId : null;
+    if (!cityId && d.newCity && !d.noCity) { const c = ensureCity(store, d.newCity); if (c) cityId = c.id; }
+  }
+  if (!m) {
+    const had = new Set(store.all('merchants').map(x => x.id));
+    m = priceShop(store, { newShop: shopName }, cityId); if (!m) return { error: 'shop' };
+    newShop = !had.has(m.id);
+  }
+  // اسم المحل في الفاتورة ينحفظ مع محلك (مو محل جاك من ملف صديق، ولا لو هو لمحل ثاني)
+  const al = inv.store ? normMerchant(inv.store) : '';
+  let aliasAdded = false;
+  if (al && !m.importedFrom && !(m.aliases || []).includes(al) && !store.all('merchants').some(x => x.id !== m.id && (x.aliases || []).includes(al))) { m.aliases = (m.aliases || []).concat(al); m.updatedAt = now; store.put('merchants', m); aliasAdded = true; }
+  // المنتجات: الجديدة تنعمل (الأسطر الجديدة بنفس الاسم = منتج واحد)، وبعدين الأسماء الثانية
+  const prod = {}, made = new Map();
+  let newProducts = 0;
+  addIdx.forEach(i => {
+    const r = R[i], ln = d.lines[i];
+    if (r.id) { prod[i] = store.get('products', r.id); return; }
+    if (!made.has(r.k)) { const p = productFor(store, r.full, null, ln.size, { perKg: ln.weighed, isNew: true }); p.fromInvoice = true; store.put('products', p); made.set(r.k, p); newProducts++; }
+    prod[i] = made.get(r.k);
+  });
+  // الأسماء الثانية (لو المنتج يناسب السطر): اسم السطر الكامل، واسمه في الفاتورة (والمنتج اللي له حجم أو موزون ياخذه بس لو فيه رقم، عشان «حليب» لحاله ما يروح لعبوة معينة)
+  const idx = new Map(productNameIndex(store));
+  addIdx.forEach(i => {
+    const p = prod[i], ln = d.lines[i], full = R[i].full;
+    const add = (a) => { const k = normProduct(a); if (!k || k === p.normName) return; const o = idx.get(k); if (o) return; p.aliases = (p.aliases || []).concat(String(a).slice(0, NAME_MAX)); idx.set(k, p.id); store.put('products', p); };
+    if (!lineOk(p, ln, full)) return; // اخترت منتج بحجم ثاني (أو بالحبة لموزون): السعر يروح له هالمرة بس، بدون ربط دايم
+    if (!full.includes('•')) add(full);
+    if (ln.raw && !ln.raw.includes('•') && ((!p.size && !p.perKg) || /[0-9٠-٩۰-۹]/.test(ln.raw))) add(ln.raw);
+  });
+  if (t) {
+    const rows = addIdx.map(i => { const p = prod[i], l = d.lines[i], cat = p.lastCategoryId && store.get('categories', p.lastCategoryId) ? p.lastCategoryId : p.productCategoryId;
+      return { name: p.name, qty: l.qty, total: C.lines[i].total, unitPrice: C.lines[i].unit, productCategoryId: cat || null, catFollow: !cat, discount: !!(l.discount || C.lines[i].disc), inv: d.key, size: p.size || null }; });
+    if (rows.length) { const r = saveItems(store, t.id, rows); if (r.error) return Object.assign({ error: 'items', changed: true }, r); }
+    store.touch();
+    return { linked: t.id, items: rows.length, skipped: C.txSkip.length, newProducts, merchantId: m.id, aliasAdded };
+  }
+  let added = 0;
+  on.forEach(i => {
+    const p = prod[i], l = d.lines[i];
+    p.prices = (p.prices || []).concat({ id: priceId(), name: p.name, merchantId: m.id, cityId, unit: C.lines[i].unit, qty: l.qty, total: C.lines[i].total, date, discount: !!(l.discount || C.lines[i].disc), src: 'invoice', inv: d.key, createdAt: now });
+    p.updatedAt = now; store.put('products', p); added++;
+  });
+  store.touch();
+  return { added, newProducts, merchantId: m.id, newShop, aliasAdded };
+}
+function previewInvoice(store, d) { return invoiceCompute(store, d); }
+// 1.8.8: مفاتيح أسماء المنتجات تنحسب من جديد (النقطة بين رقمين صارت تفرق: «1.5 لتر» غير «15 لتر»). ما ينحذف شي ولا ينتقل غرض:
+// الأغراض والأسعار اللي كانت مربوطة بمنتج لأن مفتاحها القديم نفسه (مثل «زيت 15 لتر» مع «زيت 1.5 لتر») ياخذ المنتج أسماءها أسماء ثانية،
+// فتبقى معه وتقدر تفصلها بـ«افصله»
+function migrate188(store) {
+  const s = store.settings; if (s.migrated188) return { changed: false, renamed: 0, aliased: 0 };
+  let n = 0, aliased = 0;
+  const prods = store.all('products'), byId = new Map(prods.map(p => [p.id, p]));
+  prods.forEach(p => { const k = normProduct(p.name); if (k && p.normName !== k) { p.normName = k; store.put('products', p); n++; } });
+  const idx = new Map(); prods.forEach(p => [p.normName].concat((p.aliases || []).map(normProduct)).forEach(k => { if (k && !idx.has(k)) idx.set(k, p.id); }));
+  const keep = (pid, name) => {
+    const p = byId.get(pid), k = name ? normProduct(name) : ''; if (!p || !k || idx.has(k)) return; // اسمه مسجل (له أو لمنتج ثاني)
+    const o = normProductOld(name); if (normProductOld(p.name) !== o && !(p.aliases || []).some(a => normProductOld(a) === o)) return;
+    p.aliases = (p.aliases || []).concat(String(name).slice(0, NAME_MAX)); idx.set(k, p.id); store.put('products', p); aliased++;
+  };
+  const scan = (items) => (items || []).forEach(i => { if (i && i.productId) keep(i.productId, i.name); });
+  store.all('transactions').forEach(t => scan(t.items));
+  store.all('deletedTxs').forEach(t => scan(t.items));
+  store.all('reviews').forEach(r => { if (r.heldTx) scan(r.heldTx.items); });
+  prods.forEach(p => (p.prices || []).forEach(r => keep(p.id, r.name)));
+  s.migrated188 = true; store.put('settings', s); return { changed: true, renamed: n, aliased };
+}
 function makeBackup(store) {
   const data = JSON.parse(JSON.stringify(store.exportAll()));
   // مفتاح صندوق الرسائل ما يطلع في النسخة الاحتياطية
@@ -7377,7 +7825,7 @@ function faqSearch(list, query, limit) {
 }
 
 const Engine = {
-  version: '1.8.7', round2, parseNum, cellToISO, cleanText, sha256Hex, uid, todayISO, addDays, daysBetween, isoDate,
+  version: '1.8.8', round2, parseNum, cellToISO, cleanText, sha256Hex, uid, todayISO, addDays, daysBetween, isoDate,
   CATEGORY_SEED, buildCategoryRecords, Store, STORE_NAMES, DEFAULT_SETTINGS,
   sanitizeText, sanitizeFilename, fingerprintIban, fingerprintAccountNo, fingerprintNum, matchesOwner, normMerchant,
   detectTemplate, signatureOf, parseAlinmaAccount, interpretAlinmaLine, parseAlinmaCard, cardBalanceCheck,
@@ -7400,6 +7848,7 @@ const Engine = {
   PRODUCT_CATEGORY_SEED, CITY_SEED, TX150, normTx150, migrate150, carry150, migrate152, splitSmsMerges, sameSmsMessage, maskStored181, smsRelation, linkedStmtRow, refTrusted, timeTrusted, resolveTwin, twinValid, twinParts, migrate160, ensureSeedSubs, PC_MAP, itemCatPair, itemNetInfo, unitemizedParts,
   smsWordVersions, wordVersionAt, smsWordsFor, wordsDate, msgWordsDate, cleanSmsWords, previewSmsWords, applySmsWords, correctTxFromMessage, deleteSmsWordsVersion,
   saveItems, merchantName, invoiceAliasOf, shopsForAlias, defaultShopFor, shopChoices, checkShopName, shopNameIdeas, prettyInvoiceName, setShopName, txShopOnce, addShopForInvoice, setShopDefault, chooseShop, shopChoiceTxs, mergeCatConflict, mergeMerchants, refreshShopChoices,
+  normSize, sizeText, sizeBase, sameSize, withSize, baseOfName, kgName, kgBase, productBase, wordsScore, nearProducts, nearMerchants, exactMerchant, invoicePrompt, invoicePromptNames, extractInvoiceJson, readInvoice, invoiceKey, invoiceSeen, invoiceTxCands, lineMatch, invoiceDraft, invoiceRematch, invoiceCompute, previewInvoice, applyInvoice, migrate188, SIZE_U, SIZE_PER, INV_LANG, normProductOld, lineFull, lineOk, invoiceResolve, productNameIndex, round3, NAME_MAX, invMask,
   setupCatalog, exportSetup, readSetupFile, importSetup, previewSetup, normProduct, productFor, resolveMerchant, fakeFormatSample, fakeShapeSample, SETUP_KINDS, priceBook, priceCities, shopCityOf, addManualPrice, updateManualPrice, deleteManualPrice, exportPrices, readPricesFile, importPrices, previewImportPrices, mergeProducts, splitProductAlias, setMerchantDescription, descLimit, markReviewed, unreviewedTxs, autoReviewOk, autoReview, migrate184, needsCity, isIgnored, saveIgnorePeriod, deleteIgnorePeriod, searchTx, searchQuery, undoAutoDuplicate, hideAutoDuplicate, hasSmsSource,
   txDate, inPeriod, inSpendPeriod, cashPartsOf, withdrawalReturns, netWithdrawal, cents, eq2, pad2, daysInMonth, dataRange, normAr,
   isKnownCommitment, isCommitFlagged, catChain, confirmedRecurringFor, CHAIN,
