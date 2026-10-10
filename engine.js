@@ -4521,6 +4521,9 @@ function mergeCity(store, fromId, toId) {
   // 1.7.0: «الفترات» اللي مدينتها المدموجة، وقيمة المدينة القديمة المحفوظة عشان ترجع
   if ((s.ignorePeriods || []).some(p => p.cityId === a.id)) { s.ignorePeriods = s.ignorePeriods.map(p => p.cityId === a.id ? Object.assign({}, p, { cityId: b.id }) : p); store.put('settings', s); }
   store.all('transactions').concat(store.all('deletedTxs')).forEach(t => { if (t.periodCity && t.periodCity.prev && t.periodCity.prev.cityId === a.id) { t.periodCity.prev.cityId = b.id; store.put(store.get('transactions', t.id) ? 'transactions' : 'deletedTxs', t); } });
+  // 1.8.6: الأسعار اللي مو شراء ومدينة المحل تنتقل للمدينة الباقية
+  store.all('products').forEach(p => { let ch = false; (p.prices || []).forEach(x => { if (x.cityId === a.id) { x.cityId = b.id; ch = true; } }); if (ch) store.put('products', p); });
+  store.all('merchants').forEach(m => { if (m.cityId === a.id) { m.cityId = b.id; store.put('merchants', m); } });
   store.remove('cities', a.id); store.touch(); return { txs: n };
 }
 // «استخدام موقعي الحالي»: أقرب مدينة من جدول محلي بدون أي خدمة خارجية. الإحداثيات ما تنحفظ ولا ترسل لأي مكان
@@ -4720,6 +4723,286 @@ function refreshProduct(store, productId) {
   const rs = []; store.all('transactions').forEach(t => itemsOf(t).forEach(i => { if (i.productId === p.id && i.rating) rs.push(i.rating); }));
   p.ratingCount = rs.length; p.avgRating = rs.length ? Math.round(rs.reduce((a, b) => a + b, 0) / rs.length * 10) / 10 : null;
   store.put('products', p);
+}
+/* ---------- 1.8.5: المتاجر والمنتجات: وين أرخص محل لكل منتج ---------- */
+// من الأغراض اللي سجلتها داخل الفواتير: كل العمليات الموجودة (حتى اللي ما تنحسب في الصرف أو على بطاقة شخص ثاني)، والغرض لازم
+// يكون في عملية لها محل (السحب النقدي ما ينحسب: محله الصراف مو المكان اللي اشتريت منه). المحذوفة ما تدخل.
+// السعر = سعر الحبة (unitPrice، أو المجموع ÷ الكمية). mode: 'last' = آخر سعر في كل محل · 'min' = أرخص سعر صار في كل محل.
+// الخصم ينحسب عادي وينعلّم «بخصم». الأرخص = أقل سعر بين المحلات، ولو أكثر من محل بنفس السعر (أقل من هللة فرق) كلهم الأرخص.
+// «كم منتج المحل هو الأرخص فيه» يعد بس المنتجات اللي اشتريتها من محلين أو أكثر. للعرض بس: ما يغيّر أي رقم
+const PRICE_SAME = 0.005;
+// 1.8.6: مصدر كل سعر: purchase = اشتريته (من أغراض فواتيرك) · seen = مو شراء: شفته في المحل · heard = مو شراء: من شخص ·
+// import = مو شراء: شاركه معك شخص ثاني (origSrc = وش كان عنده: اشتراه، شافه، سمعه). الأسعار اللي مو شراء محفوظة داخل المنتج (product.prices)
+const PRICE_SRC = new Set(['seen', 'heard']);
+const SHARE_SRC = new Set(['purchase', 'seen', 'heard']);
+const pclip = (s, n) => sanitizeText(String(s == null ? '' : s).replace(/\s+/g, ' ').trim()).slice(0, n);
+// مدينة المحل الافتراضية: اللي حددتها له، وإلا مدينة آخر عملية منه لها مدينة معتمدة
+function shopCityOf(store, mid) {
+  const m = store.get('merchants', mid); if (!m) return null;
+  if (m.cityId && store.get('cities', m.cityId)) return m.cityId;
+  let best = null;
+  store.all('transactions').forEach(t => { if (t.merchantId === mid && t.cityId && store.get('cities', t.cityId)) { const k = (txDate(t) || '') + ' ' + (t.time || ''); if (!best || k > best.k) best = { k, c: t.cityId }; } });
+  return best ? best.c : null;
+}
+// opts: { cityId: مدينة وحدة بس (اللي بدون مدينة ما تطلع) · purchasesOnly: اللي اشتريتها بس }
+function priceRecords(store, opts) {
+  opts = opts || {};
+  const byP = new Map(), ok = (r) => (!opts.purchasesOnly || r.kind === 'purchase') && (!opts.cityId || r.cityId === opts.cityId);
+  const add = (pid, rec) => { if (!ok(rec)) return; let P = byP.get(pid); if (!P) byP.set(pid, P = new Map()); let M = P.get(rec.merchantId); if (!M) P.set(rec.merchantId, M = []); M.push(rec); };
+  const cityOk = (id) => (id && store.get('cities', id) ? id : null);
+  store.all('transactions').forEach(t => {
+    if (!t.merchantId || t.transactionType === 'CashWithdrawal' || !canHaveItems(t)) return;
+    const m = store.get('merchants', t.merchantId); if (!m) return;
+    const d = txDate(t) || '';
+    itemsOf(t).forEach(i => {
+      if (!i.productId || !store.get('products', i.productId)) return;
+      // سعر الحبة = اللي دفعته فعلًا ÷ الكمية (حبتين بـ 50 = 25)، ولو ما فيه مجموع: سعر الحبة المكتوب
+      const qty = Number(i.qty) > 0 ? Number(i.qty) : 1, unit = Number(i.total) > 0 ? round2(Number(i.total) / qty) : round2(Number(i.unitPrice));
+      if (!(unit > 0)) return;
+      add(i.productId, { kind: 'purchase', txId: t.id, itemId: i.id || null, name: i.name, merchantId: m.id, cityId: cityOk(t.cityId), date: d, time: t.time || null, unit, qty: round2(qty), total: round2(Number(i.total)), discount: !!i.discount, rating: i.rating || null, k: d + ' ' + (t.time || '') + ' ' + (i.createdAt || '') + ' ' + t.id }); // بدون وقت = أول اليوم
+    });
+  });
+  store.all('products').forEach(p => (p.prices || []).forEach(x => {
+    if (!x || !x.merchantId || !store.get('merchants', x.merchantId) || !(Number(x.unit) > 0) || !x.date) return;
+    const kind = x.src === 'import' ? 'import' : PRICE_SRC.has(x.src) ? x.src : null; if (!kind) return;
+    const unit = round2(Number(x.unit));
+    add(p.id, { kind, priceId: x.id, origSrc: x.origSrc || null, from: x.from || null, via: x.via || null, fromId: x.fromId || null, viaId: x.viaId || null, who: x.who || null, note: x.note || null, name: x.name || p.name, merchantId: x.merchantId, cityId: cityOk(x.cityId), date: x.date, time: null, unit, qty: 1, total: unit, discount: !!x.discount, rating: null, k: x.date + '  ' + (x.createdAt || '') + ' ' + x.id });
+  }));
+  return byP;
+}
+const recBrief = (r) => ({ merchantId: r.merchantId, name: r.storeName, unit: r.unit, date: r.date, discount: r.discount, txId: r.txId || null, kind: r.kind, priceId: r.priceId || null, who: r.who || null, from: r.from || null, via: r.via || null, cityId: r.cityId || null });
+function priceBook(store, mode, opts) {
+  mode = mode === 'min' ? 'min' : 'last';
+  const later = (a, b) => (a.k > b.k ? a : b), newer = (a, b) => (a.k < b.k ? 1 : a.k > b.k ? -1 : 0); // نفس المقارنة في كل مكان
+  const pick = (recs) => recs.reduce((b, r) => !b ? r : mode === 'min' ? (r.unit < b.unit - PRICE_SAME ? r : Math.abs(r.unit - b.unit) < PRICE_SAME ? later(r, b) : b) : later(r, b), null);
+  const products = [], agg = new Map();
+  const S = (mid) => { let s = agg.get(mid); if (!s) { const m = store.get('merchants', mid); agg.set(mid, s = { merchantId: mid, name: merchantName(m), description: (m && m.description) || '', cityId: (m && m.cityId) || null, manual: !!(m && m.manual), importedFrom: (m && m.importedFrom) || null, productCount: 0, multiCount: 0, cheapestCount: 0, products: [] }); } return s; };
+  priceRecords(store, opts).forEach((P, pid) => {
+    const p = store.get('products', pid);
+    const stores = Array.from(P.entries()).map(([mid, recs]) => { const nm = merchantName(store.get('merchants', mid)); recs.forEach(r => { r.storeName = nm; }); const h = recs.slice().sort(newer); return Object.assign({}, pick(recs), { name: nm, count: recs.length, history: h }); });
+    const low = Math.min.apply(null, stores.map(s => s.unit)), multi = stores.length > 1;
+    stores.forEach(s => { s.cheapest = s.unit < low + PRICE_SAME; });
+    stores.sort((a, b) => (a.unit - b.unit) || newer(a, b));
+    const best = stores.filter(s => s.cheapest);
+    const all = stores.reduce((a, s) => a.concat(s.history), []).sort(newer);
+    const row = { productId: pid, name: p.name, aliases: (p.aliases || []).slice(), multi, price: round2(low), best: best.map(recBrief), stores, history: all, count: all.length, avgRating: p.avgRating || null };
+    products.push(row);
+    stores.forEach(s => {
+      const a = S(s.merchantId); a.productCount++; if (multi) a.multiCount++; if (multi && s.cheapest) a.cheapestCount++;
+      a.products.push(Object.assign(recBrief(s), { productId: pid, name: p.name, count: s.count, multi, cheapest: multi && s.cheapest, best: row.best }));
+    });
+  });
+  products.sort((a, b) => a.name.localeCompare(b.name, 'ar'));
+  const stores = Array.from(agg.values());
+  stores.forEach(s => s.products.sort((a, b) => (Number(b.cheapest) - Number(a.cheapest)) || a.name.localeCompare(b.name, 'ar')));
+  stores.sort((a, b) => (b.cheapestCount - a.cheapestCount) || (b.multiCount - a.multiCount) || (b.productCount - a.productCount) || a.name.localeCompare(b.name, 'ar'));
+  const top = stores.length && stores[0].cheapestCount > 0 ? stores.filter(s => s.cheapestCount === stores[0].cheapestCount) : [];
+  return { mode, products, stores, top };
+}
+// المدن اللي لها أسعار (لفلتر المدينة)
+function priceCities(store) {
+  const n = new Map(); priceRecords(store).forEach(P => P.forEach(recs => recs.forEach(r => { if (r.cityId) n.set(r.cityId, (n.get(r.cityId) || 0) + 1); })));
+  return Array.from(n.entries()).sort((a, b) => b[1] - a[1]).map(([id]) => id);
+}
+/* ---------- 1.8.6: «+ سعر منتج»: سعر بدون شراء (شفته في المحل، أو من شخص) ---------- */
+// تاريخ صحيح فعلًا (مو 30 فبراير) واليوم أو قبل
+function validPriceDate(s) {
+  const d = String(s || ''); if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return null;
+  const t = new Date(d + 'T00:00:00Z'); return !isNaN(t) && t.toISOString().slice(0, 10) === d && d <= todayISO() ? d : null;
+}
+// الملاحظة واسم الشخص: لو فيها رمز تحقق أو كود أو كلمة مرور (كلمة كاملة، مو جزء من كلمة)، الأرقام اللي من 4 إلى 8 خانات تنخفى،
+// ورقم CVV (3 أو 4 خانات بعد كلمة CVV) ينخفى. الأرقام العادية (مثل «500 جرام» أو «وفر 100») تبقى
+const SECRET_AR = /(?:^|[^\u0621-\u064A])[وفبل]?(?:ال)?(?:(?:رمز|كود|باسورد)(?:ك|ي|نا|كم|ه)?|كلمة\s*(?:ال)?(?:مرور|سر)|الرقم\s*السري)(?![\u0621-\u064A])/;
+const SECRET_EN = /\b(?:code|pin|otp|password|passcode|passwd)\b/i;
+function noSecrets(s) {
+  if (!s) return s;
+  let t = String(s);
+  t = t.replace(/\b(cvv2?|cvc2?)\b([^0-9٠-٩۰-۹]{0,6})([0-9٠-٩۰-۹]{3,4})(?![0-9٠-٩۰-۹])/gi, '$1$2•••');
+  const R = SR(), otp = !!(R && R.classify && R.classify(t).cls === 'otp');
+  if (otp || SECRET_AR.test(t) || SECRET_EN.test(t)) t = t.replace(/(^|[^0-9٠-٩۰-۹.,])([0-9٠-٩۰-۹]{4,8})(?![0-9٠-٩۰-۹]|[.,][0-9٠-٩۰-۹])/g, '$1•••');
+  return t;
+}
+const pnote = (s, n) => noSecrets(pclip(s, n)) || null;
+function readPriceInput(store, d) {
+  const unit = parseNum(d.unit); if (!(unit > 0) || unit > 1e7) return { error: 'unit' };
+  const date = validPriceDate(d.date); if (!date) return { error: 'date' };
+  if (!PRICE_SRC.has(d.src)) return { error: 'src' };
+  return { unit: round2(unit), date, src: d.src, cityId: d.cityId && store.get('cities', d.cityId) ? d.cityId : null, discount: !!d.discount, who: d.src === 'heard' ? pnote(d.who, 60) : null, note: pnote(d.note, 200) };
+}
+// المحل: موجود (merchantId)، أو جديد (newShop = اسمه). اسم جديد يطابق محل من محلاتك (اسمه عندك أو اسم فاتورته، مو المستوردة) = نفس المحل
+function priceShop(store, d, cityId) {
+  if (d.merchantId) return store.get('merchants', d.merchantId) || null;
+  const nm = pclip(d.newShop, 60); if (!nm) return null;
+  const k = normAr(nm), own = store.all('merchants').filter(m => !m.importedFrom);
+  const shown = own.find(m => normAr(merchantName(m)) === k); if (shown) return shown; // الاسم اللي يطلع لك أول
+  const inv = own.filter(m => m.name && normAr(m.name) === k); if (inv.length === 1) return inv[0]; // وإلا اسم الفاتورة لو هو لمحل واحد بس
+  const m = { id: uid(), name: nm, userName: null, seedKey: null, aliases: [], keywords: [], categoryId: null, subcategoryId: null, categorySource: null, suggestedCategoryId: null, suggestedSubcategoryId: null,
+    defaultRecurrenceType: null, defaultNecessityType: null, manual: true, cityId: cityId || null, createdAt: new Date().toISOString() };
+  store.put('merchants', m); return m;
+}
+const priceId = () => 'pp-' + uid().replace(/[^a-z0-9]/gi, '').slice(0, 12);
+function addManualPrice(store, d) {
+  const v = readPriceInput(store, d); if (v.error) return v;
+  const name = pclip(d.product, 80); if (!name) return { error: 'product' };
+  const m = priceShop(store, d, v.cityId); if (!m) return { error: 'shop' };
+  const p = productFor(store, name, null), now = new Date().toISOString();
+  const rec = Object.assign({ id: priceId(), name, merchantId: m.id, createdAt: now }, v);
+  p.prices = (p.prices || []).concat(rec); p.updatedAt = now; store.put('products', p); store.touch();
+  return { product: p, record: rec, merchant: m };
+}
+function updateManualPrice(store, productId, id, d) {
+  const p = store.get('products', productId), x = p && (p.prices || []).find(r => r.id === id); if (!x || !PRICE_SRC.has(x.src)) return { error: 'missing' };
+  const v = readPriceInput(store, d); if (v.error) return v;
+  const m = priceShop(store, d, v.cityId); if (!m) return { error: 'shop' };
+  Object.assign(x, v, { merchantId: m.id, updatedAt: new Date().toISOString() }); store.put('products', p); store.touch();
+  return { product: p, record: x, merchant: m };
+}
+// الحذف يحذف السعر بس. السعر المستورد اللي تحذفه ما يرجع لو استوردت نفس الملف مرة ثانية
+function deleteManualPrice(store, productId, id) {
+  const p = store.get('products', productId), x = p && (p.prices || []).find(r => r.id === id); if (!x) return false;
+  p.prices = p.prices.filter(r => r.id !== id);
+  if (x.src === 'import' && x.key) p.pricesGone = (p.pricesGone || []).filter(k => k !== x.key).concat(x.key).slice(-1000);
+  store.put('products', p); store.touch(); return true;
+}
+/* ---------- 1.8.6: مشاركة الأسعار ---------- */
+// رقم عشوائي للجهاز (مو مربوط بأي شي عنك): يعرف فيه البرنامج أسعارك لو رجعت لك من شخص ثاني، فما تنضاف لك كأنها من غيرك
+const SHARE_ID = /^sh-[a-z0-9]{6,32}$/i;
+const okShareId = (v) => (typeof v === 'string' && SHARE_ID.test(v) ? v : null);
+function shareIdOf(store) {
+  const s = store.settings; if (okShareId(s.shareId)) return s.shareId;
+  s.shareId = 'sh-' + uid().replace(/[^a-z0-9]/gi, '').slice(0, 20); store.put('settings', s); return s.shareId;
+}
+// الملف فيه بس: اسم المنتج، اسم المحل، المدينة، سعر الحبة، التاريخ، الخصم، المصدر، واسمك (وللأسعار اللي جتك من غيرك: اسم صاحبها؛
+// ولو اخترت: اسم الشخص والملاحظة). ما فيه أرقام عمليات ولا حسابات ولا بطاقات ولا مبالغ فواتير ولا كميات. opts: {purchase, seen, heard, imported, names}
+function exportPrices(store, productIds, opts, from) {
+  const want = new Set(productIds || []), o = opts || {}, items = [];
+  const cityN = (id) => { const c = id ? store.get('cities', id) : null; return c ? c.name : null; };
+  priceRecords(store).forEach((P, pid) => {
+    if (!want.has(pid)) return; const p = store.get('products', pid);
+    P.forEach((recs, mid) => { const m = store.get('merchants', mid); recs.forEach(r => {
+      if (r.kind === 'purchase' ? !o.purchase : r.kind === 'seen' ? !o.seen : r.kind === 'heard' ? !o.heard : !o.imported) return;
+      const own = (m && (m.importedFrom && m.importName ? m.importName : merchantName(m))) || '';
+      const it = { product: pclip(p.name, 80), store: pclip(own, 60), city: cityN(r.cityId), unit: r.unit, date: r.date, discount: !!r.discount,
+        src: r.kind === 'import' ? (SHARE_SRC.has(r.origSrc) ? r.origSrc : 'seen') : r.kind };
+      if (r.kind === 'import') { it.by = pclip(r.via || r.from, 40) || null; const bid = okShareId(r.viaId) || okShareId(r.fromId); if (bid) it.byId = bid; } // صاحب السعر الأصلي (المستلم يشوف «من فلان عن طريقك»)
+      if (o.names) { if (r.who) it.who = pclip(r.who, 60); if (r.note) it.note = pclip(r.note, 200); }
+      if (it.product && it.store) items.push(it);
+    }); });
+  });
+  items.sort((a, b) => a.product.localeCompare(b.product, 'ar') || (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+  return { app: 'finance-manager', kind: 'prices', v: 1, from: pclip(from, 40) || null, fromId: items.length ? shareIdOf(store) : (okShareId(store.settings.shareId) || null), exportedAt: new Date().toISOString(), items };
+}
+// قراءة ملف أسعار من شخص ثاني: بيانات بس، كل خانة تنفحص وتنقص للطول المسموح، واللي ما تنقرأ تنشال (والتاريخ لازم اليوم أو قبل).
+// store (اختياري): للعرض قبل الاستيراد: كم سعر أصله منك، وكم مدينة جديدة
+const PRICE_FILE_MAX = 20000, PRICE_CITY_NEW_MAX = 50;
+// مفتاح السعر المستورد (للتكرار والمحذوف): المنتج | صاحبه الأصلي | المحل | التاريخ | السعر | المصدر | الخصم | الشخص | المدينة
+const priceKey = (pk, owner, sk, x) => [pk, owner, sk, x.date, x.unit, x.src, x.discount ? 1 : 0, normAr(x.who || ''), x.city ? cityKey(x.city) : ''].map(v => String(v).replace(/\|/g, '')).join('|');
+function readPricesFile(obj, store) {
+  if (!obj || typeof obj !== 'object' || obj.app !== 'finance-manager' || obj.kind !== 'prices' || !Array.isArray(obj.items)) return { error: 'format' };
+  if (obj.items.length > PRICE_FILE_MAX) return { error: 'big' };
+  const from = pclip(obj.from, 40) || 'شخص', fromId = okShareId(obj.fromId), items = [];
+  obj.items.forEach(x => {
+    if (!x || typeof x !== 'object') return;
+    const product = pclip(x.product, 80), shop = pclip(x.store, 60), unit = Number(x.unit), date = validPriceDate(x.date);
+    if (!product || !shop || !(unit > 0) || unit > 1e7 || !date) return;
+    const city = validCityRaw(x.city); // اسم ما يطلع منه اسم مدينة (مثل «City» لحاله) = بدون مدينة
+    items.push({ product, store: shop, city: city && cityKey(city) ? city : null, unit: round2(unit), date, discount: x.discount === true, src: SHARE_SRC.has(x.src) ? x.src : 'seen',
+      by: pclip(x.by, 40) || null, byId: okShareId(x.byId), who: pnote(x.who, 60), note: pnote(x.note, 200) });
+  });
+  const myId = store ? okShareId(store.settings.shareId) : null, mine = (i) => !!myId && (i.byId || fromId) === myId;
+  const rest = items.filter(i => !mine(i)), out = { from, fromId, items, own: items.length - rest.length, skipped: obj.items.length - items.length,
+    products: new Set(rest.map(i => normProduct(i.product))).size, stores: new Set(rest.map(i => normAr(i.store))).size, newCities: 0 };
+  if (store) { const seen = new Set(); rest.forEach(i => { const k = i.city ? cityKey(i.city) : ''; if (!k || seen.has(k)) return; seen.add(k); if (!findCity(store, i.city)) out.newCities++; }); }
+  return out;
+}
+// الاستيراد: كل محل من الملف = محل جديد عندك «الاسم (من فلان)» (ونفس المحل من نفس الشخص يرجع له لو استوردت مرة ثانية، حتى لو دمجته مع محلك).
+// المنتج: نفس منتجك لو نفس الاسم، وإلا منتج جديد. نفس السعر لو انستورد مرتين ما يتكرر، واللي حذفته ما يرجع، واللي أصله منك ما ينضاف
+function importPrices(store, obj) {
+  const R = readPricesFile(obj, store); if (R.error) return R;
+  const now = new Date().toISOString(), myId = okShareId(store.settings.shareId), shops = new Map();
+  // فهرس المنتجات (الاسم والأسماء الثانية، بنفس ترتيب البحث العادي) مرة وحدة بدل البحث لكل سطر
+  const pIdx = new Map(); store.all('products').forEach(p => [p.normName].concat((p.aliases || []).map(normProduct)).forEach(k => { if (k && !pIdx.has(k)) pIdx.set(k, p.id); }));
+  const keysOf = new Map(), keySet = (p) => { let s = keysOf.get(p.id); if (!s) { s = new Set((p.prices || []).map(r => r.key).filter(Boolean)); (p.pricesGone || []).forEach(k => s.add('gone:' + k)); keysOf.set(p.id, s); } return s; };
+  const cities = new Map(); let newCities = 0, noCity = 0;
+  const cityOf = (name) => {
+    const k = cityKey(name); if (cities.has(k)) return cities.get(k);
+    let c = findCity(store, name);
+    if (!c && newCities < PRICE_CITY_NEW_MAX) { c = ensureCity(store, name); if (c) newCities++; }
+    const id = c ? c.id : null; cities.set(k, id); return id;
+  };
+  let added = 0, dup = 0, gone = 0, own = 0, newShops = 0, newProducts = 0; const prods = new Set(), shopIds = new Set();
+  R.items.forEach(x => {
+    if (myId && (x.byId || R.fromId) === myId) { own++; return; } // سعرك رجع لك عن طريق شخص ثاني
+    const sk = normAr(x.store), pk = normProduct(x.product);
+    const key = priceKey(pk, x.byId || R.fromId || 'n:' + normAr(x.by || R.from), sk, x);
+    const hadId = pIdx.get(pk), had = hadId ? store.get('products', hadId) : null;
+    if (had) { const ks = keySet(had); if (ks.has(key)) { dup++; return; } if (ks.has('gone:' + key)) { gone++; return; } } // موجود قبل، أو حذفته: ما ينضاف ولا ينشأ له محل
+    const cityId = x.city ? cityOf(x.city) : null; if (x.city && !cityId) noCity++;
+    const ik = R.from + '|' + sk;
+    let m = shops.get(sk) || store.all('merchants').find(y => (y.importKeys || (y.importedFrom ? [y.importedFrom + '|' + normAr(y.importName || '')] : [])).includes(ik));
+    if (!m) {
+      m = { id: uid(), name: x.store, userName: `${x.store} (من ${R.from})`, seedKey: null, aliases: [], keywords: [], categoryId: null, subcategoryId: null, categorySource: null, suggestedCategoryId: null, suggestedSubcategoryId: null,
+        defaultRecurrenceType: null, defaultNecessityType: null, importedFrom: R.from, importName: x.store, importKeys: [ik], cityId, createdAt: now };
+      store.put('merchants', m); newShops++;
+    }
+    shops.set(sk, m);
+    let p = had; if (!p) { p = productFor(store, x.product, null); pIdx.set(pk, p.id); newProducts++; }
+    p.prices = (p.prices || []).concat({ id: priceId(), name: x.product, merchantId: m.id, cityId, unit: x.unit, date: x.date, discount: x.discount, src: 'import', origSrc: x.src, from: R.from, via: x.by, fromId: R.fromId, viaId: x.byId, who: x.who, note: x.note, key, createdAt: now });
+    keySet(p).add(key); store.put('products', p); added++; prods.add(p.id); shopIds.add(m.id);
+  });
+  if (added || newShops || newProducts) store.touch();
+  return { from: R.from, added, dup, gone, own, skipped: R.skipped, newShops, newProducts, newCities, noCity, products: prods.size, stores: shopIds.size };
+}
+// العرض قبل الاستيراد = نفس الاستيراد بالضبط على نسخة (ما يتغير شي عندك): كم سعر جديد، وكم موجود قبل، وكم حذفته، وكم أصله منك، وكم مدينة ومحل جديد
+function previewImportPrices(store, obj) {
+  const R = readPricesFile(obj); if (R.error) return R;
+  return importPrices(new Store(JSON.parse(JSON.stringify(store.exportAll()))), obj);
+}
+// دمج منتجين (نفس المنتج مكتوب باسمين): أغراض المدموج وأسعاره (1.8.6) تصير للباقي، واسمه ينضاف لأسماء الباقي عشان أي غرض جاي بنفس الاسم يروح له
+function mergeProducts(store, keepId, dropId) {
+  const keep = store.get('products', keepId), drop = store.get('products', dropId);
+  if (!keep || !drop || keepId === dropId) return null;
+  let moved = 0, live = 0;
+  const fixItems = (items) => { let ch = false; (items || []).forEach(i => { if (i && i.productId === dropId) { i.productId = keepId; ch = true; moved++; } }); return ch; };
+  store.all('transactions').forEach(t => { const n0 = moved; if (fixItems(t.items)) { live += moved - n0; store.put('transactions', t); } });
+  store.all('deletedTxs').forEach(t => { if (fixItems(t.items)) store.put('deletedTxs', t); });
+  store.all('reviews').forEach(r => { if (r.heldTx && fixItems(r.heldTx.items)) store.put('reviews', r); });
+  const names = [drop.name].concat(drop.aliases || [], keep.aliases || []).filter(a => a && normProduct(a) !== keep.normName);
+  keep.aliases = Array.from(new Map(names.map(a => [normProduct(a), a])).values());
+  if ((drop.prices || []).length) { keep.prices = (keep.prices || []).concat(drop.prices); live += drop.prices.length; }
+  if ((drop.pricesGone || []).length) keep.pricesGone = (keep.pricesGone || []).concat(drop.pricesGone).slice(-1000);
+  if (!keep.productCategoryId && drop.productCategoryId) keep.productCategoryId = drop.productCategoryId;
+  keep.updatedAt = new Date().toISOString(); store.put('products', keep); store.remove('products', dropId);
+  refreshProduct(store, keepId); store.touch();
+  return { moved, live, keep: store.get('products', keepId) };
+}
+// فصل اسم ثاني من منتج (دمج بالغلط): الأغراض والأسعار اللي اسمها نفس هالاسم ترجع منتج لحالها، والأغراض الجاية بهالاسم تروح له
+function splitProductAlias(store, productId, alias) {
+  const p = store.get('products', productId), k = normProduct(alias); if (!p || !k) return null;
+  if (!(p.aliases || []).some(a => normProduct(a) === k)) return null;
+  p.aliases = (p.aliases || []).filter(a => normProduct(a) !== k); p.updatedAt = new Date().toISOString(); store.put('products', p);
+  const np = productFor(store, String(alias).trim(), p.productCategoryId || null);
+  let moved = 0, live = 0;
+  const fixItems = (items) => { let ch = false; (items || []).forEach(i => { if (i && i.productId === p.id && normProduct(i.name) === k) { i.productId = np.id; ch = true; moved++; } }); return ch; };
+  store.all('transactions').forEach(t => { const n0 = moved; if (fixItems(t.items)) { live += moved - n0; store.put('transactions', t); } });
+  store.all('deletedTxs').forEach(t => { if (fixItems(t.items)) store.put('deletedTxs', t); });
+  store.all('reviews').forEach(r => { if (r.heldTx && fixItems(r.heldTx.items)) store.put('reviews', r); });
+  const p2 = store.get('products', p.id), back = (p2.prices || []).filter(r => normProduct(r.name) === k);
+  if (back.length) { p2.prices = p2.prices.filter(r => normProduct(r.name) !== k); store.put('products', p2); const n2 = store.get('products', np.id); n2.prices = (n2.prices || []).concat(back); store.put('products', n2); live += back.length; }
+  const goneBack = (p2.pricesGone || []).filter(g => String(g).split('|')[0] === k);
+  if (goneBack.length) { p2.pricesGone = p2.pricesGone.filter(g => String(g).split('|')[0] !== k); store.put('products', p2); const n3 = store.get('products', np.id); n3.pricesGone = (n3.pricesGone || []).concat(goneBack).slice(-1000); store.put('products', n3); }
+  refreshProduct(store, p.id); refreshProduct(store, np.id); store.touch();
+  return { moved, live, product: store.get('products', np.id) };
+}
+// وصف المحل (تكتبه أنت): نص حر لين 1000 حرف (الوصف اللي صار أطول من دمج محلات ما ينقص)
+const DESC_MAX = 1000;
+const descLimit = (m) => Math.max(DESC_MAX, String((m && m.description) || '').length);
+function setMerchantDescription(store, merchantId, text) {
+  const m = store.get('merchants', merchantId); if (!m) return null;
+  const v = String(text || '').replace(/\r/g, '').replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim().slice(0, descLimit(m));
+  if (v === (m.description || '')) return m; // ما تغيّر شي
+  if (v) m.description = v; else delete m.description;
+  m.updatedAt = new Date().toISOString(); store.put('merchants', m); store.touch(); return m;
 }
 function refreshProductsOf(store, t) { new Set((t && t.items || []).map(i => i.productId).filter(Boolean)).forEach(id => refreshProduct(store, id)); }
 function productFor(store, name, catId) {
@@ -5690,8 +5973,13 @@ function mergeMerchants(store, keepId, dropId, o) {
   if (o.catFrom === 'drop' || (!keep.categoryId && drop.categoryId)) { keep.categoryId = drop.categoryId || null; keep.subcategoryId = drop.subcategoryId || null; keep.categorySource = drop.categorySource || null; }
   if (!keep.suggestedCategoryId && drop.suggestedCategoryId) { keep.suggestedCategoryId = drop.suggestedCategoryId; keep.suggestedSubcategoryId = drop.suggestedSubcategoryId || null; }
   ['defaultRecurrenceType', 'defaultNecessityType', 'isCommitment', 'savingsEligible', 'notes'].forEach(k => { if (keep[k] == null && drop[k] != null) keep[k] = drop[k]; });
+  if (drop.description && drop.description !== keep.description) keep.description = keep.description ? keep.description + '\n' + drop.description : drop.description; // 1.8.5: وصف المحلين يبقى كامل
+  // 1.8.6: محل من أسعار شخص ثاني ينضم لمحل من محلاتك (بأي اتجاه): يبقى محلك باسمك، واسم «(من فلان)» ما ينقل له
+  if (keep.importedFrom && !drop.importedFrom) { keep.name = drop.name; keep.userName = drop.userName || null; delete keep.importedFrom; delete keep.importName; }
+  if ((drop.importKeys || []).length) keep.importKeys = uni(keep.importKeys, drop.importKeys); // الاستيراد الجاي من نفس الشخص لنفس المحل يروح للباقي
+  if (drop.manual) keep.manual = true;
   if (o.name !== undefined) keep.userName = cleanText(o.name || '').slice(0, 60) || null;
-  else if (!keep.userName && drop.userName) keep.userName = drop.userName;
+  else if (!keep.userName && drop.userName && !drop.importedFrom) keep.userName = drop.userName;
   keep.updatedAt = new Date().toISOString(); store.put('merchants', keep);
   const catChanged = oldCat[0] !== (keep.categoryId || null) || oldCat[1] !== (keep.subcategoryId || null);
   const cat = keep.categoryId || keep.suggestedCategoryId;
@@ -5735,6 +6023,9 @@ function mergeMerchants(store, keepId, dropId, o) {
   // 1.8.1: إعداد المحل الباقي يمشي على الجاي. عمليات المحل المدموج السابقة ما ينطبق عليها التجاهل بأثر رجعي (وما تنشال مدنها) إلا لو
   // وافقت صراحة (o.cityRetro = true، والواجهة تعرض العدد والمدن قبل). بدون موافقة تتعلّم shopCityKeep فتبقى مثل ما هي
   if (keep.cityIgnore && !o.cityRetro) movedIds.forEach(([tb, id]) => { const t = store.get(tb, id); if (!t || (t.shopCity && t.shopCity.mid === keep.id) || !shopCityTx(t)) return; t.shopCityKeep = keep.id; store.put(tb, t); });
+  // 1.8.6: الأسعار اللي مو شراء (المسجلة والمستوردة) على المحل المدموج تنتقل للباقي، ومدينته لو الباقي ما له
+  store.all('products').forEach(p => { let ch = false; (p.prices || []).forEach(x => { if (x.merchantId === drop.id) { x.merchantId = keep.id; ch = true; } }); if (ch) store.put('products', p); });
+  if (!keep.cityId && drop.cityId) { keep.cityId = drop.cityId; store.put('merchants', keep); }
   store.remove('merchants', drop.id);
   refreshShopChoices(store); if (keep.cityIgnore) sweepShopCity(store); recheckMergeDiffs(store); store.touch();
   return { merchant: keep, moved };
@@ -5756,6 +6047,42 @@ function markReviewed(store, ids) {
   if (n) store.touch(); return n;
 }
 function unreviewedTxs(store) { return store.all('transactions').filter(t => t.needsReview); }
+/* ---------- 1.8.4: اعتماد العمليات الجديدة تلقائيًا ---------- */
+// عملية رسالة جديدة تنعتمد (كأنك راجعتها) بدون ما تطلع لك إذا: تصنيفها جا من تصنيف حددته أنت قبل لمحلها أو للمستفيد
+// (مو قاعدة، ولا اقتراح المتاجر المعروفة، ولا تصنيف البطاقة)، ولها مدينة معتمدة، وما فيها شي ينتظر قرارك
+// (أي محل؟، بطاقة ما حددت لمن، سداد بطاقة ينتظر، نوع غير معروف، تحويل لشخص ما صنفته، رسوم مقترحة، تكرار محتمل…)
+const AUTO_REVIEW_TYPES = new Set(['Payment', 'PersonTransfer']);
+function autoReviewRefs(store) { // عمليات لها مراجعة مفتوحة (مثل «تكرار محتمل»): تنتظر قرارك
+  const s = new Set();
+  store.all('reviews').forEach(r => { if (r.status !== 'open') return; [r.txId, r.otherTxId, r.existingId].concat(r.candidates || []).forEach(id => { if (id) s.add(id); }); });
+  return s;
+}
+function autoReviewOk(store, t, refs) {
+  if (!t || !t.needsReview || t.reviewedAt) return false;
+  if (!AUTO_REVIEW_TYPES.has(t.transactionType) || t.direction !== 'out' || t.transferSubtype === 'round_up') return false;
+  if (!t.cityId || !store.get('cities', t.cityId)) return false; // مدينة معتمدة دايم (الأونلاين واللي بدون موقع تطلع لك)
+  if (!t.categoryId || t.classificationStatus === 'temporary' || t.shopChoicePending || t.excludedByUser) return false;
+  if (t.categorySource === 'merchant') { const m = t.merchantId ? store.get('merchants', t.merchantId) : null; if (!m || !m.categoryId || m.categoryId !== t.categoryId) return false; }
+  else if (t.categorySource === 'beneficiary') { const b = t.beneficiaryId ? store.get('beneficiaries', t.beneficiaryId) : null; if (!b || !b.categoryId || b.categoryId !== t.categoryId) return false; }
+  else return false;
+  const ins = t.instrumentId ? store.get('instruments', t.instrumentId) : null; if (ins && ins.instrumentOwner === 'unknown') return false;
+  if (t.cardPaySrc === 'ask' && cardPayAsking(store, t)) return false;
+  if (feeSuggestion(store, t) || spendParts(store, t).some(p => p.cat === '__none')) return false;
+  if ((refs || autoReviewRefs(store)).has(t.id)) return false;
+  return true;
+}
+// يرجّع أرقام العمليات اللي انعتمدت
+function autoReview(store, ids) {
+  const now = new Date().toISOString(), done = [], refs = autoReviewRefs(store);
+  Array.from(new Set(ids || [])).forEach(id => { const t = store.get('transactions', id); if (!autoReviewOk(store, t, refs)) return; t.needsReview = false; t.reviewedAt = now; t.autoReviewed = true; store.put('transactions', t); done.push(t.id); });
+  if (done.length) store.touch(); return done;
+}
+// 1.8.4: مرة وحدة مع التحديث: العمليات اللي تنتظر مراجعتك وتنطبق عليها الشروط تنعتمد. هنا العلامة بس،
+// والاعتماد نفسه (autoReview على اللي ما راجعتها) بعد بداية سجل التعديلات عشان يكون خطوة تقدر تتراجع عنها
+function migrate184(store) {
+  const s = store.settings; if (s.migrated184) return { changed: false };
+  s.migrated184 = true; store.put('settings', s); return { changed: true };
+}
 
 /* ---------- 1.6.0: علامة «بدون مدينة» وفترات التجاهل ---------- */
 // العلامة: المشتريات والسحب والمصروف النقدي اللي ما لها مدينة معتمدة (ما لها، أو اقتراح ما اعتمدته)، إلا «اتركها غير محددة»
@@ -6606,7 +6933,7 @@ function faqSearch(list, query, limit) {
 }
 
 const Engine = {
-  version: '1.8.3', round2, parseNum, cellToISO, cleanText, sha256Hex, uid, todayISO, addDays, daysBetween, isoDate,
+  version: '1.8.6', round2, parseNum, cellToISO, cleanText, sha256Hex, uid, todayISO, addDays, daysBetween, isoDate,
   CATEGORY_SEED, buildCategoryRecords, Store, STORE_NAMES, DEFAULT_SETTINGS,
   sanitizeText, sanitizeFilename, fingerprintIban, fingerprintAccountNo, fingerprintNum, matchesOwner, normMerchant,
   detectTemplate, signatureOf, parseAlinmaAccount, interpretAlinmaLine, parseAlinmaCard, cardBalanceCheck,
@@ -6629,7 +6956,7 @@ const Engine = {
   PRODUCT_CATEGORY_SEED, CITY_SEED, TX150, normTx150, migrate150, carry150, migrate152, splitSmsMerges, sameSmsMessage, maskStored181, smsRelation, linkedStmtRow, refTrusted, timeTrusted, resolveTwin, twinValid, twinParts, migrate160, ensureSeedSubs, PC_MAP, itemCatPair, itemNetInfo, unitemizedParts,
   smsWordVersions, wordVersionAt, smsWordsFor, wordsDate, msgWordsDate, cleanSmsWords, previewSmsWords, applySmsWords, correctTxFromMessage, deleteSmsWordsVersion,
   saveItems, merchantName, invoiceAliasOf, shopsForAlias, defaultShopFor, shopChoices, checkShopName, shopNameIdeas, prettyInvoiceName, setShopName, txShopOnce, addShopForInvoice, setShopDefault, chooseShop, shopChoiceTxs, mergeCatConflict, mergeMerchants, refreshShopChoices,
-  markReviewed, unreviewedTxs, needsCity, isIgnored, saveIgnorePeriod, deleteIgnorePeriod, searchTx, searchQuery, undoAutoDuplicate, hideAutoDuplicate, hasSmsSource,
+  priceBook, priceCities, shopCityOf, addManualPrice, updateManualPrice, deleteManualPrice, exportPrices, readPricesFile, importPrices, previewImportPrices, mergeProducts, splitProductAlias, setMerchantDescription, descLimit, markReviewed, unreviewedTxs, autoReviewOk, autoReview, migrate184, needsCity, isIgnored, saveIgnorePeriod, deleteIgnorePeriod, searchTx, searchQuery, undoAutoDuplicate, hideAutoDuplicate, hasSmsSource,
   txDate, inPeriod, inSpendPeriod, cashPartsOf, withdrawalReturns, netWithdrawal, cents, eq2, pad2, daysInMonth, dataRange, normAr,
   isKnownCommitment, isCommitFlagged, catChain, confirmedRecurringFor, CHAIN,
   // 1.7.0
